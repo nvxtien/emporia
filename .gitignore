@@ -1,0 +1,11 @@
+target/
+.idea/
+.vscode/
+*.iml
+.DS_Store
+.jqwik-database
+market-data-service/bin/
+order-command-service/bin/
+order-management-service/bin/
+static-data-service/bin/
+trading-contracts/bin/

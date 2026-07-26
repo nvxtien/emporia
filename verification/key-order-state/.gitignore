@@ -1,0 +1,4 @@
+*.auto.*.proof
+*.auto.proof
+*.csv
+target/

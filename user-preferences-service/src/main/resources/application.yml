@@ -1,0 +1,36 @@
+server:
+  port: ${SERVER_PORT:8083}
+  shutdown: graceful
+spring:
+  application.name: user-preferences-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/english}
+    username: ${DB_USERNAME:tiennv}
+    password: ${DB_PASSWORD:admin123}
+    hikari:
+      pool-name: ${DB_POOL_NAME:user-preferences-pool}
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:10}
+      minimum-idle: ${DB_POOL_MIN_IDLE:2}
+      connection-timeout: ${DB_POOL_CONNECTION_TIMEOUT_MS:30000}
+      validation-timeout: ${DB_POOL_VALIDATION_TIMEOUT_MS:5000}
+      idle-timeout: ${DB_POOL_IDLE_TIMEOUT_MS:600000}
+      max-lifetime: ${DB_POOL_MAX_LIFETIME_MS:1800000}
+      keepalive-time: ${DB_POOL_KEEPALIVE_TIME_MS:120000}
+      leak-detection-threshold: ${DB_POOL_LEAK_DETECTION_THRESHOLD_MS:0}
+  flyway:
+    default-schema: ${DB_SCHEMA:emporia_client_config}
+    schemas: ${DB_SCHEMA:emporia_client_config}
+    create-schemas: true
+  jpa:
+    open-in-view: false
+    hibernate.ddl-auto: validate
+    properties.hibernate.default_schema: ${DB_SCHEMA:emporia_client_config}
+  security.oauth2.resourceserver.jwt:
+    issuer-uri: ${EMPORIA_AUTH_ISSUER:http://localhost:3001}
+    jwk-set-uri: ${EMPORIA_AUTH_JWK_SET_URI:http://localhost:9000/oauth2/jwks}
+emporia.static-data.url: ${EMPORIA_STATIC_DATA_URL:http://localhost:8081}
+management.endpoints.web.exposure.include: health,info
+
+emporia.user-preferences:
+  legacy-import-enabled: ${LEGACY_CLIENT_CONFIG_IMPORT_ENABLED:true}
+  legacy-schema: ${LEGACY_CLIENT_CONFIG_SCHEMA:clientconfig}

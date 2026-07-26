@@ -1,0 +1,42 @@
+server:
+  port: ${SERVER_PORT:8087}
+  shutdown: graceful
+
+spring:
+  application.name: execution-service
+  kafka:
+    bootstrap-servers: ${KAFKA_BROKERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+    consumer:
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
+      properties.spring.json.trusted.packages: com.emporia.events
+    listener.ack-mode: record
+
+emporia:
+  kafka:
+    commands-topic: ${KAFKA_ORDER_COMMANDS_TOPIC:emporia.order.commands.v1}
+    orders-topic: ${KAFKA_ORDERS_TOPIC:emporia.orders.v1}
+    executions-topic: ${KAFKA_EXECUTION_COMMANDS_TOPIC:emporia.execution.commands.v1}
+  services:
+    static-data-url: ${EMPORIA_STATIC_DATA_URL:http://localhost:8081}
+    market-data-url: ${EMPORIA_MARKET_DATA_URL:http://localhost:8084}
+    order-management-url: ${EMPORIA_ORDER_MANAGEMENT_URL:http://localhost:8086}
+  auth:
+    token-url: ${EMPORIA_AUTH_TOKEN_URL:http://localhost:9000/oauth2/token}
+    client-id: ${EXECUTION_OAUTH_CLIENT_ID:emporia-execution}
+    client-secret: ${EXECUTION_OAUTH_CLIENT_SECRET:emporia-execution-local-secret}
+  execution:
+    venue-mode: ${EXECUTION_VENUE_MODE:simulated}
+    fix-venues: ${FIX_EXECUTION_VENUES:}
+    fill-delay: ${EXECUTION_FILL_DELAY:100ms}
+    strategy-time-compression: ${STRATEGY_TIME_COMPRESSION:60}
+    vwap-default-buckets: ${VWAP_DEFAULT_BUCKETS:10}
+
+management:
+  endpoints.web.exposure.include: health,info,prometheus
+  endpoint.health.probes.enabled: true

@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package model;
+
+import "modelcommon.proto";
+
+option java_multiple_files = true;
+option java_outer_classname = "ClobQuoteProto";
+option java_package = "com.emporia.marketdata.grpc.model";
+
+message ClobLine {
+  Decimal64 size = 1;
+  Decimal64 price = 2;
+  string entryId = 3;
+  int32 listingId = 4;
+}
+
+message ClobQuote {
+  int32 listingId = 1;
+  repeated ClobLine bids = 2;
+  repeated ClobLine offers = 3;
+  bool streamInterrupted = 4;
+  string streamStatusMsg = 5;
+  Decimal64 lastPrice = 6;
+  Decimal64 lastQuantity = 7;
+  Decimal64 tradedVolume = 8;
+}
