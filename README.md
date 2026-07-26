@@ -108,8 +108,10 @@ of commands for one key.
 - On restart, execution rebuilds direct-order and SMART/VWAP runtimes from the
   order-management PostgreSQL projection rather than replaying creates.
 
-See [execution-service/README.md](execution-service/README.md) for configuration
-and protocol details.
+See the [DMA, SMART, and VWAP execution guide](docs/execution/README.md) for
+strategy behavior, order examples, cancellation, recovery, and current
+boundaries. Service-level configuration is collected in
+[execution-service/README.md](execution-service/README.md).
 
 ## Local prerequisites
 

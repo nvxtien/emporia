@@ -4,6 +4,9 @@ The execution service owns DMA, SMART, VWAP, and execution-venue integration.
 It is an internal Kafka consumer/producer on port `8087`; browsers do not call
 it.
 
+See the [DMA, SMART, and VWAP execution guide](../docs/execution/README.md) for
+end-to-end flows, API examples, strategy behavior, cancellation, and recovery.
+
 ## Routes
 
 The service consumes immutable order events from `emporia.orders.v1`.
