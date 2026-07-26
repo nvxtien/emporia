@@ -8,7 +8,7 @@ routing isolated behind its own service.
 ## Architecture
 
 ```mermaid
-flowchart LR
+flowchart TD
     Browser[React :3001] -->|OIDC + PKCE / Bearer token| Gateway[Spring Cloud Gateway :8082]
     Gateway --> Auth[Authorisation :9000]
     Gateway --> Static[Static data :8081]
