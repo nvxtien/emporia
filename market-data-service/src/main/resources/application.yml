@@ -1,0 +1,36 @@
+server:
+  port: ${SERVER_PORT:8084}
+  shutdown: graceful
+spring:
+  application.name: market-data-service
+  security.oauth2.resourceserver.jwt:
+    issuer-uri: ${EMPORIA_AUTH_ISSUER:http://localhost:3001}
+    jwk-set-uri: ${EMPORIA_AUTH_JWK_SET_URI:http://localhost:9000/oauth2/jwks}
+emporia:
+  static-data.url: ${EMPORIA_STATIC_DATA_URL:http://localhost:8081}
+  market-data:
+    provider: ${MARKET_DATA_PROVIDER:simulated}
+    stream:
+      publish-interval: ${MARKET_DATA_PUBLISH_INTERVAL:250ms}
+      heartbeat-interval: ${MARKET_DATA_HEARTBEAT_INTERVAL:5s}
+    grpc:
+      enabled: ${MARKET_DATA_GRPC_ENABLED:true}
+      port: ${MARKET_DATA_GRPC_PORT:50551}
+    fix-simulator:
+      client-id: ${FIX_SIMULATOR_CLIENT_ID:emporia-market-data}
+      connections: ${FIX_SIMULATOR_CONNECTIONS:}
+      initial-data-timeout: ${FIX_SIMULATOR_INITIAL_DATA_TIMEOUT:5s}
+      reconnect-delay: ${FIX_SIMULATOR_RECONNECT_DELAY:5s}
+    service-auth:
+      token-url: ${EMPORIA_AUTH_TOKEN_URL:http://localhost:9000/oauth2/token}
+      client-id: ${MARKET_DATA_OAUTH_CLIENT_ID:emporia-market-data}
+      client-secret: ${MARKET_DATA_OAUTH_CLIENT_SECRET:emporia-market-data-local-secret}
+    alpaca:
+      websocket-url: ${ALPACA_WEBSOCKET_URL:wss://stream.data.alpaca.markets/v2/iex}
+      snapshots-url: ${ALPACA_SNAPSHOTS_URL:https://data.alpaca.markets/v2/stocks/snapshots}
+      api-key: ${APCA_API_KEY_ID:}
+      api-secret: ${APCA_API_SECRET_KEY:}
+      initial-data-timeout: ${ALPACA_INITIAL_DATA_TIMEOUT:5s}
+      reconnect-delay: ${ALPACA_RECONNECT_DELAY:5s}
+      maximum-symbols: ${ALPACA_MAX_SYMBOLS:30}
+management.endpoints.web.exposure.include: health,info,prometheus

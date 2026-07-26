@@ -1,0 +1,17 @@
+services:
+  kafka:
+    image: apache/kafka:4.3.1
+    container_name: emporia-kafka
+    ports:
+      - "9092:9092"
+    volumes:
+      - emporia-kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+volumes:
+  emporia-kafka-data:

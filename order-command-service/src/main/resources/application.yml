@@ -1,0 +1,25 @@
+server:
+  port: ${SERVER_PORT:8085}
+  shutdown: graceful
+spring:
+  application.name: order-command-service
+  security.oauth2.resourceserver.jwt:
+    issuer-uri: ${EMPORIA_AUTH_ISSUER:http://localhost:3001}
+    jwk-set-uri: ${EMPORIA_AUTH_JWK_SET_URI:http://localhost:9000/oauth2/jwks}
+  kafka:
+    bootstrap-servers: ${KAFKA_BROKERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+    consumer:
+      auto-offset-reset: latest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
+      properties.spring.json.trusted.packages: com.emporia.events
+emporia:
+  static-data.url: ${EMPORIA_STATIC_DATA_URL:http://localhost:8081}
+  kafka:
+    commands-topic: ${KAFKA_ORDER_COMMANDS_TOPIC:emporia.order.commands.v1}
+    results-topic: ${KAFKA_ORDER_RESULTS_TOPIC:emporia.order.results.v1}
+    command-timeout: ${KAFKA_COMMAND_TIMEOUT:8s}
+management.endpoints.web.exposure.include: health,info

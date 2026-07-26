@@ -1,0 +1,121 @@
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+spring:
+  application:
+    name: emporia-gateway
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+            - id: authorisation-service
+              uri: ${emporia.auth.url}
+              predicates:
+                - Path=/.well-known/**,/oauth2/**,/userinfo,/connect/logout,/login,/logout,/auth/csrf,/default-ui.css,/favicon.ico
+              filters:
+                - PreserveHostHeader
+            - id: static-data-service
+              uri: ${emporia.services.static-data-url}
+              predicates:
+                - Path=/api/instruments/**
+              filters:
+                - StripPrefix=1
+            - id: user-preferences-service
+              uri: ${emporia.services.user-preferences-url}
+              predicates:
+                - Path=/api/watchlist/**,/api/workspace-preferences/**
+              filters:
+                - StripPrefix=1
+            - id: market-data-service
+              uri: ${emporia.services.market-data-url}
+              predicates:
+                - Path=/api/market-data/**
+              filters:
+                - StripPrefix=1
+            - id: order-management-service
+              uri: ${emporia.services.order-management-url}
+              predicates:
+                - Path=/api/orders/**
+                - Method=GET
+              filters:
+                - StripPrefix=1
+            - id: order-command-post
+              uri: ${emporia.services.order-command-url}
+              predicates:
+                - Path=/api/orders/**
+                - Method=POST
+              filters:
+                - StripPrefix=1
+            - id: order-command-put
+              uri: ${emporia.services.order-command-url}
+              predicates:
+                - Path=/api/orders/**
+                - Method=PUT
+              filters:
+                - StripPrefix=1
+          globalcors:
+            add-to-simple-url-handler-mapping: true
+            cors-configurations:
+              '[/.well-known/**]': &spa-cors
+                allowed-origin-patterns:
+                  - ${EMPORIA_CORS_ALLOWED_ORIGIN_PATTERN:http://localhost:*}
+                  - ${EMPORIA_CORS_ALLOWED_LOOPBACK_ORIGIN_PATTERN:http://127.0.0.1:*}
+                allowed-methods:
+                  - GET
+                  - POST
+                  - PUT
+                  - PATCH
+                  - DELETE
+                  - OPTIONS
+                allowed-headers: '*'
+                exposed-headers:
+                  - X-Request-Id
+                allow-credentials: true
+                max-age: 3600
+              '[/oauth2/token]': *spa-cors
+              '[/oauth2/revoke]': *spa-cors
+              '[/userinfo]': *spa-cors
+              '[/api/**]': *spa-cors
+          httpclient:
+            connect-timeout: 3000
+            response-timeout: 10s
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${EMPORIA_AUTH_ISSUER:http://localhost:3000}
+          jwk-set-uri: ${EMPORIA_AUTH_JWK_SET_URI:http://localhost:9000/oauth2/jwks}
+
+emporia:
+  auth:
+    url: ${EMPORIA_AUTH_URL:http://localhost:9000}
+  services:
+    static-data-url: ${EMPORIA_STATIC_DATA_URL:http://localhost:8081}
+    user-preferences-url: ${EMPORIA_USER_PREFERENCES_URL:http://localhost:8083}
+    market-data-url: ${EMPORIA_MARKET_DATA_URL:http://localhost:8084}
+    order-command-url: ${EMPORIA_ORDER_COMMAND_URL:http://localhost:8085}
+    order-management-url: ${EMPORIA_ORDER_MANAGEMENT_URL:http://localhost:8086}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+
+info:
+  application:
+    name: ${spring.application.name}
+    description: Reactive API gateway for Emporia services
+
+logging:
+  pattern:
+    correlation: '[%X{traceId:-},%X{spanId:-}] '

@@ -1,0 +1,50 @@
+server:
+  port: ${SERVER_PORT:8086}
+  shutdown: graceful
+spring:
+  application.name: order-management-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/english}
+    username: ${DB_USERNAME:tiennv}
+    password: ${DB_PASSWORD:admin123}
+    hikari:
+      pool-name: ${DB_POOL_NAME:order-management-pool}
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:10}
+      minimum-idle: ${DB_POOL_MIN_IDLE:2}
+      connection-timeout: ${DB_POOL_CONNECTION_TIMEOUT_MS:30000}
+      validation-timeout: ${DB_POOL_VALIDATION_TIMEOUT_MS:5000}
+      idle-timeout: ${DB_POOL_IDLE_TIMEOUT_MS:600000}
+      max-lifetime: ${DB_POOL_MAX_LIFETIME_MS:1800000}
+      keepalive-time: ${DB_POOL_KEEPALIVE_TIME_MS:120000}
+      leak-detection-threshold: ${DB_POOL_LEAK_DETECTION_THRESHOLD_MS:0}
+  flyway:
+    default-schema: ${DB_SCHEMA:emporia_order_data}
+    schemas: ${DB_SCHEMA:emporia_order_data}
+    create-schemas: true
+  jpa:
+    open-in-view: false
+    hibernate.ddl-auto: validate
+    properties:
+      hibernate.default_schema: ${DB_SCHEMA:emporia_order_data}
+      hibernate.jdbc.time_zone: UTC
+  security.oauth2.resourceserver.jwt:
+    issuer-uri: ${EMPORIA_AUTH_ISSUER:http://localhost:3001}
+    jwk-set-uri: ${EMPORIA_AUTH_JWK_SET_URI:http://localhost:9000/oauth2/jwks}
+  kafka:
+    bootstrap-servers: ${KAFKA_BROKERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+    consumer:
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
+      properties.spring.json.trusted.packages: com.emporia.events
+    listener.ack-mode: record
+emporia.kafka:
+  commands-topic: ${KAFKA_ORDER_COMMANDS_TOPIC:emporia.order.commands.v1}
+  results-topic: ${KAFKA_ORDER_RESULTS_TOPIC:emporia.order.results.v1}
+  orders-topic: ${KAFKA_ORDERS_TOPIC:emporia.orders.v1}
+  executions-topic: ${KAFKA_EXECUTION_COMMANDS_TOPIC:emporia.execution.commands.v1}
+management.endpoints.web.exposure.include: health,info,prometheus
