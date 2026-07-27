@@ -31,6 +31,7 @@
         <module>order-command-service</module>
         <module>order-management-service</module>
         <module>execution-service</module>
+        <module>portfolio-service</module>
     </modules>
 
     <build>

@@ -36,6 +36,10 @@ emporia:
     fill-delay: ${EXECUTION_FILL_DELAY:100ms}
     strategy-time-compression: ${STRATEGY_TIME_COMPRESSION:60}
     vwap-default-buckets: ${VWAP_DEFAULT_BUCKETS:10}
+    exchange-core:
+      exchange-id: ${EXCHANGE_CORE_EXCHANGE_ID:emporia-simulation}
+      storage-directory: ${EXCHANGE_CORE_STORAGE_DIRECTORY:target/exchange-core-simulation}
+      symbol-partitions: ${EXCHANGE_CORE_SYMBOL_PARTITIONS:2}
 
 management:
   endpoints.web.exposure.include: health,info,prometheus
