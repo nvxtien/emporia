@@ -130,6 +130,20 @@ Request (`F`) messages and converts Execution Reports (`8`) into Emporia fill,
 reject, and cancellation commands. A concrete venue MIC must have a configured
 session.
 
+### Exchange-core venue
+
+`EXECUTION_VENUE_MODE=exchange-core` embeds exchange-core in
+`MATCHING_ONLY` mode. Emporia sends DMA limit orders as exchange-core limit
+orders, DMA market orders as protected IOC orders using the listing reference
+price, modifications as atomic replace requests, and cancellations as DMA
+cancel requests.
+
+The adapter converts Emporia decimals into exact exchange-core tick and size
+units. A non-aligned price or quantity is rejected rather than rounded.
+Exchange-core fills are published back to order management as Emporia execution
+commands; when a protected IOC partially fills, the unfilled remainder is
+acknowledged as cancelled.
+
 ## SMART
 
 SMART finds executable liquidity across all non-`XOSR` listings for the same
@@ -301,9 +315,16 @@ management:
 - The simulated venue safely reschedules a deterministic remaining fill.
 - The FIX adapter restores its order-to-`ClOrdID` maps without resubmitting a
   New Order Single.
+- The exchange-core adapter starts from the latest checkpoint manifest in
+  `EXCHANGE_CORE_STORAGE_DIRECTORY`, restores the native book and DMA lifecycle,
+  and seeds the in-memory known-symbol set before order reattachment.
 - SMART rebuilds its periodic loop from the persisted parent and children.
 - VWAP rebuilds its schedule and cumulative target; an already expired strategy
   is rejected.
+
+In exchange-core mode, Emporia checkpoints after symbol registration and after
+each exchange-core order mutation before publishing the resulting execution
+commands. It also attempts a final checkpoint during graceful shutdown.
 
 If order management is temporarily unavailable, recovery retries after five
 seconds.
@@ -317,9 +338,12 @@ seconds.
 | `EMPORIA_STATIC_DATA_URL` | `http://localhost:8081` | Same-instrument listing lookup |
 | `EMPORIA_MARKET_DATA_URL` | `http://localhost:8084` | Venue depth lookup |
 | `EMPORIA_ORDER_MANAGEMENT_URL` | `http://localhost:8086` | Strategy state and recovery |
-| `EXECUTION_VENUE_MODE` | `simulated` | `simulated` or `fix` |
+| `EXECUTION_VENUE_MODE` | `simulated` | `simulated`, `fix`, or `exchange-core` |
 | `EXECUTION_FILL_DELAY` | `100ms` | Simulated fill delay |
 | `FIX_EXECUTION_VENUES` | empty | FIX session definitions by MIC |
+| `EXCHANGE_CORE_EXCHANGE_ID` | `emporia-simulation` | Exchange-core snapshot namespace |
+| `EXCHANGE_CORE_STORAGE_DIRECTORY` | `target/exchange-core-simulation` | Exchange-core snapshots and Emporia latest-checkpoint manifest |
+| `EXCHANGE_CORE_SYMBOL_PARTITIONS` | `2` | Power-of-two exchange-core symbol partitions |
 | `STRATEGY_TIME_COMPRESSION` | `60` | Strategy schedule acceleration |
 | `VWAP_DEFAULT_BUCKETS` | `10` | Default number of VWAP buckets |
 
@@ -370,6 +394,8 @@ node emporia/scripts/oidc-smoke-test.mjs
 - The built-in FIX adapter does not provide durable sequence storage, resend
   recovery, certificates, counterparty certification, or production session
   controls.
+- Exchange-core checkpoint recovery restores the latest committed snapshot, but
+  continuous journal replay after that checkpoint is not enabled yet.
 
 ## Implementation map
 

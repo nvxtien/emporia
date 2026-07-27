@@ -16,49 +16,138 @@ import exchange.core2.core.common.api.dma.DmaProtectedMarketOrder;
 import exchange.core2.core.common.api.dma.DmaReplaceOrder;
 import exchange.core2.core.common.cmd.CommandResultCode;
 import exchange.core2.core.simulation.ProductionSimulation;
+import exchange.core2.core.simulation.ProductionSimulationAccounting;
+import exchange.core2.core.simulation.ProductionSimulationCheckpoint;
 import exchange.core2.core.simulation.ProductionSimulationConfiguration;
 import exchange.core2.core.simulation.ProductionSimulationResult;
+import exchange.core2.core.simulation.http.EmporiaHttpGatewayConfiguration;
+import exchange.core2.core.simulation.http.HttpEmporiaPortfolioGateway;
+import exchange.core2.core.simulation.outbox.DurableEmporiaPortfolioGateway;
+import exchange.core2.core.simulation.outbox.PortfolioOutboxConfiguration;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
+import javax.sql.DataSource;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 @ConditionalOnProperty(name = "emporia.execution.venue-mode", havingValue = "exchange-core")
 class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle {
+    private static final Logger log = LoggerFactory.getLogger(ExchangeCoreExecutionVenueGateway.class);
+    private static final String ACCOUNTING_FULL_EQUITY = "full-equity-risk";
+
     private final ExecutionCommandPublisher commands;
     private final ExchangeCoreVenue venue;
     private final AtomicBoolean running = new AtomicBoolean();
     private final Set<Integer> symbols = ConcurrentHashMap.newKeySet();
     private final Map<Long, Correlation> correlations = new ConcurrentHashMap<>();
 
-    ExchangeCoreExecutionVenueGateway(ExecutionCommandPublisher commands,
-                                      @Value("${emporia.execution.exchange-core.exchange-id}") String exchangeId,
-                                      @Value("${emporia.execution.exchange-core.storage-directory}") Path storage,
-                                      @Value("${emporia.execution.exchange-core.symbol-partitions}") int partitions)
+    ExchangeCoreExecutionVenueGateway(
+            ExecutionCommandPublisher commands,
+            ServiceAccessTokenProvider tokenProvider,
+            Optional<DataSource> dataSource,
+            @Value("${emporia.execution.exchange-core.exchange-id}") String exchangeId,
+            @Value("${emporia.execution.exchange-core.storage-directory}") Path storage,
+            @Value("${emporia.execution.exchange-core.symbol-partitions}") int partitions,
+            @Value("${emporia.execution.exchange-core.accounting-mode:matching-only}") String accountingMode,
+            @Value("${emporia.execution.exchange-core.portfolio-url:}") String portfolioUrl,
+            @Value("${emporia.execution.exchange-core.portfolio-request-timeout:3s}") Duration portfolioTimeout)
             throws IOException {
-        this(commands, new ProductionSimulationVenue(exchangeId, storage, partitions));
+        this(commands, buildVenue(exchangeId, storage, partitions,
+                buildAccounting(accountingMode, exchangeId, portfolioUrl, portfolioTimeout, tokenProvider, dataSource.orElse(null))));
+        log.info("Exchange-core venue started with accounting-mode={}", accountingMode);
+    }
+
+    private static ProductionSimulationAccounting buildAccounting(
+            String accountingMode, String exchangeId, String portfolioUrl,
+            Duration portfolioTimeout, ServiceAccessTokenProvider tokenProvider,
+            DataSource dataSource) {
+        if (ACCOUNTING_FULL_EQUITY.equalsIgnoreCase(accountingMode)) {
+            if (portfolioUrl == null || portfolioUrl.isBlank()) {
+                throw new IllegalArgumentException(
+                        "EXCHANGE_CORE_PORTFOLIO_URL is required when accounting-mode is full-equity-risk");
+            }
+            EmporiaHttpGatewayConfiguration gatewayConfig = new EmporiaHttpGatewayConfiguration(
+                    URI.create(portfolioUrl),
+                    exchangeId,
+                    portfolioTimeout,
+                    Map.of("Authorization", tokenProvider.authorization()));
+            // Use a token-refreshing gateway so each HTTP call picks up a fresh token.
+            HttpEmporiaPortfolioGateway httpGateway = new HttpEmporiaPortfolioGateway(gatewayConfig) {
+                @Override
+                public java.util.concurrent.CompletableFuture<exchange.core2.core.simulation.EmporiaPortfolioSeed> load(long clientId) {
+                    return refreshedGateway(exchangeId, portfolioUrl, portfolioTimeout, tokenProvider).load(clientId);
+                }
+
+                @Override
+                public java.util.concurrent.CompletableFuture<Void> publish(
+                        exchange.core2.core.simulation.EmporiaPortfolioSnapshot snapshot) {
+                    return refreshedGateway(exchangeId, portfolioUrl, portfolioTimeout, tokenProvider).publish(snapshot);
+                }
+            };
+            
+            if (dataSource != null) {
+                log.info("Exchange-core full-equity-risk portfolio gateway → {} (Durable Outbox Enabled)", portfolioUrl);
+                DurableEmporiaPortfolioGateway durableGateway = DurableEmporiaPortfolioGateway.start(
+                        httpGateway, dataSource, PortfolioOutboxConfiguration.defaults(exchangeId));
+                return ProductionSimulationAccounting.fullEquityRisk(durableGateway);
+            } else {
+                log.info("Exchange-core full-equity-risk portfolio gateway → {}", portfolioUrl);
+                return ProductionSimulationAccounting.fullEquityRisk(httpGateway);
+            }
+        }
+        return ProductionSimulationAccounting.matchingOnly();
+    }
+
+    /**
+     * Builds a one-shot {@link HttpEmporiaPortfolioGateway} with a freshly
+     * obtained bearer token so each request uses a valid, non-expired credential.
+     */
+    private static HttpEmporiaPortfolioGateway refreshedGateway(
+            String exchangeId, String portfolioUrl, Duration timeout,
+            ServiceAccessTokenProvider tokenProvider) {
+        EmporiaHttpGatewayConfiguration config = new EmporiaHttpGatewayConfiguration(
+                URI.create(portfolioUrl),
+                exchangeId,
+                timeout,
+                Map.of("Authorization", tokenProvider.authorization()));
+        return new HttpEmporiaPortfolioGateway(config);
+    }
+
+    private static ExchangeCoreVenue buildVenue(
+            String exchangeId, Path storage, int partitions,
+            ProductionSimulationAccounting accounting) throws IOException {
+        return new ProductionSimulationVenue(exchangeId, storage, partitions, accounting);
     }
 
     ExchangeCoreExecutionVenueGateway(ExecutionCommandPublisher commands, ExchangeCoreVenue venue) {
         this.commands = Objects.requireNonNull(commands, "commands");
         this.venue = Objects.requireNonNull(venue, "venue");
+        this.symbols.addAll(venue.restoredSymbols());
     }
 
     @Override
@@ -88,6 +177,7 @@ class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartL
                 handle(order, "SUBMIT", venue.submit(request).join());
             }
         } catch (RuntimeException failure) {
+            if (checkpointFailed(order, "submit", failure)) return;
             reject(order, "Exchange-core submit failed: " + failure.getMessage());
         }
     }
@@ -108,6 +198,7 @@ class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartL
                     quantitySteps(order.quantity(), order.listing()));
             handle(order, "REPLACE", venue.replace(request).join());
         } catch (RuntimeException failure) {
+            if (checkpointFailed(order, "replace", failure)) return;
             reject(order, "Exchange-core replace failed: " + failure.getMessage());
         }
     }
@@ -125,6 +216,7 @@ class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartL
             ProductionSimulationResult result = venue.cancel(request).join();
             publishCancel(order, result);
         } catch (RuntimeException failure) {
+            if (checkpointFailed(order, "cancel", failure)) return;
             reject(order, "Exchange-core cancel failed: " + failure.getMessage());
         }
     }
@@ -143,7 +235,14 @@ class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartL
     @Override
     public void stop() {
         if (running.compareAndSet(true, false)) {
-            venue.close();
+            try {
+                venue.checkpoint();
+            } catch (RuntimeException checkpointFailure) {
+                log.warn("Exchange-core checkpoint on shutdown failed: {}",
+                        checkpointFailure.getMessage());
+            } finally {
+                venue.close();
+            }
         }
     }
 
@@ -221,6 +320,16 @@ class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartL
                 reference(order, "REJECT"),
                 order.listing().exchangeMic(),
                 detail);
+    }
+
+    private boolean checkpointFailed(OrderView order, String operation, RuntimeException failure) {
+        Throwable cause = unwrap(failure);
+        if (cause instanceof ExchangeCoreCheckpointException) {
+            log.error("Exchange-core {} for order {} reached the venue, but checkpointing failed",
+                    operation, order.id(), cause);
+            return true;
+        }
+        return false;
     }
 
     private void ensureSymbol(ListingSnapshot listing) {
@@ -319,6 +428,12 @@ class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartL
         return "XCORE-" + action + "-" + order.id() + ":" + order.version();
     }
 
+    private static Throwable unwrap(Throwable error) {
+        return error instanceof CompletionException && error.getCause() != null
+                ? error.getCause()
+                : error;
+    }
+
     interface ExchangeCoreVenue extends AutoCloseable {
         void addSymbols(Collection<CoreSymbolSpecification> symbols);
 
@@ -330,6 +445,10 @@ class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartL
 
         CompletableFuture<ProductionSimulationResult> cancel(DmaCancelOrder cancellation);
 
+        Set<Integer> restoredSymbols();
+
+        void checkpoint();
+
         @Override
         void close();
     }
@@ -339,41 +458,93 @@ class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartL
 
     private static final class ProductionSimulationVenue implements ExchangeCoreVenue {
         private final ProductionSimulation simulation;
+        private final ExchangeCoreCheckpointStore checkpointStore;
+        private final Set<Integer> restoredSymbols;
+        private final Set<Integer> knownSymbols = ConcurrentHashMap.newKeySet();
+        private final AtomicLong checkpointSequence;
 
-        private ProductionSimulationVenue(String exchangeId, Path storage, int partitions)
-                throws IOException {
-            simulation = ProductionSimulation.start(
-                    ProductionSimulationConfiguration.create(exchangeId, storage, partitions));
+        private ProductionSimulationVenue(
+                String exchangeId, Path storage, int partitions,
+                ProductionSimulationAccounting accounting) throws IOException {
+            ProductionSimulationConfiguration configuration =
+                    ProductionSimulationConfiguration.create(exchangeId, storage, partitions);
+            checkpointStore = new ExchangeCoreCheckpointStore(configuration.storageDirectory());
+            ExchangeCoreCheckpointStore.LatestCheckpoint latest =
+                    checkpointStore.load().orElse(null);
+            if (latest == null) {
+                simulation = ProductionSimulation.start(configuration, accounting);
+                restoredSymbols = Set.of();
+                checkpointSequence = new AtomicLong(0);
+            } else {
+                simulation = ProductionSimulation.recover(configuration, latest.checkpointId(), accounting);
+                restoredSymbols = latest.symbols();
+                knownSymbols.addAll(restoredSymbols);
+                checkpointSequence = new AtomicLong(latest.checkpointId());
+            }
         }
 
         @Override
         public void addSymbols(Collection<CoreSymbolSpecification> symbols) {
             simulation.addSymbols(symbols);
+            symbols.stream().map(symbol -> symbol.symbolId).forEach(knownSymbols::add);
+            checkpoint();
         }
 
         @Override
         public CompletableFuture<ProductionSimulationResult> submit(DmaLimitOrder order) {
-            return simulation.submit(order);
+            return checkpointAfter(simulation.submit(order));
         }
 
         @Override
         public CompletableFuture<ProductionSimulationResult> submitProtected(DmaProtectedMarketOrder order) {
-            return simulation.submitProtected(order);
+            return checkpointAfter(simulation.submitProtected(order));
         }
 
         @Override
         public CompletableFuture<ProductionSimulationResult> replace(DmaReplaceOrder replacement) {
-            return simulation.replace(replacement);
+            return checkpointAfter(simulation.replace(replacement));
         }
 
         @Override
         public CompletableFuture<ProductionSimulationResult> cancel(DmaCancelOrder cancellation) {
-            return simulation.cancel(cancellation);
+            return checkpointAfter(simulation.cancel(cancellation));
+        }
+
+        @Override
+        public Set<Integer> restoredSymbols() {
+            return restoredSymbols;
+        }
+
+        @Override
+        public void checkpoint() {
+            try {
+                long checkpointId = checkpointSequence.incrementAndGet();
+                ProductionSimulationCheckpoint checkpoint = simulation.checkpoint(checkpointId);
+                checkpointStore.save(checkpoint.checkpointId(), knownSymbols);
+            } catch (IOException error) {
+                throw new ExchangeCoreCheckpointException(error);
+            }
         }
 
         @Override
         public void close() {
             simulation.close();
+        }
+
+        private CompletableFuture<ProductionSimulationResult> checkpointAfter(
+                CompletableFuture<ProductionSimulationResult> operation) {
+            return operation.thenApply(result -> {
+                checkpoint();
+                return result;
+            }).exceptionally(error -> {
+                throw new CompletionException(ExchangeCoreExecutionVenueGateway.unwrap(error));
+            });
+        }
+    }
+
+    private static final class ExchangeCoreCheckpointException extends RuntimeException {
+        private ExchangeCoreCheckpointException(IOException cause) {
+            super("Exchange-core checkpoint failed", cause);
         }
     }
 }

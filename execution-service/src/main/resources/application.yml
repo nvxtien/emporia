@@ -4,6 +4,18 @@ server:
 
 spring:
   application.name: execution-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/english}
+    username: ${DB_USERNAME:tiennv}
+    password: ${DB_PASSWORD:}
+    hikari:
+      pool-name: ${DB_POOL_NAME:execution-pool}
+      schema: ${DB_SCHEMA:emporia_execution}
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:10}
+  flyway:
+    default-schema: ${DB_SCHEMA:emporia_execution}
+    schemas: ${DB_SCHEMA:emporia_execution}
+    create-schemas: true
   kafka:
     bootstrap-servers: ${KAFKA_BROKERS:localhost:9092}
     producer:
@@ -40,6 +52,11 @@ emporia:
       exchange-id: ${EXCHANGE_CORE_EXCHANGE_ID:emporia-simulation}
       storage-directory: ${EXCHANGE_CORE_STORAGE_DIRECTORY:target/exchange-core-simulation}
       symbol-partitions: ${EXCHANGE_CORE_SYMBOL_PARTITIONS:2}
+      # Set to full-equity-risk to enable balance tracking and portfolio snapshots.
+      # Requires EXCHANGE_CORE_PORTFOLIO_URL to point at the running portfolio-service.
+      accounting-mode: ${EXCHANGE_CORE_ACCOUNTING_MODE:matching-only}
+      portfolio-url: ${EXCHANGE_CORE_PORTFOLIO_URL:}
+      portfolio-request-timeout: ${EXCHANGE_CORE_PORTFOLIO_REQUEST_TIMEOUT:3s}
 
 management:
   endpoints.web.exposure.include: health,info,prometheus
