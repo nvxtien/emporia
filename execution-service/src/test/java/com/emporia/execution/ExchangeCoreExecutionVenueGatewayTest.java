@@ -13,6 +13,7 @@ import exchange.core2.core.common.api.dma.DmaLimitOrder;
 import exchange.core2.core.common.api.dma.DmaLifecycleResult;
 import exchange.core2.core.common.api.dma.DmaOrderResult;
 import exchange.core2.core.common.api.dma.DmaOrderState;
+import exchange.core2.core.common.api.dma.DmaProtectedMarketOrder;
 import exchange.core2.core.common.api.dma.DmaReplaceOrder;
 import exchange.core2.core.common.cmd.CommandResultCode;
 import exchange.core2.core.simulation.ProductionSimulationResult;
@@ -61,15 +62,37 @@ class ExchangeCoreExecutionVenueGatewayTest {
     }
 
     @Test
-    void rejectsMarketOrdersUntilProtectedIocMappingIsEnabled() {
+    void submitsMarketOrdersAsProtectedIocUsingTheListingReferencePrice() {
         OrderView order = order(OrderSide.BUY, OrderType.MARKET, "10", null);
+        venue.protectedResponses.add(request -> successful(
+                SimulationOperation.SUBMIT_PROTECTED,
+                request.deliveryId(),
+                new DmaOrderResult(request.orderId(), CommandResultCode.SUCCESS, List.of(), 0, 0),
+                DmaOrderState.initial(request)));
 
         gateway.submit(order);
 
         assertThat(venue.submits).isEmpty();
-        assertThat(commands.rejections)
-                .containsExactly(new Rejection(order.id(), order.deskId(), order.listing().exchangeMic(),
-                        "Exchange-core submit failed: only LIMIT orders are enabled in the first exchange-core integration step"));
+        assertThat(venue.protectedSubmits).hasSize(1);
+        DmaProtectedMarketOrder request = venue.protectedSubmits.getFirst();
+        assertThat(request.symbol()).isEqualTo(7);
+        assertThat(request.side()).isEqualTo(OrderAction.BID);
+        assertThat(request.protectionPrice()).isEqualTo(10_100);
+        assertThat(request.quantity()).isEqualTo(10);
+        assertThat(commands.rejections).isEmpty();
+    }
+
+    @Test
+    void rejectsMarketOrdersWithoutAValidReferencePrice() {
+        OrderView order = withListing(order(OrderSide.BUY, OrderType.MARKET, "10", null),
+                listing(null));
+
+        gateway.submit(order);
+
+        assertThat(venue.protectedSubmits).isEmpty();
+        assertThat(commands.rejections).containsExactly(new Rejection(
+                order.id(), order.deskId(), order.listing().exchangeMic(),
+                "Exchange-core submit failed: reference price and increment must be positive"));
     }
 
     @Test
@@ -107,6 +130,42 @@ class ExchangeCoreExecutionVenueGatewayTest {
         assertThat(commands.fills).extracting(Fill::venue).containsExactly("XNAS", "XNAS");
     }
 
+    @Test
+    void cancelsProtectedIocRemainderAfterPartialFill() {
+        OrderView ask = order(OrderSide.SELL, OrderType.LIMIT, "10", "101.00");
+        OrderView marketBid = order(OrderSide.BUY, OrderType.MARKET, "12", null);
+        venue.submitResponses.add(request -> successful(
+                SimulationOperation.SUBMIT_LIMIT,
+                request.deliveryId(),
+                new DmaOrderResult(request.orderId(), CommandResultCode.SUCCESS, List.of(), 0, 0),
+                DmaOrderState.initial(request)));
+        venue.protectedResponses.add(request -> {
+            DmaFill fill = new DmaFill(
+                    venue.submits.getFirst().orderId(),
+                    venue.submits.getFirst().clientId(),
+                    10_100,
+                    10,
+                    false,
+                    true);
+            DmaOrderResult result = new DmaOrderResult(
+                    request.orderId(), CommandResultCode.SUCCESS, List.of(fill), 0, 2);
+            return successful(
+                    SimulationOperation.SUBMIT_PROTECTED,
+                    request.deliveryId(),
+                    result,
+                    DmaOrderState.initial(request));
+        });
+
+        gateway.submit(ask);
+        gateway.submit(marketBid);
+
+        assertThat(commands.fills).extracting(Fill::orderId).containsExactly(marketBid.id(), ask.id());
+        assertThat(commands.cancellations).containsExactly(new Cancellation(
+                marketBid.id(), marketBid.deskId(), marketBid.listing().exchangeMic(),
+                "Exchange-core confirmed cancellation"));
+        assertThat(commands.rejections).isEmpty();
+    }
+
     private static ProductionSimulationResult successful(
             SimulationOperation operation,
             long deliveryId,
@@ -133,16 +192,33 @@ class ExchangeCoreExecutionVenueGatewayTest {
     }
 
     private static ListingSnapshot listing() {
+        return listing(new BigDecimal("101"));
+    }
+
+    private static ListingSnapshot listing(BigDecimal referencePrice) {
         return new ListingSnapshot(
                 7, 1, "AAPL", "Apple Inc.", "AAPL", "XNAS", "Nasdaq",
                 "US", "USD", new BigDecimal("0.01"), BigDecimal.ONE,
-                new BigDecimal("101"), new BigDecimal("100"));
+                referencePrice, new BigDecimal("100"));
+    }
+
+    private static OrderView withListing(OrderView order, ListingSnapshot listing) {
+        return new OrderView(
+                order.id(), order.version(), order.ownerSubject(), order.deskId(), listing,
+                order.side(), order.type(), order.quantity(), order.limitPrice(),
+                order.remainingQuantity(), order.tradedQuantity(), order.averageTradePrice(),
+                order.status(), order.targetStatus(), order.destination(), order.originatorReference(),
+                order.parentOrderId(), order.rootOrderId(), order.executionParameters(),
+                order.errorMessage(), order.createdAt(), order.updatedAt());
     }
 
     private static final class FakeVenue implements ExchangeCoreExecutionVenueGateway.ExchangeCoreVenue {
         private final Queue<Function<DmaLimitOrder, ProductionSimulationResult>> submitResponses = new ArrayDeque<>();
+        private final Queue<Function<DmaProtectedMarketOrder, ProductionSimulationResult>> protectedResponses =
+                new ArrayDeque<>();
         private final ArrayDeque<Collection<CoreSymbolSpecification>> symbols = new ArrayDeque<>();
         private final ArrayDeque<DmaLimitOrder> submits = new ArrayDeque<>();
+        private final ArrayDeque<DmaProtectedMarketOrder> protectedSubmits = new ArrayDeque<>();
 
         @Override
         public void addSymbols(Collection<CoreSymbolSpecification> symbols) {
@@ -153,6 +229,12 @@ class ExchangeCoreExecutionVenueGatewayTest {
         public CompletableFuture<ProductionSimulationResult> submit(DmaLimitOrder order) {
             submits.add(order);
             return CompletableFuture.completedFuture(submitResponses.remove().apply(order));
+        }
+
+        @Override
+        public CompletableFuture<ProductionSimulationResult> submitProtected(DmaProtectedMarketOrder order) {
+            protectedSubmits.add(order);
+            return CompletableFuture.completedFuture(protectedResponses.remove().apply(order));
         }
 
         @Override
@@ -173,6 +255,7 @@ class ExchangeCoreExecutionVenueGatewayTest {
     private static final class RecordingCommands extends ExecutionCommandPublisher {
         private final ArrayDeque<Fill> fills = new ArrayDeque<>();
         private final ArrayDeque<Rejection> rejections = new ArrayDeque<>();
+        private final ArrayDeque<Cancellation> cancellations = new ArrayDeque<>();
 
         private RecordingCommands() {
             super(null, "executions", new SimpleMeterRegistry());
@@ -188,11 +271,19 @@ class ExchangeCoreExecutionVenueGatewayTest {
         void reject(UUID orderId, String deskId, String reference, String venue, String detail) {
             rejections.add(new Rejection(orderId, deskId, venue, detail));
         }
+
+        @Override
+        void venueCancel(UUID orderId, String deskId, String reference, String venue, String detail) {
+            cancellations.add(new Cancellation(orderId, deskId, venue, detail));
+        }
     }
 
     private record Fill(UUID orderId, BigDecimal quantity, BigDecimal price, String venue) {
     }
 
     private record Rejection(UUID orderId, String deskId, String venue, String detail) {
+    }
+
+    private record Cancellation(UUID orderId, String deskId, String venue, String detail) {
     }
 }

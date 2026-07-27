@@ -12,6 +12,7 @@ import exchange.core2.core.common.api.dma.DmaFill;
 import exchange.core2.core.common.api.dma.DmaLimitOrder;
 import exchange.core2.core.common.api.dma.DmaOrderResult;
 import exchange.core2.core.common.api.dma.DmaOrderStatus;
+import exchange.core2.core.common.api.dma.DmaProtectedMarketOrder;
 import exchange.core2.core.common.api.dma.DmaReplaceOrder;
 import exchange.core2.core.common.cmd.CommandResultCode;
 import exchange.core2.core.simulation.ProductionSimulation;
@@ -63,18 +64,29 @@ class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartL
     @Override
     public void submit(OrderView order) {
         try {
-            requireLimit(order);
             remember(order);
             ensureSymbol(order.listing());
-            DmaLimitOrder request = new DmaLimitOrder(
-                    deliveryId(order, "submit"),
-                    coreOrderId(order),
-                    clientId(order),
-                    symbolId(order.listing()),
-                    side(order.side()),
-                    priceTicks(order),
-                    quantitySteps(order.quantity(), order.listing()));
-            handle(order, "SUBMIT", venue.submit(request).join());
+            if (order.type() == OrderType.MARKET) {
+                DmaProtectedMarketOrder request = new DmaProtectedMarketOrder(
+                        deliveryId(order, "submit-protected"),
+                        coreOrderId(order),
+                        clientId(order),
+                        symbolId(order.listing()),
+                        side(order.side()),
+                        protectionPriceTicks(order),
+                        quantitySteps(order.quantity(), order.listing()));
+                handleProtected(order, venue.submitProtected(request).join());
+            } else {
+                DmaLimitOrder request = new DmaLimitOrder(
+                        deliveryId(order, "submit"),
+                        coreOrderId(order),
+                        clientId(order),
+                        symbolId(order.listing()),
+                        side(order.side()),
+                        priceTicks(order),
+                        quantitySteps(order.quantity(), order.listing()));
+                handle(order, "SUBMIT", venue.submit(request).join());
+            }
         } catch (RuntimeException failure) {
             reject(order, "Exchange-core submit failed: " + failure.getMessage());
         }
@@ -153,6 +165,22 @@ class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartL
         }
     }
 
+    private void handleProtected(OrderView order, ProductionSimulationResult result) {
+        DmaOrderResult command = result.lifecycleResult().commandResult();
+        publishFills(order, "SUBMIT-PROTECTED", result);
+        if (command.resultCode() != CommandResultCode.SUCCESS) {
+            reject(order, "Exchange-core protected market IOC rejected: " + command.resultCode());
+            return;
+        }
+        if (command.rejectedQuantity() > 0) {
+            if (command.fills().isEmpty()) {
+                reject(order, "Exchange-core protected market IOC found no executable liquidity");
+            } else {
+                publishCancel(order, result);
+            }
+        }
+    }
+
     private void publishFills(OrderView taker, String operation, ProductionSimulationResult result) {
         DmaOrderResult command = result.lifecycleResult().commandResult();
         int index = 0;
@@ -217,7 +245,7 @@ class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartL
 
     private static void requireLimit(OrderView order) {
         if (order.type() != OrderType.LIMIT) {
-            throw new IllegalArgumentException("only LIMIT orders are enabled in the first exchange-core integration step");
+            throw new IllegalArgumentException("only LIMIT orders can be modified in exchange-core mode");
         }
         if (order.limitPrice() == null) {
             throw new IllegalArgumentException("LIMIT orders require a limit price");
@@ -226,6 +254,10 @@ class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartL
 
     private static long priceTicks(OrderView order) {
         return exactUnits(order.limitPrice(), order.listing().tickSize(), "limit price");
+    }
+
+    private static long protectionPriceTicks(OrderView order) {
+        return exactUnits(order.listing().referencePrice(), order.listing().tickSize(), "reference price");
     }
 
     private static long quantitySteps(BigDecimal quantity, ListingSnapshot listing) {
@@ -292,6 +324,8 @@ class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartL
 
         CompletableFuture<ProductionSimulationResult> submit(DmaLimitOrder order);
 
+        CompletableFuture<ProductionSimulationResult> submitProtected(DmaProtectedMarketOrder order);
+
         CompletableFuture<ProductionSimulationResult> replace(DmaReplaceOrder replacement);
 
         CompletableFuture<ProductionSimulationResult> cancel(DmaCancelOrder cancellation);
@@ -320,6 +354,11 @@ class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartL
         @Override
         public CompletableFuture<ProductionSimulationResult> submit(DmaLimitOrder order) {
             return simulation.submit(order);
+        }
+
+        @Override
+        public CompletableFuture<ProductionSimulationResult> submitProtected(DmaProtectedMarketOrder order) {
+            return simulation.submitProtected(order);
         }
 
         @Override
