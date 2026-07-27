@@ -62,22 +62,52 @@
                 </configuration>
                 <executions>
                     <execution>
-                        <id>emporia-market-data-contract</id>
+                        <id>emporia-market-data-java</id>
                         <goals>
                             <goal>compile</goal>
-                            <goal>compile-custom</goal>
                         </goals>
+                        <configuration>
+                            <temporaryProtoFileDirectory>
+                                ${project.build.directory}/protoc-dependencies/emporia-java
+                            </temporaryProtoFileDirectory>
+                        </configuration>
                     </execution>
                     <execution>
-                        <id>fix-simulator-contract</id>
+                        <id>emporia-market-data-grpc</id>
+                        <goals>
+                            <goal>compile-custom</goal>
+                        </goals>
+                        <configuration>
+                            <temporaryProtoFileDirectory>
+                                ${project.build.directory}/protoc-dependencies/emporia-grpc
+                            </temporaryProtoFileDirectory>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>fix-simulator-java</id>
                         <goals>
                             <goal>compile</goal>
-                            <goal>compile-custom</goal>
                         </goals>
                         <configuration>
                             <protoSourceRoot>${project.basedir}/../../protobuf/fix</protoSourceRoot>
                             <outputDirectory>${project.build.directory}/generated-sources/fix/java</outputDirectory>
-                            <pluginOutputDirectory>${project.build.directory}/generated-sources/fix/grpc-java</pluginOutputDirectory>
+                            <temporaryProtoFileDirectory>
+                                ${project.build.directory}/protoc-dependencies/fix-java
+                            </temporaryProtoFileDirectory>
+                            <clearOutputDirectory>false</clearOutputDirectory>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>fix-simulator-grpc</id>
+                        <goals>
+                            <goal>compile-custom</goal>
+                        </goals>
+                        <configuration>
+                            <protoSourceRoot>${project.basedir}/../../protobuf/fix</protoSourceRoot>
+                            <outputDirectory>${project.build.directory}/generated-sources/fix/grpc-java</outputDirectory>
+                            <temporaryProtoFileDirectory>
+                                ${project.build.directory}/protoc-dependencies/fix-grpc
+                            </temporaryProtoFileDirectory>
                             <clearOutputDirectory>false</clearOutputDirectory>
                         </configuration>
                     </execution>

@@ -17,6 +17,8 @@ flowchart TD
     Gateway --> OrderCommands[Order command service :8085]
     Gateway --> Orders[Order management :8086]
     Execution[Execution service :8087] -->|client credentials| Auth
+    ExchangeCore[exchange-core simulation] -->|risk seed + durable snapshots| Portfolio[Portfolio service :8088]
+    ExchangeCore -->|bearer token| Auth
 
     Preferences -->|listing snapshots| Static
     Market -->|listing snapshots| Static
@@ -42,6 +44,7 @@ flowchart TD
     Static --> StaticDb[(PostgreSQL\nemporia_static_data)]
     Preferences --> PreferencesDb[(PostgreSQL\nemporia_client_config)]
     Orders --> OrderDb[(PostgreSQL\nemporia_order_data)]
+    Portfolio --> PortfolioDb[(PostgreSQL\nemporia_portfolio)]
 ```
 
 The browser sees one `/api` surface. The gateway routes requests by path and
@@ -58,6 +61,7 @@ HTTP method to the service that owns each business capability.
 | `order-command-service` | 8085 | Authenticated create, modify, cancel, and cancel-all command boundary |
 | `order-management-service` | 8086 | Order lifecycle, state, history, executions, and command idempotency |
 | `execution-service` | 8087 internal | DMA venue access, best-venue SMART routing, scheduled VWAP child orders, and execution reports |
+| `portfolio-service` | 8088 internal | Fully funded cash/equity balances and idempotent exchange snapshot receipts |
 | `gateway` | 8082 | Browser security boundary and routing |
 | `frontend` | 3001 | React trading workspace |
 | `trading-contracts` | not deployed | Versioned Java/Kafka contracts shared at build time |
@@ -128,7 +132,7 @@ Local PostgreSQL settings:
 - Password: `admin123`
 
 Flyway creates these schemas: `emporia_authorisation`, `emporia_static_data`,
-`emporia_client_config`, and `emporia_order_data`.
+`emporia_client_config`, `emporia_order_data`, and `emporia_portfolio`.
 
 ## Start locally
 
@@ -166,7 +170,7 @@ command in its own terminal.
    mvn spring-boot:run
    ```
 
-4. Start the six trading microservices, one command per terminal:
+4. Start the seven trading microservices, one command per terminal:
 
    ```bash
    cd emporia/static-data-service && mvn spring-boot:run
@@ -289,6 +293,16 @@ command in its own terminal.
    configuration. Use the same `EXECUTION_OAUTH_CLIENT_SECRET` value in both
    services when overriding the local default.
 
+   ```bash
+   cd emporia/portfolio-service && mvn spring-boot:run
+   ```
+
+   The portfolio service is an internal exchange accounting boundary; the
+   browser gateway does not route to it. Provision clients before exchange-core
+   requests a risk seed. See
+   [portfolio-service/README.md](portfolio-service/README.md) for its API,
+   idempotency contract, and PostgreSQL integration test.
+
 5. Start the gateway on the browser's proxy port:
 
    ```bash
@@ -367,6 +381,12 @@ This opt-in test applies Flyway migrations to PostgreSQL 16 and races two
 independent transactions that loaded the same entity version. See the
 [order-management service documentation](order-management-service/README.md#postgresql-concurrency-test)
 for the OrbStack command and assertions.
+
+Run the portfolio receipt idempotency and concurrency tests with PostgreSQL:
+
+```bash
+mvn -f emporia/pom.xml -Ppostgres-it -pl portfolio-service -am test
+```
 
 Run the controlled cancel-versus-full-fill concurrency pilot with Fray:
 
