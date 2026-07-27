@@ -24,6 +24,11 @@ class SecurityConfig {
                                 "/actuator/health",
                                 "/actuator/health/**")
                         .permitAll()
+                        // Internal endpoints are called by exchange-core via the
+                        // execution-service bearer token. Any authenticated caller
+                        // is accepted; network policy restricts external access.
+                        .requestMatchers("/internal/v1/**")
+                        .authenticated()
                         .anyRequest()
                         .authenticated())
                 .oauth2ResourceServer(server ->

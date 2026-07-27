@@ -27,6 +27,7 @@ import java.util.ArrayDeque;
 import java.util.Collection;
 import java.util.List;
 import java.util.Queue;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
@@ -166,6 +167,28 @@ class ExchangeCoreExecutionVenueGatewayTest {
         assertThat(commands.rejections).isEmpty();
     }
 
+    @Test
+    void recoveryUsesRestoredSymbolsWithoutAddingThemAgain() {
+        OrderView live = order(OrderSide.SELL, OrderType.LIMIT, "10", "101.00");
+        FakeVenue recoveredVenue = new FakeVenue(Set.of(7));
+        ExchangeCoreExecutionVenueGateway recoveredGateway =
+                new ExchangeCoreExecutionVenueGateway(commands, recoveredVenue);
+
+        recoveredGateway.recover(live);
+
+        assertThat(recoveredVenue.symbols).isEmpty();
+    }
+
+    @Test
+    void stopCheckpointsAndClosesTheVenue() {
+        gateway.start();
+
+        gateway.stop();
+
+        assertThat(venue.checkpoints).isEqualTo(1);
+        assertThat(venue.closed).isTrue();
+    }
+
     private static ProductionSimulationResult successful(
             SimulationOperation operation,
             long deliveryId,
@@ -219,6 +242,17 @@ class ExchangeCoreExecutionVenueGatewayTest {
         private final ArrayDeque<Collection<CoreSymbolSpecification>> symbols = new ArrayDeque<>();
         private final ArrayDeque<DmaLimitOrder> submits = new ArrayDeque<>();
         private final ArrayDeque<DmaProtectedMarketOrder> protectedSubmits = new ArrayDeque<>();
+        private final Set<Integer> restoredSymbols;
+        private int checkpoints;
+        private boolean closed;
+
+        private FakeVenue() {
+            this(Set.of());
+        }
+
+        private FakeVenue(Set<Integer> restoredSymbols) {
+            this.restoredSymbols = restoredSymbols;
+        }
 
         @Override
         public void addSymbols(Collection<CoreSymbolSpecification> symbols) {
@@ -248,7 +282,18 @@ class ExchangeCoreExecutionVenueGatewayTest {
         }
 
         @Override
+        public Set<Integer> restoredSymbols() {
+            return restoredSymbols;
+        }
+
+        @Override
+        public void checkpoint() {
+            checkpoints++;
+        }
+
+        @Override
         public void close() {
+            closed = true;
         }
     }
 
