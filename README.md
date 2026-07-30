@@ -154,6 +154,7 @@ boundaries. Service-level configuration is collected in
 - Node.js and npm
 - Docker with Compose
 - PostgreSQL running at `localhost:5432`
+- **Exchange-Core Engine**: Clone and install [`exchange-core`](https://github.com/nvxtien/exchange-core) (`mvn clean install`) into your local Maven repository before building Emporia.
 
 Local PostgreSQL settings:
 
@@ -169,14 +170,22 @@ Flyway creates these schemas: `emporia_authorisation`, `emporia_static_data`,
 Run all commands from the repository root. Keep each long-running Maven or npm
 command in its own terminal.
 
-1. Start Kafka:
+1. Clone and install the `exchange-core` dependency into your local Maven repository:
+
+   ```bash
+   git clone https://github.com/nvxtien/exchange-core.git
+   cd exchange-core
+   mvn clean install
+   ```
+
+2. Start Kafka:
 
    ```bash
    docker compose -f emporia/compose.kafka.yml up -d
    docker compose -f emporia/compose.kafka.yml ps
    ```
 
-2. Build and install the shared Kafka contract and all split services:
+3. Build and install the shared Kafka contract and all split services:
 
    ```bash
    mvn -f emporia/pom.xml install
