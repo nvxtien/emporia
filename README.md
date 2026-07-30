@@ -168,6 +168,14 @@ Flyway creates these service-owned schemas in the local `emporia` database:
 `emporia_authorisation`, `emporia_static_data`, `emporia_client_config`,
 `emporia_order_data`, `emporia_execution`, and `emporia_portfolio`.
 
+## Run modes
+
+| Mode | Spring services run in | PostgreSQL runs in | PostgreSQL layout |
+|---|---|---|---|
+| Local | Host JVM | Local PostgreSQL on `localhost:5432` | One `emporia` database with service-owned schemas |
+| Infrastructure-only Docker | Host JVM | Docker containers exposed on `5433`-`5438` | One PostgreSQL database/container per service that owns persistent data |
+| Full Docker | Docker containers | Docker containers | One PostgreSQL database/container per service that owns persistent data |
+
 ## Start locally
 
 Run all commands from the repository root. Keep each long-running Maven or npm
@@ -181,11 +189,16 @@ command in its own terminal.
    mvn clean install
    ```
 
-2. Start infrastructure middleware (PostgreSQL instances & Kafka):
+2. Confirm the shared local PostgreSQL database is running, then start Kafka:
+
+   The non-Docker local path uses one PostgreSQL database at
+   `localhost:5432/emporia`; Flyway creates the service-owned schemas when the
+   services start. Use the Docker deployment section below if you want
+   Docker-managed PostgreSQL instances.
 
    ```bash
-   docker compose up -d
-   docker compose ps
+   docker compose up -d kafka
+   docker compose ps kafka
    ```
 
 3. Build and install the shared Kafka contract and all split services:
@@ -327,126 +340,17 @@ command in its own terminal.
 7. Open `http://localhost:3001` and sign in with `admin` / `admin123`.
 
 Every service supports `GET /actuator/health` without a token. Kafka is healthy
-when `docker compose ps` reports `healthy`.
-
-## Stop locally
-
-Stop each foreground Spring Boot/npm process with `Ctrl+C`, then stop the infrastructure containers:
-
-```bash
-docker compose down
-```
-
-Do not add `-v` unless you intentionally want to delete the local per-service
-database volumes and the Kafka volume.
+when `docker compose ps kafka` reports `healthy`.
 
 ---
 
 ## Verify
 
-Compile, test, and run PMD for every service, then verify the frontend:
-
-```bash
-mvn -f emporia/pom.xml verify
-mvn -f emporia/authorisation-service/pom.xml verify
-mvn -f emporia/gateway/pom.xml verify
-npm --prefix emporia/frontend run lint
-npm --prefix emporia/frontend run build
-npm --prefix emporia/frontend run test:e2e
-```
-
-The Maven `verify` phase runs PMD 7.26.0 through Maven PMD Plugin 3.28.0 and
-fails on violations or PMD processing errors. The shared
-[`static-analysis/ruleset.xml`](static-analysis/ruleset.xml) concentrates on correctness,
-resource ownership, exception integrity, concurrency, and unambiguous
-performance problems; it intentionally excludes formatting and subjective
-style checks. Generated sources and test sources are excluded.
-
-To generate browsable PMD reports without running the full build:
-
-```bash
-mvn -f emporia/pom.xml -DskipTests pmd:pmd
-mvn -f emporia/authorisation-service/pom.xml -DskipTests pmd:pmd
-mvn -f emporia/gateway/pom.xml -DskipTests pmd:pmd
-```
-
-Each module writes XML to `target/pmd.xml` and HTML to
-`target/reports/pmd.html`.
-
-Run only the jqwik order invariants:
-
-```bash
-mvn -f emporia/pom.xml -pl order-management-service -am \
-  -Dtest=TradingOrderPropertyTest \
-  -Dsurefire.failIfNoSpecifiedTests=false test
-```
-
-The generated properties cover positive and increment-aligned quantities,
-positive tick-aligned limit prices, partial-fill quantity accounting,
-modifications bounded by traded quantity, two-fill weighted averages,
-randomized command and venue-event sequences, pending cancellation,
-cancel-versus-fill races in both arrival orders, late fills after venue
-acknowledgement, and idempotent command redelivery.
-
-Run the real PostgreSQL optimistic-lock race with Testcontainers:
-
-```bash
-mvn -f emporia/pom.xml -Ppostgres-it -pl order-management-service -am test
-```
-
-This opt-in test applies Flyway migrations to PostgreSQL 16 and races two
-independent transactions that loaded the same entity version. See the
-[order-management service documentation](order-management-service/README.md#postgresql-concurrency-test)
-for the OrbStack command and assertions.
-
-Run the portfolio receipt idempotency and concurrency tests with PostgreSQL:
-
-```bash
-mvn -f emporia/pom.xml -Ppostgres-it -pl portfolio-service -am test
-```
-
-Run the controlled cancel-versus-full-fill concurrency pilot with Fray:
-
-```bash
-mvn -f emporia/pom.xml -Pfray -pl order-management-service -am test
-```
-
-The profile adds the isolated Fray source set, runs only its pilot test, and
-leaves ordinary `mvn test` unchanged. See the
-[order-management service documentation](order-management-service/README.md#controlled-concurrency-pilot)
-for its scope and limitations.
-
-Model-check the proposed fill/cancel state machine with TLC:
-
-```bash
-cd emporia/verification/order-lifecycle
-java -XX:+UseParallelGC -jar /path/to/tla2tools.jar \
-  -config OrderLifecycle.cfg \
-  -metadir target/tlc \
-  OrderLifecycle.tla
-```
-
-See the [order lifecycle TLA+ model](verification/order-lifecycle/README.md) for the
-checked invariants, race semantics, and model boundaries.
-
-Java aggregate validation and Flyway migrations `V2` and `V4` enforce the
-corresponding persisted-state and pending-cancellation invariants. See the
-[order-management invariant documentation](order-management-service/README.md) for the
-constraint matrix, migration behavior, and focused test commands.
-
-With the application running, execute the full OIDC and Kafka smoke test:
-
-```bash
-EMPORIA_ORIGIN=http://localhost:3001 \
-EMPORIA_USERNAME=admin \
-EMPORIA_PASSWORD=admin123 \
-node emporia/scripts/oidc-smoke-test.mjs
-```
-
-The check signs in with Authorization Code + PKCE, verifies instruments,
-watchlist, quotes, and the order blotter, then exercises a DMA cancel/fill race,
-depth-aware SMART, scheduled VWAP, materialized history, and
-order-command-service cancel-all through the live Kafka flow.
+The full verification runbook lives in the
+[Testing & Verification wiki](https://github.com/nvxtien/emporia/wiki/Testing-and-Verification).
+It covers Maven `verify`, PMD reports, frontend checks, property tests,
+PostgreSQL integration tests, Fray concurrency checks, TLA+ model checking, and
+the OIDC/Kafka smoke test.
 
 ---
 
@@ -456,10 +360,10 @@ In addition to running services locally on your host machine, Emporia supports c
 
 ### 1. Infrastructure-Only Docker Setup
 
-The Docker Compose files intentionally use one PostgreSQL container per
-stateful service. The Spring Boot `application.yml` defaults remain pointed at
-the single non-Docker local database; Docker Compose supplies service-specific
-`DB_URL` values for containerized deployments.
+The Docker Compose files intentionally use one PostgreSQL container per service
+that owns persistent data. The Spring Boot `application.yml` defaults remain
+pointed at the single non-Docker local database; Docker Compose supplies
+service-specific `DB_URL` values for containerized deployments.
 
 Infrastructure-only Compose spins up service-owned PostgreSQL 16 instances
 (`5433`-`5438`) and Apache Kafka 4.3.1 (`9092`) while running Spring Boot
@@ -506,3 +410,20 @@ APCA_API_KEY_ID='your-alpaca-key-id' \
 APCA_API_SECRET_KEY='your-alpaca-secret-key' \
 docker compose -f docker-compose.full.yml up --build -d
 ```
+
+### 3. Stop Docker
+
+Stop the infrastructure-only Docker containers:
+
+```bash
+docker compose down
+```
+
+Stop the full-stack Docker deployment:
+
+```bash
+docker compose -f docker-compose.full.yml down
+```
+
+Do not add `-v` unless you intentionally want to delete the local per-service
+database volumes and the Kafka volume.
