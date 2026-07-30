@@ -1,4 +1,6 @@
 target/
+market-data-service/target_old*/
+
 .idea/
 .vscode/
 *.iml

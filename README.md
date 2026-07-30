@@ -1,9 +1,39 @@
 # Emporia Trading Platform
 
-Emporia is a Spring Boot and React trading platform. Its deployable boundaries
-follow business capabilities: static data, user preferences, market data, order
-command handling, and order management are independent services, with execution
-routing isolated behind its own service.
+[![Documentation](https://img.shields.io/badge/Wiki-Documentation-blue?style=for-the-badge&logo=github)](https://github.com/nvxtien/emporia/wiki)
+[![JaCoCo Coverage](https://img.shields.io/badge/Coverage-91.95%25-brightgreen?style=for-the-badge)](https://github.com/nvxtien/emporia/wiki/Testing-and-Verification)
+[![Java 21](https://img.shields.io/badge/Java-21-orange?style=for-the-badge&logo=openjdk)](https://github.com/nvxtien/emporia)
+[![Spring Boot](https://img.shields.io/badge/Spring_Boot-4.0.7-green?style=for-the-badge&logo=springboot)](https://github.com/nvxtien/emporia)
+[![React 19](https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react)](https://github.com/nvxtien/emporia)
+
+> 📖 **Comprehensive Platform Documentation & Architectural Specifications are published on the [Emporia GitHub Wiki](https://github.com/nvxtien/emporia/wiki)!**
+
+Emporia is an enterprise-grade, distributed stock trading platform built with **Java 21**, **Spring Boot 4.0.7**, **React 19**, **Apache Kafka**, **gRPC**, and **PostgreSQL**. Its deployable boundaries strictly follow business capabilities: static data, user preferences, market data, order command handling, and order management are independent services, with execution routing isolated behind its own service.
+
+---
+
+## 📚 Documentation & GitHub Wiki
+
+For in-depth architectural guides, domain design patterns, microservice deep dives, and trading business logic formulas, explore the **[Emporia GitHub Wiki](https://github.com/nvxtien/emporia/wiki)**:
+
+| Section | Description |
+|---|---|
+| 📖 **[Trading Terminology Glossary](https://github.com/nvxtien/emporia/wiki/Trading-Terminology-Glossary)** | Financial terms: Order types (Limit, Market, Stop, TIF), BBO/NBBO, SOR, VWAP, P&L. |
+| 📐 **[Architecture & Order Flow](https://github.com/nvxtien/emporia/wiki/Architecture-and-Order-Flow)** | System architecture flow, port matrix, REST vs. Kafka EDA, database ownership. |
+| 📨 **[Order Command Service](https://github.com/nvxtien/emporia/wiki/Order-Command-Service)** | REST intake, listing snapshot validation, `KafkaCommandGateway` result correlation. |
+| ⚙️ **[Order Management Service](https://github.com/nvxtien/emporia/wiki/Order-Management-Service)** | State machine authority, `OrderCommandHandler`, `ExecutionCommandHandler`, idempotency. |
+| 🎯 **[Execution Service](https://github.com/nvxtien/emporia/wiki/Execution-Service)** | Algorithmic routing (`DMA`, `SMART` NBBO selector, `VWAP` slicer), venue gateways. |
+| 📜 **[Order Lifecycle & Invariants](https://github.com/nvxtien/emporia/wiki/Business-Logic-Order-Lifecycle)** | State machine invariants, tick/lot size checks, late fill accounting. |
+| 🧠 **[Order Routing & Execution](https://github.com/nvxtien/emporia/wiki/Business-Logic-Order-Routing-and-Execution)** | Smart Order Routing (SOR) venue splitting & VWAP time-slicing logic. |
+| 📊 **[Market Data & Pricing](https://github.com/nvxtien/emporia/wiki/Business-Logic-Market-Data-and-Pricing)** | L1/L2 order books, Price-Time priority matching, micro-price formulas. |
+| 💼 **[Portfolio & Risk Controls](https://github.com/nvxtien/emporia/wiki/Business-Logic-Portfolio-and-Risk-Management)** | Long/short positions, cost basis, Mark-to-Market P&L, fat-finger price collars. |
+| 🧩 **[Design Patterns Catalog](https://github.com/nvxtien/emporia/wiki/Design-Patterns)** | CQRS, Event-Driven Architecture, Saga, Strategy, State Machine patterns. |
+| 📦 **[Microservices Overview](https://github.com/nvxtien/emporia/wiki/Microservices-Overview)** | Deep-dive into all 9 microservices, Gateway, and OAuth2 Authorization. |
+| ⚡ **[Exchange-Core Integration](https://github.com/nvxtien/emporia/wiki/Exchange-Core-Integration)** | Ultra-low latency LMAX Disruptor ring-buffer matching engine integration. |
+| 🧪 **[Testing & Verification](https://github.com/nvxtien/emporia/wiki/Testing-and-Verification)** | 91.95% JaCoCo coverage, Testcontainers PostgreSQL specs, Fray concurrency tests. |
+| 🛠️ **[Deployment & Operations](https://github.com/nvxtien/emporia/wiki/Deployment-and-Operations)** | Environment prerequisites, Docker Compose, Maven builds, React UI startup. |
+
+---
 
 ## Architecture
 
@@ -127,8 +157,8 @@ boundaries. Service-level configuration is collected in
 
 Local PostgreSQL settings:
 
-- Database: `english`
-- Username: `tiennv`
+- Database: `emporia`
+- Username: `postgres`
 - Password: `admin123`
 
 Flyway creates these schemas: `emporia_authorisation`, `emporia_static_data`,
@@ -176,20 +206,17 @@ command in its own terminal.
    cd emporia/static-data-service && mvn spring-boot:run
    ```
 
-   To build current active US-equity primary and `XOSR` composite listings from
-   Alpaca's asset master:
+   To optionally import active US-equity reference data or connect to Alpaca's real-time IEX feed:
 
    ```bash
-   cd emporia/static-data-service
-   ALPACA_REFERENCE_DATA_IMPORT_ENABLED=true \
+   cd emporia/market-data-service
+   MARKET_DATA_PROVIDER=alpaca-iex \
    APCA_API_KEY_ID=your-alpaca-key-id \
    APCA_API_SECRET_KEY=your-alpaca-secret-key \
    mvn spring-boot:run
    ```
 
-   This importer reads `APCA_API_ENDPOINT` (default
-   `https://paper-api.alpaca.markets/v2`) and does not persist either
-   credential. See [static-data-service/README.md](static-data-service/README.md).
+   *Credentials are read directly from process environment variables and are never persisted to disk or databases. See [docs/market-data/README.md](docs/market-data/README.md) for details.*
 
    ```bash
    cd emporia/user-preferences-service && mvn spring-boot:run
@@ -202,52 +229,6 @@ command in its own terminal.
    The market-data service uses its deterministic simulator by default. It also
    exposes a browser SSE stream on port `8084` and the
    `marketdataservice.MarketDataService` gRPC interface on port `50551`.
-
-   To use Alpaca's free real-time IEX WebSocket feed:
-
-   ```bash
-   cd emporia/market-data-service
-   MARKET_DATA_PROVIDER=alpaca-iex \
-   APCA_API_KEY_ID=your-alpaca-key-id \
-   APCA_API_SECRET_KEY=your-alpaca-secret-key \
-   mvn spring-boot:run
-   ```
-
-   ### Alpaca credential handling
-
-   `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY` are read from the market-data
-   service's process environment. Emporia does not persist them in PostgreSQL,
-   Docker, `application.yml`, or another repository file. They remain available
-   only to the running process and disappear when that process stops.
-
-   Never commit real Alpaca credentials or place them directly in
-   `application.yml`. For shared or production environments, inject these
-   variables from the deployment platform's secret manager. Avoid entering the
-   secret directly in a shell command because it may be retained in shell
-   history. Anyone with sufficient access to inspect the running process may
-   also be able to inspect its environment.
-
-   If a credential is exposed, revoke or rotate it in Alpaca, stop the
-   market-data service, and start it again with the replacement values. The
-   service must be restarted after a rotation because it reads the credentials
-   during startup.
-
-   Alpaca mode subscribes to trades and top-of-book quotes as symbols are
-   requested. It seeds an empty cache from Alpaca's latest IEX snapshot REST
-   endpoint, so prices remain available before the WebSocket emits its first
-   event. The free IEX feed supplies one real bid and offer level rather than
-   the simulator's five levels. Reported volume is the IEX trade volume observed
-   since the service subscribed, not consolidated daily volume. It supports up
-   to 30 active symbols by default, automatically reconnects, and returns HTTP
-   503 only if neither the snapshot endpoint nor the WebSocket supplies an
-   initial quote within five seconds. Override these defaults with
-   `ALPACA_MAX_SYMBOLS`, `ALPACA_INITIAL_DATA_TIMEOUT`,
-   `ALPACA_RECONNECT_DELAY`, `ALPACA_WEBSOCKET_URL`, and
-   `ALPACA_SNAPSHOTS_URL`.
-
-   See [Alpaca IEX market-data flow](docs/market-data/README.md) for example
-   source payloads, backend transformations, frontend field mappings, and
-   operational limitations.
 
    To consume incremental order books directly from one or more FIX simulator
    gRPC sources:

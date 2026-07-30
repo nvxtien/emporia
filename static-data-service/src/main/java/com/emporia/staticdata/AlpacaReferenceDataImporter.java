@@ -56,6 +56,13 @@ class AlpacaReferenceDataImporter implements ApplicationRunner {
         this.defaultReferencePrice = defaultReferencePrice;
     }
 
+    AlpacaReferenceDataImporter(JdbcTemplate jdbc, RestClient alpaca, String targetSchema, BigDecimal defaultReferencePrice) {
+        this.jdbc = jdbc;
+        this.alpaca = alpaca;
+        this.targetSchema = identifier(targetSchema);
+        this.defaultReferencePrice = defaultReferencePrice;
+    }
+
     @Override
     public void run(ApplicationArguments args) {
         Asset[] assets = alpaca.get()

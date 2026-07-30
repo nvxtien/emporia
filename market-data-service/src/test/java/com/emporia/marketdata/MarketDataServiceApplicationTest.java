@@ -7,7 +7,8 @@ import org.springframework.boot.test.context.SpringBootTest;
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {
                 "emporia.market-data.provider=simulated",
-                "emporia.market-data.grpc.port=0"
+                "emporia.market-data.grpc.port=0",
+                "emporia.static-data.url=http://localhost:8081"
         }
 )
 class MarketDataServiceApplicationTest {

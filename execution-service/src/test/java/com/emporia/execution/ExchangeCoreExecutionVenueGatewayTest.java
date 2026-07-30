@@ -22,10 +22,12 @@ import org.junit.jupiter.api.Test;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
 import java.util.UUID;
@@ -33,6 +35,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.when;
 
 class ExchangeCoreExecutionVenueGatewayTest {
 
@@ -180,6 +184,127 @@ class ExchangeCoreExecutionVenueGatewayTest {
     }
 
     @Test
+    void modifiesLimitOrdersWithReplaceOrderRequest() {
+        OrderView order = order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25");
+        venue.replaceResponses.add(request -> {
+            DmaLimitOrder dummy = new DmaLimitOrder(request.deliveryId(), request.orderId(), request.clientId(), request.symbol(), OrderAction.BID, request.newPrice(), request.newQuantity());
+            return successful(SimulationOperation.REPLACE, request.deliveryId(),
+                    new DmaOrderResult(request.orderId(), CommandResultCode.SUCCESS, List.of(), 0, 0),
+                    DmaOrderState.initial(dummy));
+        });
+
+        gateway.modify(order);
+
+        assertThat(venue.replaces).hasSize(1);
+        DmaReplaceOrder request = venue.replaces.getFirst();
+        assertThat(request.newPrice()).isEqualTo(10_225);
+    }
+
+    @Test
+    void cancelsLimitOrdersWithCancelOrderRequest() {
+        OrderView order = order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25");
+        venue.cancelResponses.add(request -> {
+            DmaLimitOrder dummy = new DmaLimitOrder(request.deliveryId(), request.orderId(), request.clientId(), request.symbol(), OrderAction.BID, 10000, 10);
+            return successful(SimulationOperation.CANCEL, request.deliveryId(),
+                    new DmaOrderResult(request.orderId(), CommandResultCode.SUCCESS, List.of(), 0, 0),
+                    DmaOrderState.initial(dummy));
+        });
+
+        gateway.cancel(order);
+
+        assertThat(venue.cancels).hasSize(1);
+        assertThat(commands.cancellations).hasSize(1);
+    }
+
+    @Test
+    void handlesVenueExceptionOnSubmit() {
+        OrderView order = order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25");
+        venue.submitResponses.add(request -> {
+            throw new RuntimeException("Venue submission error");
+        });
+
+        gateway.submit(order);
+
+        assertThat(commands.rejections).hasSize(1);
+        assertThat(commands.rejections.getFirst().detail()).contains("Venue submission error");
+    }
+
+    @Test
+    void rejectsModifyForMarketOrder() {
+        OrderView order = order(OrderSide.BUY, OrderType.MARKET, "10", null);
+
+        gateway.modify(order);
+
+        assertThat(commands.rejections).hasSize(1);
+        assertThat(commands.rejections.getFirst().detail()).contains("only LIMIT orders can be modified");
+    }
+
+    @Test
+    void rejectsModifyForLimitOrderWithoutPrice() {
+        OrderView order = order(OrderSide.BUY, OrderType.LIMIT, "10", null);
+
+        gateway.modify(order);
+
+        assertThat(commands.rejections).hasSize(1);
+        assertThat(commands.rejections.getFirst().detail()).contains("LIMIT orders require a limit price");
+    }
+
+    @Test
+    void handlesVenueExceptionOnCancelAndModify() {
+        OrderView order = order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25");
+        venue.cancelResponses.add(request -> {
+            throw new RuntimeException("Cancel error");
+        });
+        venue.replaceResponses.add(request -> {
+            throw new RuntimeException("Modify error");
+        });
+
+        gateway.cancel(order);
+        assertThat(commands.rejections).hasSize(1);
+        assertThat(commands.rejections.getFirst().detail()).contains("Cancel error");
+
+        gateway.modify(order);
+        assertThat(commands.rejections).hasSize(2);
+        assertThat(commands.rejections.getLast().detail()).contains("Modify error");
+    }
+
+    @Test
+    void verifiesExchangeCoreCheckpointException() {
+        ExchangeCoreExecutionVenueGateway.ExchangeCoreCheckpointException ex =
+                new ExchangeCoreExecutionVenueGateway.ExchangeCoreCheckpointException("Failed to restore", new RuntimeException("IO Error"));
+
+        assertThat(ex.getMessage()).isEqualTo("Failed to restore");
+        assertThat(ex.getCause()).hasMessage("IO Error");
+    }
+
+    @Test
+    void rejectsFullEquityRiskAccountingWithoutPortfolioUrl() {
+        assertThatThrownBy(() -> new ExchangeCoreExecutionVenueGateway(
+                commands, null, Optional.empty(), "ex-1", java.nio.file.Path.of("/tmp"), 1,
+                "full-equity-risk", "", Duration.ofSeconds(3)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("EXCHANGE_CORE_PORTFOLIO_URL is required");
+    }
+
+    @org.junit.jupiter.api.Disabled("Spins up LMAX Disruptor background threads that prevent Surefire JVM clean shutdown")
+    @Test
+    void initializesWithRealProductionSimulationVenue(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tempDir) throws Exception {
+        ExchangeCoreExecutionVenueGateway realGateway = new ExchangeCoreExecutionVenueGateway(
+                commands, null, Optional.empty(), "ex-1", tempDir, 1,
+                "matching-only", null, Duration.ofSeconds(3));
+
+        assertThat(realGateway).isNotNull();
+        realGateway.start();
+        assertThat(realGateway.isRunning()).isTrue();
+
+        OrderView order = order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25");
+        realGateway.submit(order);
+
+        realGateway.stop();
+        assertThat(realGateway.isRunning()).isFalse();
+    }
+
+    @Test
     void stopCheckpointsAndClosesTheVenue() {
         gateway.start();
 
@@ -271,14 +396,21 @@ class ExchangeCoreExecutionVenueGatewayTest {
             return CompletableFuture.completedFuture(protectedResponses.remove().apply(order));
         }
 
+        private final Queue<Function<DmaReplaceOrder, ProductionSimulationResult>> replaceResponses = new ArrayDeque<>();
+        private final Queue<Function<DmaCancelOrder, ProductionSimulationResult>> cancelResponses = new ArrayDeque<>();
+        private final ArrayDeque<DmaReplaceOrder> replaces = new ArrayDeque<>();
+        private final ArrayDeque<DmaCancelOrder> cancels = new ArrayDeque<>();
+
         @Override
         public CompletableFuture<ProductionSimulationResult> replace(DmaReplaceOrder replacement) {
-            throw new UnsupportedOperationException("replace is not needed in these tests");
+            replaces.add(replacement);
+            return CompletableFuture.completedFuture(replaceResponses.remove().apply(replacement));
         }
 
         @Override
         public CompletableFuture<ProductionSimulationResult> cancel(DmaCancelOrder cancellation) {
-            throw new UnsupportedOperationException("cancel is not needed in these tests");
+            cancels.add(cancellation);
+            return CompletableFuture.completedFuture(cancelResponses.remove().apply(cancellation));
         }
 
         @Override

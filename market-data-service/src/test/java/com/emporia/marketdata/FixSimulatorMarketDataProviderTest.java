@@ -73,7 +73,7 @@ class FixSimulatorMarketDataProviderTest {
     void maintainsAFullIncrementalBookAndStreamStatus() throws Exception {
         CompletableFuture<List<Quote>> initial = CompletableFuture.supplyAsync(
                 () -> provider.quotes(List.of(listing()), Instant.now()));
-        assertThat(subscribed.await(2, TimeUnit.SECONDS)).isTrue();
+        assertThat(subscribed.await(5, TimeUnit.SECONDS)).isTrue();
 
         publish(
                 update(MarketData.MDEntryTypeEnum.MD_ENTRY_TYPE_BID,

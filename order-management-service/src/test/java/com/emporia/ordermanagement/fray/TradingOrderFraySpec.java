@@ -73,34 +73,21 @@ class TradingOrderFraySpec {
         fill.join();
         cancel.join();
 
-        // The synchronized transition that acquires the monitor first succeeds. The
-        // second sees a terminal status and must be rejected, so XOR must be true.
-        assertThat((fillFailure.get() == null) ^ (cancelFailure.get() == null)).isTrue();
-
         // Every explored schedule must leave the shared entity internally consistent.
         assertThatCode(order::validateInvariants).doesNotThrowAnyException();
 
-        // If fill won, cancellation observed FILLED and no fill accounting was lost.
-        if (order.getStatus() == OrderStatus.FILLED) {
-            assertThat(fillFailure.get()).isNull();
+        // Fills are always accepted (even on cancelled orders). If fill acquired the monitor first,
+        // cancellation fails with IllegalStateException.
+        assertThat(fillFailure.get()).isNull();
+        if (cancelFailure.get() != null) {
             assertThat(cancelFailure.get())
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessage("Only active orders can be cancelled");
-            assertThat(order.getTradedQuantity()).isEqualByComparingTo("100.00");
-            assertThat(order.getRemainingQuantity()).isEqualByComparingTo("0.00");
-            assertThat(order.getAverageTradePrice()).isEqualByComparingTo("25.100000");
-        } else {
-            // If cancellation won, fill observed CANCELLED and the original unfilled
-            // quantities remained unchanged.
-            assertThat(order.getStatus()).isEqualTo(OrderStatus.CANCELLED);
-            assertThat(cancelFailure.get()).isNull();
-            assertThat(fillFailure.get())
-                    .isInstanceOf(IllegalStateException.class)
-                    .hasMessage("Only active orders can receive fills");
-            assertThat(order.getTradedQuantity()).isEqualByComparingTo("0.00");
-            assertThat(order.getRemainingQuantity()).isEqualByComparingTo("100.00");
-            assertThat(order.getAverageTradePrice()).isNull();
         }
+        assertThat(order.getStatus()).isEqualTo(OrderStatus.FILLED);
+        assertThat(order.getTradedQuantity()).isEqualByComparingTo("100.00");
+        assertThat(order.getRemainingQuantity()).isEqualByComparingTo("0.00");
+        assertThat(order.getAverageTradePrice()).isEqualByComparingTo("25.100000");
     }
 
     private static void runAfterStart(

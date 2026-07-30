@@ -58,12 +58,22 @@ class StaticDataClientTest {
         assertThat(authorizations).hasSize(1);
     }
 
+    @Test
+    void bySymbolsFetchesListingsAndHandlesEmptyInput() {
+        List<ListingSnapshot> listings = client.bySymbols(List.of("AAPL"), "Bearer symbol-token");
+        assertThat(listings).hasSize(1);
+        assertThat(listings.getFirst().symbol()).isEqualTo("AAPL");
+
+        assertThat(client.bySymbols(List.of(), "token")).isEmpty();
+    }
+
     private void handleRequest(HttpExchange exchange) throws IOException {
         requestUris.add(exchange.getRequestURI().toString());
         authorizations.add(exchange.getRequestHeaders().getFirst("Authorization"));
         String response = switch (exchange.getRequestURI().getPath()) {
             case "/instruments/42" -> listingJson(42, "AAPL");
             case "/instruments/batch" -> "[" + listingJson(7, "MSFT") + "," + listingJson(9, "NVDA") + "]";
+            case "/instruments/by-symbols" -> "[" + listingJson(1, "AAPL") + "]";
             default -> throw new AssertionError("Unexpected request " + exchange.getRequestURI());
         };
         byte[] body = response.getBytes(StandardCharsets.UTF_8);
