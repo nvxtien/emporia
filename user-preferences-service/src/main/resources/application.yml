@@ -9,6 +9,7 @@ spring:
     password: ${DB_PASSWORD:admin123}
     hikari:
       pool-name: ${DB_POOL_NAME:user-preferences-pool}
+      schema: ${DB_SCHEMA:emporia_client_config}
       maximum-pool-size: ${DB_POOL_MAX_SIZE:10}
       minimum-idle: ${DB_POOL_MIN_IDLE:2}
       connection-timeout: ${DB_POOL_CONNECTION_TIMEOUT_MS:30000}

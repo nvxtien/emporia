@@ -1,0 +1,123 @@
+x-postgres-env: &postgres-env
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: admin123
+
+x-postgres-healthcheck: &postgres-healthcheck
+  test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+  interval: 5s
+  timeout: 5s
+  retries: 10
+
+services:
+  authorisation-postgres:
+    image: postgres:16-alpine
+    container_name: emporia-authorisation-postgres
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: emporia_authorisation
+    ports:
+      - "5433:5432"
+    volumes:
+      - emporia-authorisation-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *postgres-healthcheck
+
+  static-data-postgres:
+    image: postgres:16-alpine
+    container_name: emporia-static-data-postgres
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: emporia_static_data
+    ports:
+      - "5434:5432"
+    volumes:
+      - emporia-static-data-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *postgres-healthcheck
+
+  user-preferences-postgres:
+    image: postgres:16-alpine
+    container_name: emporia-user-preferences-postgres
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: emporia_user_preferences
+    ports:
+      - "5435:5432"
+    volumes:
+      - emporia-user-preferences-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *postgres-healthcheck
+
+  order-management-postgres:
+    image: postgres:16-alpine
+    container_name: emporia-order-management-postgres
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: emporia_order_management
+    ports:
+      - "5436:5432"
+    volumes:
+      - emporia-order-management-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *postgres-healthcheck
+
+  execution-postgres:
+    image: postgres:16-alpine
+    container_name: emporia-execution-postgres
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: emporia_execution
+    ports:
+      - "5437:5432"
+    volumes:
+      - emporia-execution-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *postgres-healthcheck
+
+  portfolio-postgres:
+    image: postgres:16-alpine
+    container_name: emporia-portfolio-postgres
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: emporia_portfolio
+    ports:
+      - "5438:5432"
+    volumes:
+      - emporia-portfolio-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *postgres-healthcheck
+
+  kafka:
+    image: apache/kafka:4.3.1
+    container_name: emporia-kafka
+    ports:
+      - "9092:9094"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    volumes:
+      - emporia-kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+volumes:
+  emporia-authorisation-postgres-data:
+  emporia-static-data-postgres-data:
+  emporia-user-preferences-postgres-data:
+  emporia-order-management-postgres-data:
+  emporia-execution-postgres-data:
+  emporia-portfolio-postgres-data:
+  emporia-kafka-data:

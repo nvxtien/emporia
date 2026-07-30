@@ -2,6 +2,7 @@ package com.emporia.ordermanagement.service;
 
 import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderView;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import tools.jackson.databind.ObjectMapper;
@@ -29,6 +30,7 @@ public class OrderStreamService {
         emitter.onTimeout(() -> remove(subscription));
         emitter.onError(ignored -> remove(subscription));
         try {
+            sendHeartbeat(emitter);
             for (OrderView order : initialOrders) {
                 send(emitter, order.id() + ":" + order.version(), order);
             }
@@ -62,8 +64,26 @@ public class OrderStreamService {
         }
     }
 
+    @Scheduled(fixedDelayString = "${emporia.orders.stream.heartbeat-interval-ms:5000}")
+    void heartbeat() {
+        subscriptions.forEach((ignoredDeskId, deskSubscriptions) -> {
+            for (Subscription subscription : deskSubscriptions) {
+                try {
+                    sendHeartbeat(subscription.emitter());
+                } catch (Exception disconnected) {
+                    remove(subscription);
+                    subscription.emitter().complete();
+                }
+            }
+        });
+    }
+
     private void send(SseEmitter emitter, String id, Object order) throws Exception {
         emitter.send(SseEmitter.event().id(id).name("order").reconnectTime(1_000).data(order));
+    }
+
+    private void sendHeartbeat(SseEmitter emitter) throws Exception {
+        emitter.send(SseEmitter.event().name("heartbeat").reconnectTime(1_000).data("ok"));
     }
 
     private void remove(Subscription subscription) {

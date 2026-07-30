@@ -18,7 +18,7 @@ const gatewayPaths = [
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const gatewayProxy: ProxyOptions = {
-    target: env.VITE_GATEWAY_PROXY_TARGET ?? 'http://localhost:8080',
+    target: env.VITE_GATEWAY_PROXY_TARGET ?? 'http://localhost:8082',
     changeOrigin: false,
   }
   const proxy = Object.fromEntries(

@@ -74,6 +74,7 @@ flowchart TD
     Static --> StaticDb[(PostgreSQL\nemporia_static_data)]
     Preferences --> PreferencesDb[(PostgreSQL\nemporia_client_config)]
     Orders --> OrderDb[(PostgreSQL\nemporia_order_data)]
+    Execution --> ExecutionDb[(PostgreSQL\nemporia_execution)]
     Portfolio --> PortfolioDb[(PostgreSQL\nemporia_portfolio)]
 ```
 
@@ -96,7 +97,8 @@ HTTP method to the service that owns each business capability.
 | `frontend` | 3001 | React trading workspace |
 | `trading-contracts` | not deployed | Versioned Java/Kafka contracts shared at build time |
 
-No running service reads or writes another Emporia service's PostgreSQL schema.
+No running service reads or writes another Emporia service's PostgreSQL database
+or schema.
 When a service needs listing data, it calls `static-data-service` and forwards
 a bearer token. Orders store an immutable listing snapshot instead of a
 cross-schema foreign key.
@@ -152,18 +154,19 @@ boundaries. Service-level configuration is collected in
 - Java 21 or newer
 - Maven 3.9+
 - Node.js and npm
-- Docker with Compose
-- PostgreSQL running at `localhost:5432`
+- PostgreSQL running at `localhost:5432` for non-Docker local runs
+- Docker with Compose for Docker-managed infrastructure or full-stack deployment
 - **Exchange-Core Engine**: Clone and install [`exchange-core`](https://github.com/nvxtien/exchange-core) (`mvn clean install`) into your local Maven repository before building Emporia.
 
-Local PostgreSQL settings:
+Non-Docker local PostgreSQL settings:
 
 - Database: `emporia`
 - Username: `postgres`
 - Password: `admin123`
 
-Flyway creates these schemas: `emporia_authorisation`, `emporia_static_data`,
-`emporia_client_config`, `emporia_order_data`, and `emporia_portfolio`.
+Flyway creates these service-owned schemas in the local `emporia` database:
+`emporia_authorisation`, `emporia_static_data`, `emporia_client_config`,
+`emporia_order_data`, `emporia_execution`, and `emporia_portfolio`.
 
 ## Start locally
 
@@ -178,11 +181,11 @@ command in its own terminal.
    mvn clean install
    ```
 
-2. Start Kafka:
+2. Start infrastructure middleware (PostgreSQL instances & Kafka):
 
    ```bash
-   docker compose -f emporia/compose.kafka.yml up -d
-   docker compose -f emporia/compose.kafka.yml ps
+   docker compose up -d
+   docker compose ps
    ```
 
 3. Build and install the shared Kafka contract and all split services:
@@ -191,7 +194,7 @@ command in its own terminal.
    mvn -f emporia/pom.xml install
    ```
 
-3. Start the authorisation service:
+4. Start the authorisation service:
 
    ```bash
    cd emporia/authorisation-service
@@ -260,8 +263,19 @@ command in its own terminal.
    Composite listings use exchange MIC `XOSR`; the service combines all
    same-symbol venue books while retaining each level's source listing and MIC.
 
-   See the [market-data service runbook](market-data-service/README.md) for
-   configuration, observability, and deployment details.
+    See the [market-data service runbook](market-data-service/README.md) for
+    configuration, observability, and deployment details.
+
+    > **🔑 Registering Alpaca API Credentials**:
+    > 1. Sign up for a free account at [alpaca.markets](https://alpaca.markets).
+    > 2. Open the **Paper Trading** dashboard (free sandbox).
+    > 3. Click **Generate New API Key** in the right-hand panel.
+    > 4. Copy your **API Key ID** (`APCA_API_KEY_ID`) and **Secret Key** (`APCA_API_SECRET_KEY`).
+    > 5. Export them when launching `market-data-service` or `static-data-service`:
+    >    ```bash
+    >    export APCA_API_KEY_ID='your-alpaca-key-id'
+    >    export APCA_API_SECRET_KEY='your-alpaca-secret-key'
+    >    ```
 
    ```bash
    cd emporia/order-command-service && mvn spring-boot:run
@@ -313,7 +327,20 @@ command in its own terminal.
 7. Open `http://localhost:3001` and sign in with `admin` / `admin123`.
 
 Every service supports `GET /actuator/health` without a token. Kafka is healthy
-when `docker compose -f emporia/compose.kafka.yml ps` reports `healthy`.
+when `docker compose ps` reports `healthy`.
+
+## Stop locally
+
+Stop each foreground Spring Boot/npm process with `Ctrl+C`, then stop the infrastructure containers:
+
+```bash
+docker compose down
+```
+
+Do not add `-v` unless you intentionally want to delete the local per-service
+database volumes and the Kafka volume.
+
+---
 
 ## Verify
 
@@ -421,12 +448,61 @@ watchlist, quotes, and the order blotter, then exercises a DMA cancel/fill race,
 depth-aware SMART, scheduled VWAP, materialized history, and
 order-command-service cancel-all through the live Kafka flow.
 
-## Stop locally
+---
 
-Stop each foreground Spring Boot/npm process with `Ctrl+C`, then stop Kafka:
+## 🐳 Docker Deployment
+
+In addition to running services locally on your host machine, Emporia supports containerized deployment with Docker and Docker Compose:
+
+### 1. Infrastructure-Only Docker Setup
+
+The Docker Compose files intentionally use one PostgreSQL container per
+stateful service. The Spring Boot `application.yml` defaults remain pointed at
+the single non-Docker local database; Docker Compose supplies service-specific
+`DB_URL` values for containerized deployments.
+
+Infrastructure-only Compose spins up service-owned PostgreSQL 16 instances
+(`5433`-`5438`) and Apache Kafka 4.3.1 (`9092`) while running Spring Boot
+services on your local JVM:
+
+| Service | Host port | Database | Schema |
+|---|---:|---|---|
+| `authorisation-service` | `5433` | `emporia_authorisation` | `emporia_authorisation` |
+| `static-data-service` | `5434` | `emporia_static_data` | `emporia_static_data` |
+| `user-preferences-service` | `5435` | `emporia_user_preferences` | `emporia_client_config` |
+| `order-management-service` | `5436` | `emporia_order_management` | `emporia_order_data` |
+| `execution-service` | `5437` | `emporia_execution` | `emporia_execution` |
+| `portfolio-service` | `5438` | `emporia_portfolio` | `emporia_portfolio` |
+
+Set each service's `DB_URL` to the matching host port when running that service
+on the host JVM against Docker-managed databases.
 
 ```bash
-docker compose -f emporia/compose.kafka.yml down
+# Start PostgreSQL instances & Kafka
+docker compose up -d
+
+# Check health
+docker compose ps
 ```
 
-Do not add `-v` unless you intentionally want to delete the local Kafka volume.
+### 2. Full-Stack Docker Container Deployment
+
+To launch all 9 microservices, API Gateway, React UI, service-owned PostgreSQL
+instances, and Kafka in containers:
+
+```bash
+# 1. Build and install exchange-core into your local Maven repo
+git clone https://github.com/nvxtien/exchange-core.git && cd exchange-core && mvn clean install
+
+# 2. Build local Maven JAR artifacts
+mvn clean install -DskipTests
+
+# 3. Start full-stack Docker containers (Default: Simulated market data)
+docker compose -f docker-compose.full.yml up --build -d
+
+# Or start full-stack Docker with live Alpaca IEX market data:
+MARKET_DATA_PROVIDER=alpaca-iex \
+APCA_API_KEY_ID='your-alpaca-key-id' \
+APCA_API_SECRET_KEY='your-alpaca-secret-key' \
+docker compose -f docker-compose.full.yml up --build -d
+```

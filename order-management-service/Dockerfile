@@ -1,7 +1,7 @@
 FROM eclipse-temurin:21-jre-alpine
 RUN addgroup -S app && adduser -S app -G app
 WORKDIR /app
-COPY target/authorisation-service-*.jar application.jar
+COPY target/order-management-service-*.jar application.jar
 USER app
-EXPOSE 9000
+EXPOSE 8086
 ENTRYPOINT ["java", "-jar", "/app/application.jar"]

@@ -14,7 +14,7 @@ exchange or execution venue is connected yet.
 
 - Node.js 22.12 or newer
 - npm 11 or newer
-- Gateway running on `http://localhost:8080`
+- Gateway running on `http://localhost:8082`
 - Authorisation service running behind the gateway
 - Trading service running on `http://localhost:8081`
 
@@ -47,7 +47,7 @@ Copy `.env.example` to `.env.local` when overrides are needed:
 |---|---|---|
 | `VITE_OIDC_AUTHORITY` | Current frontend origin | Public browser-facing OIDC issuer |
 | `VITE_OIDC_CLIENT_ID` | `emporia-web` | Registered public SPA client |
-| `VITE_GATEWAY_PROXY_TARGET` | `http://localhost:8080` | Internal Vite proxy destination for gateway paths |
+| `VITE_GATEWAY_PROXY_TARGET` | `http://localhost:8082` | Internal Vite proxy destination for gateway paths |
 
 Never add a client secret to a `VITE_*` variable. Vite embeds those values in
 the public browser bundle.
