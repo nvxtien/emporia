@@ -40,11 +40,13 @@ final class ServiceAccessTokenProvider {
             throw new IllegalStateException("Market-data OAuth client credentials are not configured");
         }
 
-        Map<String, Object> body = tokenClient.post()
+        Map<String, Object> body = tokenClient
+                .post()
                 .contentType(MediaType.APPLICATION_FORM_URLENCODED)
                 .header(HttpHeaders.AUTHORIZATION, basicAuthentication())
                 .body("grant_type=client_credentials&scope=internal")
-                .retrieve().body(TOKEN_BODY);
+                .retrieve()
+                .body(TOKEN_BODY);
         if (body == null || !(body.get("access_token") instanceof String token) || token.isBlank()) {
             throw new IllegalStateException("Authorisation server returned no service access token");
         }

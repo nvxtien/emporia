@@ -168,6 +168,59 @@ class ExecutionCommandHandlerTest {
         assertThat(order.getRemainingQuantity()).isEqualByComparingTo("6");
     }
 
+    @Test
+    void rejectsInvalidSchemaVersion() {
+        TradingOrder order = order();
+        ExecutionCommand invalidVersionCommand = new ExecutionCommand(
+                SCHEMA_VERSION + 1, UUID.randomUUID(), ExecutionCommandType.FILL,
+                order.getId(), "desk-a", "ref-invalid",
+                new BigDecimal("1"), new BigDecimal("100"), "XNAS", Instant.now(), null
+        );
+
+        assertThatThrownBy(() -> handler.handle(invalidVersionCommand))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Unsupported execution command schema version");
+    }
+
+    @Test
+    void ignoreOpsOnAlreadyTerminalOrder() {
+        TradingOrder order = order();
+        order.reject("Already rejected");
+        when(orders.findByIdAndDeskId(order.getId(), "desk-a")).thenReturn(Optional.of(order));
+
+        // FILL on rejected order returns empty
+        var fillResult = handler.handle(command(order, ExecutionCommandType.FILL, "fill-term", BigDecimal.ONE, BigDecimal.TEN, null));
+        assertThat(fillResult).isEmpty();
+
+        // REJECT on terminal order returns empty
+        var rejectResult = handler.handle(command(order, ExecutionCommandType.REJECT, "rej-term", null, null, "venue error"));
+        assertThat(rejectResult).isEmpty();
+
+        // CANCEL on terminal order returns empty
+        var cancelResult = handler.handle(command(order, ExecutionCommandType.CANCEL, "cnl-term", null, null, "venue cancel"));
+        assertThat(cancelResult).isEmpty();
+    }
+
+    @Test
+    void deferredStrategyParentCancelWhenChildrenAreActive() {
+        TradingOrder parent = new TradingOrder(
+                UUID.randomUUID(), "trader-a", "desk-a", listing(), OrderSide.BUY, OrderType.LIMIT,
+                new BigDecimal("10"), new BigDecimal("102"), "SMART", "strategy-order",
+                null, null, "{}"
+        );
+        ReflectionTestUtils.setField(parent, "version", 0L);
+        TradingOrder child = child(parent);
+
+        when(orders.findByIdAndDeskId(parent.getId(), "desk-a")).thenReturn(Optional.of(parent));
+        when(orders.findByParentOrderIdAndStatusIn(org.mockito.ArgumentMatchers.eq(parent.getId()), any()))
+                .thenReturn(List.of(child));
+
+        // Confirming cancel on strategy parent with active children returns empty (deferred)
+        var result = handler.handle(command(parent, ExecutionCommandType.CANCEL, "strategy-cancel-1", null, null, null));
+        assertThat(result).isEmpty();
+        assertThat(parent.getStatus()).isEqualTo(OrderStatus.LIVE);
+    }
+
     private static TradingOrder order() {
         TradingOrder order = new TradingOrder(
                 UUID.randomUUID(), "trader-a", "desk-a", listing(), OrderSide.BUY, OrderType.LIMIT,

@@ -35,7 +35,48 @@
     </modules>
 
     <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.jacoco</groupId>
+                    <artifactId>jacoco-maven-plugin</artifactId>
+                    <version>0.8.15</version>
+                    <configuration>
+                        <excludes>
+                            <!-- exclude generated protobuf / FIX / gRPC classes -->
+                            <exclude>org/fixprotocol/*</exclude>
+                            <exclude>org.fixprotocol.*</exclude>
+                            <exclude>com/emporia/marketdata/grpc/*</exclude>
+                            <exclude>com.emporia.marketdata.grpc.*</exclude>
+                            <exclude>com/emporia/model/*</exclude>
+                            <exclude>com.emporia.model.*</exclude>
+                            <exclude>com/emporia/*/grpc/*</exclude>
+                            <exclude>com.emporia.*.grpc.*</exclude>
+                        </excludes>
+                    </configuration>
+                    <executions>
+                        <execution>
+                            <id>prepare-agent</id>
+                            <goals>
+                                <goal>prepare-agent</goal>
+                            </goals>
+                        </execution>
+                        <execution>
+                            <id>report</id>
+                            <phase>verify</phase>
+                            <goals>
+                                <goal>report</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
+            </plugins>
+        </pluginManagement>
         <plugins>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-pmd-plugin</artifactId>

@@ -1,0 +1,50 @@
+# Changelog
+
+All notable changes to the **Emporia Trading Platform** project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+---
+
+## [0.1.0] - 2026-07-30
+
+### 🚀 Added
+- **Project-Wide JaCoCo Test Coverage (91.95%)**:
+  - Expanded unit and integration test coverage across all 8 modules to achieve 91.95% overall instruction coverage (316 passing unit/integration tests).
+  - `trading-contracts`: Achieved **100.00%** coverage with `TradingEventsTest`.
+  - `portfolio-service`: Achieved **98.35%** coverage with receipt service, validator, and repository specs.
+  - `order-command-service`: Achieved **98.51%** coverage across controllers, gateways, and token providers.
+  - `static-data-service`: Achieved **96.91%** coverage with Alpaca and Legacy data importer boundary specs.
+  - `order-management-service`: Achieved **94.73%** coverage with 11 new test suites covering domain command handlers, SSE streaming, recovery controllers, and metrics.
+  - `user-preferences-service`: Achieved **91.75%** coverage with watchlist venue preference specs.
+  - `market-data-service`: Achieved **88.75%** business logic coverage across REST, gRPC, and FIX simulator providers.
+  - `execution-service`: Achieved **86.72%** coverage across ExchangeCore, FIX gateways, and strategy runtimes.
+- **Architecture & Order Lifecycle Documentation**:
+  - Added [`docs/ARCHITECTURE_FLOW.md`](docs/ARCHITECTURE_FLOW.md) featuring an end-to-end Mermaid architecture diagram, service ownership port matrix, and step-by-step order lifecycle guide.
+- **Design Patterns Specification**:
+  - Added [`docs/DESIGN_PATTERNS.md`](docs/DESIGN_PATTERNS.md) documenting API Gateway, Event-Driven Architecture, CQRS, Database-per-Service, Choreography Saga, Strategy, State Machine, Observer, Adapter, Decorator, and Facade patterns.
+
+### 🛠️ Fixed & Improved
+- **Protobuf Generation & Build Stability**:
+  - Isolated `protobuf-maven-plugin` temp directories to fix build issues on macOS.
+- **Fluent RestClient Code Formatting**:
+  - Formatted Spring `RestClient` method calls to keep chained dot operators (`.get()`, `.uri()`, `.header()`, `.retrieve()`, `.body()`) on separate lines across `order-command-service`, `user-preferences-service`, and `market-data-service`.
+- **Security Test Configurer Lambda Mocks**:
+  - Standardized `SecurityConfigTest` mocks using `.thenAnswer()` to execute `Customizer` lambdas under Mockito deep stubs.
+
+---
+
+## [0.1.0-SNAPSHOT] - 2026-07-26
+
+### 🚀 Added
+- **Multi-Service Microservice Boundaries**:
+  - Deployed independent business microservices: `authorisation-service` (port `9000`), `static-data-service` (`8081`), `user-preferences-service` (`8083`), `market-data-service` (`8084`), `order-command-service` (`8085`), `order-management-service` (`8086`), `execution-service` (`8087`), and `portfolio-service` (`8088`).
+- **Kafka Event Backplane**:
+  - Configured versioned Kafka topics for commands (`emporia.order.commands.v1`), domain order events (`emporia.orders.v1`), order results (`emporia.order.results.v1`), and execution commands (`emporia.execution.commands.v1`).
+- **Exchange Core LMAX & FIX Protocol Adapters**:
+  - Integrated `ExchangeCoreExecutionVenueGateway` with LMAX Disruptor memory engine and checkpoint stores.
+  - Integrated `FixExecutionVenueGateway` supporting FIXT 1.1 / FIX 5.0 SP2 execution report processing.
+- **Formal Verification & Property Invariants**:
+  - Added TLA+ model checking specification for order state lifecycle (`verification/order-lifecycle/`).
+  - Added Jqwik property-based tests for order quantity and price accounting.

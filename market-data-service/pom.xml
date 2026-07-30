@@ -62,52 +62,28 @@
                 </configuration>
                 <executions>
                     <execution>
-                        <id>emporia-market-data-java</id>
+                        <id>emporia-market-data-contract</id>
+                        <phase>generate-sources</phase>
                         <goals>
                             <goal>compile</goal>
-                        </goals>
-                        <configuration>
-                            <temporaryProtoFileDirectory>
-                                ${project.build.directory}/protoc-dependencies/emporia-java
-                            </temporaryProtoFileDirectory>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>emporia-market-data-grpc</id>
-                        <goals>
                             <goal>compile-custom</goal>
                         </goals>
                         <configuration>
-                            <temporaryProtoFileDirectory>
-                                ${project.build.directory}/protoc-dependencies/emporia-grpc
-                            </temporaryProtoFileDirectory>
-                        </configuration>
-                    </execution>
-                    <execution>
-                        <id>fix-simulator-java</id>
-                        <goals>
-                            <goal>compile</goal>
-                        </goals>
-                        <configuration>
-                            <protoSourceRoot>${project.basedir}/../../protobuf/fix</protoSourceRoot>
-                            <outputDirectory>${project.build.directory}/generated-sources/fix/java</outputDirectory>
-                            <temporaryProtoFileDirectory>
-                                ${project.build.directory}/protoc-dependencies/fix-java
-                            </temporaryProtoFileDirectory>
+                            <temporaryProtoFileDirectory>${project.build.directory}/protoc-dependencies/emporia</temporaryProtoFileDirectory>
                             <clearOutputDirectory>false</clearOutputDirectory>
                         </configuration>
                     </execution>
                     <execution>
-                        <id>fix-simulator-grpc</id>
+                        <id>fix-simulator-contract</id>
+                        <phase>generate-sources</phase>
                         <goals>
+                            <goal>compile</goal>
                             <goal>compile-custom</goal>
                         </goals>
                         <configuration>
                             <protoSourceRoot>${project.basedir}/../../protobuf/fix</protoSourceRoot>
-                            <outputDirectory>${project.build.directory}/generated-sources/fix/grpc-java</outputDirectory>
-                            <temporaryProtoFileDirectory>
-                                ${project.build.directory}/protoc-dependencies/fix-grpc
-                            </temporaryProtoFileDirectory>
+                            <outputDirectory>${project.build.directory}/generated-sources/fix/java</outputDirectory>
+                            <temporaryProtoFileDirectory>${project.build.directory}/protoc-dependencies/fix</temporaryProtoFileDirectory>
                             <clearOutputDirectory>false</clearOutputDirectory>
                         </configuration>
                     </execution>
@@ -117,26 +93,7 @@
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
-            <plugin>
-                <groupId>org.jacoco</groupId>
-                <artifactId>jacoco-maven-plugin</artifactId>
-                <version>0.8.15</version>
-                <executions>
-                    <execution>
-                        <id>prepare-agent</id>
-                        <goals>
-                            <goal>prepare-agent</goal>
-                        </goals>
-                    </execution>
-                    <execution>
-                        <id>report</id>
-                        <phase>verify</phase>
-                        <goals>
-                            <goal>report</goal>
-                        </goals>
-                    </execution>
-                </executions>
-            </plugin>
+
         </plugins>
     </build>
 </project>

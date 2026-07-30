@@ -10,7 +10,7 @@ frontend development server proxies protocol requests to the gateway.
 - Java 21 or newer
 - Maven 3.9 or newer
 - PostgreSQL running on `localhost:5432`
-- Database `english` owned by, or accessible to, user `tiennv`
+- Database `emporia` owned by, or accessible to, user `postgres`
 
 ## Run locally
 
@@ -91,8 +91,8 @@ mvn test
 ```bash
 docker build -t emporia-authorisation-service emporia/authorisation-service
 docker run --rm -p 9000:9000 \
-  -e DB_URL=jdbc:postgresql://host.docker.internal:5432/english \
-  -e DB_USERNAME=tiennv \
+  -e DB_URL=jdbc:postgresql://host.docker.internal:5432/emporia \
+  -e DB_USERNAME=postgres \
   -e DB_PASSWORD='your-local-database-password' \
   -e AUTH_ISSUER=http://localhost:3000 \
   emporia-authorisation-service
@@ -103,8 +103,8 @@ docker run --rm -p 9000:9000 \
 | Environment variable | Default | Purpose |
 |---|---|---|
 | `SERVER_PORT` | `9000` | HTTP listening port |
-| `DB_URL` | `jdbc:postgresql://localhost:5432/english` | PostgreSQL JDBC URL |
-| `DB_USERNAME` | `tiennv` | PostgreSQL username |
+| `DB_URL` | `jdbc:postgresql://localhost:5432/emporia` | PostgreSQL JDBC URL |
+| `DB_USERNAME` | `postgres` | PostgreSQL username |
 | `DB_PASSWORD` | none | PostgreSQL password (required) |
 | `DB_SCHEMA` | `emporia_authorisation` | Service-owned PostgreSQL schema |
 | `AUTH_ISSUER` | `http://localhost:3000` | Public browser-facing issuer URL, proxied to the gateway |

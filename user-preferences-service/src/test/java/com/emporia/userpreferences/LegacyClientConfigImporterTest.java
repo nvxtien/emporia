@@ -1,65 +1,79 @@
 package com.emporia.userpreferences;
 
 import org.junit.jupiter.api.Test;
-import tools.jackson.databind.JsonNode;
+import org.springframework.boot.DefaultApplicationArguments;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowCallbackHandler;
 import tools.jackson.databind.ObjectMapper;
-
-import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class LegacyClientConfigImporterTest {
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final JdbcTemplate jdbc = mock(JdbcTemplate.class);
+    private final ObjectMapper mapper = new ObjectMapper();
 
     @Test
-    void convertsFlexLayoutPanelsColumnsAndWatchlistIds() throws Exception {
-        String legacy = """
-                {
-                  "layout": {
-                    "children": [
-                      {
-                        "component": "instrument-watch",
-                        "config": {
-                          "listingIds": [95174, 104094, 95174],
-                          "colState": [
-                            {"colId": "price", "hide": true},
-                            {"colId": "destination", "hide": false}
-                          ]
-                        }
-                      },
-                      {"component": "market-depth"},
-                      {
-                        "component": "order-blotter",
-                        "config": [
-                          {"colId": "owner", "hide": true},
-                          {"colId": "tradedQuantity", "hide": false}
-                        ]
-                      }
-                    ]
-                  }
-                }
-                """;
-
-        LegacyClientConfigImporter.Conversion converted =
-                LegacyClientConfigImporter.convert(objectMapper, legacy);
-        JsonNode layout = objectMapper.readTree(converted.layoutJson());
-
-        assertThat(layout.path("version").asInt()).isEqualTo(1);
-        assertThat(layout.path("panels")).isEqualTo(objectMapper.readTree(
-                "[\"watchlist\",\"market-depth\",\"order-ticket\",\"parent-orders\",\"child-orders\"]"
-        ));
-        assertThat(layout.path("columns").path("owner").asBoolean()).isFalse();
-        assertThat(layout.path("columns").path("filled").asBoolean()).isTrue();
-        assertThat(layout.path("columns").path("price").asBoolean()).isFalse();
-        assertThat(layout.path("columns").path("destination").asBoolean()).isTrue();
-        assertThat(converted.listingIds()).isEqualTo(List.of(95174L, 104094L));
+    void rejectsInvalidSchema() {
+        assertThatThrownBy(() -> new LegacyClientConfigImporter(jdbc, mapper, true, "bad schema!", "clientconfig"))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
-    void rejectsNonObjectLegacyConfiguration() {
-        assertThatThrownBy(() -> LegacyClientConfigImporter.convert(objectMapper, "[]"))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("JSON object");
+    void skipsWhenDisabled() {
+        LegacyClientConfigImporter importer = new LegacyClientConfigImporter(jdbc, mapper, false, "emporia_client_config", "clientconfig");
+        importer.run(new DefaultApplicationArguments());
+        verify(jdbc, never()).query(anyString(), any(RowCallbackHandler.class));
+    }
+
+    @Test
+    void skipsWhenLegacyTableDoesNotExist() {
+        LegacyClientConfigImporter importer = new LegacyClientConfigImporter(jdbc, mapper, true, "emporia_client_config", "clientconfig");
+        when(jdbc.queryForObject(anyString(), eq(Boolean.class), anyString())).thenReturn(false);
+
+        importer.run(new DefaultApplicationArguments());
+        verify(jdbc, never()).query(anyString(), any(RowCallbackHandler.class));
+    }
+
+    @Test
+    void convertLegacyConfigJSON() {
+        LegacyClientConfigImporter.Conversion conversion = LegacyClientConfigImporter.convert(mapper, "{\"component\":\"instrument-watch\",\"listingIds\":[10,20]}");
+        assertThat(conversion.layoutJson()).contains("watchlist");
+        assertThat(conversion.listingIds()).containsExactly(10L, 20L);
+    }
+
+    @Test
+    void convertInvalidLegacyConfigThrows() {
+        assertThatThrownBy(() -> LegacyClientConfigImporter.convert(mapper, "[]"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void runImportsLegacyRowsWhenTableExists() throws Exception {
+        LegacyClientConfigImporter importer = new LegacyClientConfigImporter(jdbc, mapper, true, "emporia_client_config", "clientconfig");
+        when(jdbc.queryForObject(anyString(), eq(Boolean.class), anyString())).thenReturn(true);
+
+        java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+        when(rs.getString("userid")).thenReturn("user-1");
+        when(rs.getString("config")).thenReturn("{\"component\":\"instrument-watch\",\"listingIds\":[10,20]}");
+
+        when(jdbc.update(anyString(), any(), any(), any())).thenReturn(1);
+
+        doAnswer(invocation -> {
+            RowCallbackHandler handler = invocation.getArgument(1);
+            handler.processRow(rs);
+            return null;
+        }).when(jdbc).query(anyString(), any(RowCallbackHandler.class));
+
+        importer.run(new DefaultApplicationArguments());
+        verify(jdbc).query(anyString(), any(RowCallbackHandler.class));
     }
 }

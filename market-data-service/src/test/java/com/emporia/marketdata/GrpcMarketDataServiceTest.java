@@ -59,6 +59,67 @@ class GrpcMarketDataServiceTest {
         assertThat(result.completed).isTrue();
     }
 
+    @Test
+    void connectRejectsEmptySubscriberId() {
+        RecordingObserver<ClobQuote> observer = new RecordingObserver<>();
+        service.connect(MdsConnectRequest.newBuilder().setSubscriberId("   ").build(), observer);
+        assertThat(observer.error).isNotNull();
+    }
+
+    @Test
+    void subscribeRejectsUnknownSubscriber() {
+        RecordingObserver<Empty> result = new RecordingObserver<>();
+        service.subscribe(MdsSubscribeRequest.newBuilder()
+                .setSubscriberId("non-existent").setListingId(42).build(), result);
+        assertThat(result.error).isNotNull();
+    }
+
+    @Test
+    void subscribeHandlesAddListingFailure() {
+        when(streams.subscribe(any(MarketDataService.ResolvedListings.class), any())).thenReturn(subscription);
+        when(tokens.authorizationHeader()).thenReturn("Bearer token");
+        RecordingObserver<ClobQuote> quotes = new RecordingObserver<>();
+        RecordingObserver<Empty> result = new RecordingObserver<>();
+        service.connect(MdsConnectRequest.newBuilder().setSubscriberId("client-1").build(), quotes);
+
+        org.mockito.Mockito.doThrow(new RuntimeException("stream error"))
+                .when(streams).addListing(subscription, 42, "Bearer token");
+
+        service.subscribe(MdsSubscribeRequest.newBuilder()
+                .setSubscriberId("client-1").setListingId(42).build(), result);
+        assertThat(result.error).isNotNull();
+    }
+
+    @Test
+    void sinkFailedTriggersObserverError() {
+        when(streams.subscribe(any(MarketDataService.ResolvedListings.class), any())).thenReturn(subscription);
+        RecordingObserver<ClobQuote> observer = new RecordingObserver<>();
+        service.connect(MdsConnectRequest.newBuilder().setSubscriberId("client-1").build(), observer);
+
+        ArgumentCaptor<ConflatedQuoteSubscription.Sink> sink =
+                ArgumentCaptor.forClass(ConflatedQuoteSubscription.Sink.class);
+        verify(streams).subscribe(any(MarketDataService.ResolvedListings.class), sink.capture());
+
+        sink.getValue().failed(new RuntimeException("sink failed"));
+        assertThat(observer.error).isNotNull();
+    }
+
+    @Test
+    void reconnectingClientClosesPreviousSubscription() {
+        ConflatedQuoteSubscription sub1 = mock(ConflatedQuoteSubscription.class);
+        ConflatedQuoteSubscription sub2 = mock(ConflatedQuoteSubscription.class);
+        when(streams.subscribe(any(), any())).thenReturn(sub1).thenReturn(sub2);
+
+        RecordingObserver<ClobQuote> obs1 = new RecordingObserver<>();
+        RecordingObserver<ClobQuote> obs2 = new RecordingObserver<>();
+
+        service.connect(MdsConnectRequest.newBuilder().setSubscriberId("same-client").build(), obs1);
+        service.connect(MdsConnectRequest.newBuilder().setSubscriberId("same-client").build(), obs2);
+
+        verify(sub1).close();
+        assertThat(obs1.completed).isTrue();
+    }
+
     private static MarketDataService.Quote quote() {
         return new MarketDataService.Quote(1, "AAPL", "USD", new BigDecimal("199.15"), BigDecimal.ONE,
                 new BigDecimal("198"), BigDecimal.ONE, BigDecimal.ONE, BigDecimal.TEN,

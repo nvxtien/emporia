@@ -31,8 +31,10 @@ public class OrderQueryController {
     private final ExecutionRepository executions;
     private final OrderStreamService streams;
 
-    OrderQueryController(TradingOrderRepository orders, OrderEventRepository events, ExecutionRepository executions,
-                         OrderStreamService streams) {
+    OrderQueryController(TradingOrderRepository orders,
+            OrderEventRepository events,
+            ExecutionRepository executions,
+            OrderStreamService streams) {
         this.orders = orders;
         this.events = events;
         this.executions = executions;

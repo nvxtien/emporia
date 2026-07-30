@@ -30,7 +30,7 @@ The default PostgreSQL schema is `emporia_client_config`.
 | Environment variable | Default |
 |---|---|
 | `SERVER_PORT` | `8083` |
-| `DB_URL` | `jdbc:postgresql://localhost:5432/english` |
+| `DB_URL` | `jdbc:postgresql://localhost:5432/emporia` |
 | `DB_SCHEMA` | `emporia_client_config` |
 | `EMPORIA_STATIC_DATA_URL` | `http://localhost:8081` |
 

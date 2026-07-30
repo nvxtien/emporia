@@ -21,21 +21,33 @@ public class StaticDataClient {
     }
 
     ListingSnapshot get(long id, String authorization) {
-        return client.get().uri("/instruments/{id}", id).header(HttpHeaders.AUTHORIZATION, authorization)
-                .retrieve().body(ListingSnapshot.class);
+        return client
+                .get()
+                .uri("/instruments/{id}", id)
+                .header(HttpHeaders.AUTHORIZATION, authorization)
+                .retrieve()
+                .body(ListingSnapshot.class);
     }
 
     List<ListingSnapshot> batch(Collection<Long> ids, String authorization) {
         if (ids.isEmpty()) return List.of();
         String value = ids.stream().map(String::valueOf).collect(Collectors.joining(","));
-        return client.get().uri(uri -> uri.path("/instruments/batch").queryParam("ids", value).build())
-                .header(HttpHeaders.AUTHORIZATION, authorization).retrieve().body(LISTINGS);
+        return client
+                .get()
+                .uri(uri -> uri.path("/instruments/batch").queryParam("ids", value).build())
+                .header(HttpHeaders.AUTHORIZATION, authorization)
+                .retrieve()
+                .body(LISTINGS);
     }
 
     List<ListingSnapshot> bySymbols(Collection<String> symbols, String authorization) {
         if (symbols.isEmpty()) return List.of();
         String value = String.join(",", symbols);
-        return client.get().uri(uri -> uri.path("/instruments/by-symbols").queryParam("symbols", value).build())
-                .header(HttpHeaders.AUTHORIZATION, authorization).retrieve().body(LISTINGS);
+        return client
+                .get()
+                .uri(uri -> uri.path("/instruments/by-symbols").queryParam("symbols", value).build())
+                .header(HttpHeaders.AUTHORIZATION, authorization)
+                .retrieve()
+                .body(LISTINGS);
     }
 }

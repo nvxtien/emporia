@@ -56,7 +56,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 @ConditionalOnProperty(name = "emporia.execution.venue-mode", havingValue = "exchange-core")
-class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle {
+public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(ExchangeCoreExecutionVenueGateway.class);
     private static final String ACCOUNTING_FULL_EQUITY = "full-equity-risk";
 
@@ -66,7 +66,7 @@ class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartL
     private final Set<Integer> symbols = ConcurrentHashMap.newKeySet();
     private final Map<Long, Correlation> correlations = new ConcurrentHashMap<>();
 
-    ExchangeCoreExecutionVenueGateway(
+    public ExchangeCoreExecutionVenueGateway(
             ExecutionCommandPublisher commands,
             ServiceAccessTokenProvider tokenProvider,
             Optional<DataSource> dataSource,
@@ -97,7 +97,7 @@ class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartL
                     portfolioTimeout,
                     Map.of("Authorization", tokenProvider.authorization()));
             // Use a token-refreshing gateway so each HTTP call picks up a fresh token.
-            HttpEmporiaPortfolioGateway httpGateway = new HttpEmporiaPortfolioGateway(gatewayConfig) {
+            exchange.core2.core.simulation.http.HttpEmporiaPortfolioGateway httpGateway = new exchange.core2.core.simulation.http.HttpEmporiaPortfolioGateway(gatewayConfig) {
                 @Override
                 public java.util.concurrent.CompletableFuture<exchange.core2.core.simulation.EmporiaPortfolioSeed> load(long clientId) {
                     return refreshedGateway(exchangeId, portfolioUrl, portfolioTimeout, tokenProvider).load(clientId);
@@ -144,7 +144,7 @@ class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartL
         return new ProductionSimulationVenue(exchangeId, storage, partitions, accounting);
     }
 
-    ExchangeCoreExecutionVenueGateway(ExecutionCommandPublisher commands, ExchangeCoreVenue venue) {
+    public ExchangeCoreExecutionVenueGateway(ExecutionCommandPublisher commands, ExchangeCoreVenue venue) {
         this.commands = Objects.requireNonNull(commands, "commands");
         this.venue = Objects.requireNonNull(venue, "venue");
         this.symbols.addAll(venue.restoredSymbols());
@@ -542,8 +542,12 @@ class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartL
         }
     }
 
-    private static final class ExchangeCoreCheckpointException extends RuntimeException {
-        private ExchangeCoreCheckpointException(IOException cause) {
+    static final class ExchangeCoreCheckpointException extends RuntimeException {
+        ExchangeCoreCheckpointException(String message, Throwable cause) {
+            super(message, cause);
+        }
+
+        ExchangeCoreCheckpointException(IOException cause) {
             super("Exchange-core checkpoint failed", cause);
         }
     }

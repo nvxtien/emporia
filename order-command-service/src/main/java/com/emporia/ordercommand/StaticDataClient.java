@@ -11,7 +11,11 @@ class StaticDataClient {
     private final RestClient client;
 
     StaticDataClient(@Value("${emporia.static-data.url}") String baseUrl) {
-        this.client = RestClient.builder().baseUrl(baseUrl).build();
+        this(RestClient.builder().baseUrl(baseUrl).build());
+    }
+
+    StaticDataClient(RestClient client) {
+        this.client = client;
     }
 
     ListingSnapshot get(long id, String authorization) {

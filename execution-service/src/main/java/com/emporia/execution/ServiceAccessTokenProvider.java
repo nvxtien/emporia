@@ -22,7 +22,11 @@ class ServiceAccessTokenProvider {
             @Value("${emporia.auth.token-url}") String tokenUrl,
             @Value("${emporia.auth.client-id}") String clientId,
             @Value("${emporia.auth.client-secret}") String clientSecret) {
-        this.tokens = builder.baseUrl(tokenUrl).build();
+        this(builder.baseUrl(tokenUrl).build(), clientId, clientSecret);
+    }
+
+    ServiceAccessTokenProvider(RestClient tokens, String clientId, String clientSecret) {
+        this.tokens = tokens;
         this.clientId = clientId;
         this.clientSecret = clientSecret;
     }

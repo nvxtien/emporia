@@ -96,6 +96,43 @@ class PortfolioReceiptServiceTest {
         assertThat(store.applied).isNull();
     }
 
+    @Test
+    void loadDelegatesToStore() {
+        final RecordingPortfolioStore store = new RecordingPortfolioStore();
+        store.seedToReturn = new RiskSeed(1, 101L, 10L, List.of());
+        final PortfolioReceiptService service = service(store);
+        assertThat(service.load(101L)).isEqualTo(store.seedToReturn);
+    }
+
+    @Test
+    void loadRejectsNonPositiveClientId() {
+        final RecordingPortfolioStore store = new RecordingPortfolioStore();
+        final PortfolioReceiptService service = service(store);
+        assertThatThrownBy(() -> service.load(0L))
+                .isInstanceOf(PortfolioContractException.class)
+                .hasMessageContaining("clientId must be positive");
+    }
+
+    @Test
+    void rejectsEventIdWithMatchingDigestButDifferentPayloadBytes() {
+        final byte[] payload = "{}".getBytes(StandardCharsets.UTF_8);
+        final byte[] diffPayload = "[]".getBytes(StandardCharsets.UTF_8);
+        final RecordingPortfolioStore store = new RecordingPortfolioStore();
+        // same digest recorded, but different byte array
+        store.existing = new PortfolioReceipt(EMPTY_JSON_SHA256, diffPayload);
+
+        assertThatThrownBy(() -> service(store).apply(
+                13, 101, "exchange-1:13:101", payload, snapshot()))
+                .isInstanceOf(PortfolioIdempotencyConflictException.class);
+    }
+
+    @Test
+    void twoArgConstructorUsesDefaultClock() {
+        final RecordingPortfolioStore store = new RecordingPortfolioStore();
+        PortfolioReceiptService service = new PortfolioReceiptService(store, new PortfolioSnapshotValidator());
+        assertThat(service).isNotNull();
+    }
+
     private PortfolioReceiptService service(
             final RecordingPortfolioStore store) {
         return new PortfolioReceiptService(
@@ -116,6 +153,7 @@ class PortfolioReceiptServiceTest {
     private static final class RecordingPortfolioStore
             implements PortfolioStore {
 
+        private RiskSeed seedToReturn;
         private long lockedClientId;
         private PortfolioReceipt existing;
         private String recordedEventId;
@@ -127,7 +165,7 @@ class PortfolioReceiptServiceTest {
 
         @Override
         public RiskSeed load(final long clientId) {
-            throw new UnsupportedOperationException();
+            return seedToReturn;
         }
 
         @Override

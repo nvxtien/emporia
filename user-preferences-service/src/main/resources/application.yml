@@ -4,8 +4,8 @@ server:
 spring:
   application.name: user-preferences-service
   datasource:
-    url: ${DB_URL:jdbc:postgresql://localhost:5432/english}
-    username: ${DB_USERNAME:tiennv}
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/emporia}
+    username: ${DB_USERNAME:postgres}
     password: ${DB_PASSWORD:admin123}
     hikari:
       pool-name: ${DB_POOL_NAME:user-preferences-pool}
