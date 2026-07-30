@@ -1,0 +1,352 @@
+x-spring-healthcheck: &spring-healthcheck
+  interval: 5s
+  timeout: 3s
+  retries: 30
+  start_period: 20s
+
+x-postgres-env: &postgres-env
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: admin123
+
+x-postgres-healthcheck: &postgres-healthcheck
+  test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+  interval: 5s
+  timeout: 5s
+  retries: 10
+
+services:
+  authorisation-postgres:
+    image: postgres:16-alpine
+    container_name: emporia-authorisation-postgres
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: emporia_authorisation
+    ports:
+      - "5433:5432"
+    volumes:
+      - emporia-authorisation-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *postgres-healthcheck
+
+  static-data-postgres:
+    image: postgres:16-alpine
+    container_name: emporia-static-data-postgres
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: emporia_static_data
+    ports:
+      - "5434:5432"
+    volumes:
+      - emporia-static-data-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *postgres-healthcheck
+
+  user-preferences-postgres:
+    image: postgres:16-alpine
+    container_name: emporia-user-preferences-postgres
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: emporia_user_preferences
+    ports:
+      - "5435:5432"
+    volumes:
+      - emporia-user-preferences-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *postgres-healthcheck
+
+  order-management-postgres:
+    image: postgres:16-alpine
+    container_name: emporia-order-management-postgres
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: emporia_order_management
+    ports:
+      - "5436:5432"
+    volumes:
+      - emporia-order-management-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *postgres-healthcheck
+
+  execution-postgres:
+    image: postgres:16-alpine
+    container_name: emporia-execution-postgres
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: emporia_execution
+    ports:
+      - "5437:5432"
+    volumes:
+      - emporia-execution-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *postgres-healthcheck
+
+  portfolio-postgres:
+    image: postgres:16-alpine
+    container_name: emporia-portfolio-postgres
+    environment:
+      <<: *postgres-env
+      POSTGRES_DB: emporia_portfolio
+    ports:
+      - "5438:5432"
+    volumes:
+      - emporia-portfolio-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *postgres-healthcheck
+
+  kafka:
+    image: apache/kafka:4.3.1
+    container_name: emporia-kafka
+    ports:
+      - "9092:9094"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    volumes:
+      - emporia-kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  authorisation-service:
+    build:
+      context: ./authorisation-service
+    container_name: emporia-authorisation
+    ports:
+      - "9000:9000"
+    environment:
+      DB_URL: jdbc:postgresql://authorisation-postgres:5432/emporia_authorisation
+      DB_USERNAME: postgres
+      DB_PASSWORD: admin123
+      AUTH_ISSUER: http://localhost:3000
+      OAUTH_REDIRECT_URI: http://localhost:3000/auth/callback
+      OAUTH_POST_LOGOUT_REDIRECT_URI: http://localhost:3000/auth/logout-callback
+      BOOTSTRAP_ADMIN_ENABLED: "true"
+      BOOTSTRAP_ADMIN_USERNAME: admin
+      BOOTSTRAP_ADMIN_EMAIL: admin@localhost
+      BOOTSTRAP_ADMIN_PASSWORD: admin123
+      BOOTSTRAP_ADMIN_DESK: default
+      BOOTSTRAP_ADMIN_CAN_TRADE: "true"
+    depends_on:
+      authorisation-postgres:
+        condition: service_healthy
+    healthcheck:
+      <<: *spring-healthcheck
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9000/actuator/health || exit 1"]
+
+  static-data-service:
+    build:
+      context: ./static-data-service
+    container_name: emporia-static-data
+    ports:
+      - "8081:8081"
+    environment:
+      DB_URL: jdbc:postgresql://static-data-postgres:5432/emporia_static_data
+      DB_USERNAME: postgres
+      DB_PASSWORD: admin123
+      EMPORIA_AUTH_ISSUER: http://localhost:3000
+      EMPORIA_AUTH_JWK_SET_URI: http://authorisation-service:9000/oauth2/jwks
+    depends_on:
+      static-data-postgres:
+        condition: service_healthy
+    healthcheck:
+      <<: *spring-healthcheck
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8081/actuator/health || exit 1"]
+
+  user-preferences-service:
+    build:
+      context: ./user-preferences-service
+    container_name: emporia-user-preferences
+    ports:
+      - "8083:8083"
+    environment:
+      DB_URL: jdbc:postgresql://user-preferences-postgres:5432/emporia_user_preferences
+      DB_USERNAME: postgres
+      DB_PASSWORD: admin123
+      EMPORIA_STATIC_DATA_URL: http://static-data-service:8081
+      EMPORIA_AUTH_ISSUER: http://localhost:3000
+      EMPORIA_AUTH_JWK_SET_URI: http://authorisation-service:9000/oauth2/jwks
+    depends_on:
+      user-preferences-postgres:
+        condition: service_healthy
+    healthcheck:
+      <<: *spring-healthcheck
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8083/actuator/health || exit 1"]
+
+  market-data-service:
+    build:
+      context: ./market-data-service
+    container_name: emporia-market-data
+    ports:
+      - "8084:8084"
+      - "50551:50551"
+    environment:
+      EMPORIA_STATIC_DATA_URL: http://static-data-service:8081
+      EMPORIA_AUTH_TOKEN_URL: http://authorisation-service:9000/oauth2/token
+      EMPORIA_AUTH_ISSUER: http://localhost:3000
+      EMPORIA_AUTH_JWK_SET_URI: http://authorisation-service:9000/oauth2/jwks
+      MARKET_DATA_PROVIDER: ${MARKET_DATA_PROVIDER:-simulated}
+      APCA_API_KEY_ID: ${APCA_API_KEY_ID:-}
+      APCA_API_SECRET_KEY: ${APCA_API_SECRET_KEY:-}
+    depends_on:
+      authorisation-service:
+        condition: service_healthy
+      static-data-service:
+        condition: service_healthy
+    healthcheck:
+      <<: *spring-healthcheck
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8084/actuator/health || exit 1"]
+
+  order-command-service:
+    build:
+      context: ./order-command-service
+    container_name: emporia-order-command
+    ports:
+      - "8085:8085"
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      EMPORIA_STATIC_DATA_URL: http://static-data-service:8081
+      EMPORIA_AUTH_ISSUER: http://localhost:3000
+      EMPORIA_AUTH_JWK_SET_URI: http://authorisation-service:9000/oauth2/jwks
+    depends_on:
+      kafka:
+        condition: service_healthy
+      authorisation-service:
+        condition: service_healthy
+      static-data-service:
+        condition: service_healthy
+    healthcheck:
+      <<: *spring-healthcheck
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8085/actuator/health || exit 1"]
+
+  order-management-service:
+    build:
+      context: ./order-management-service
+    container_name: emporia-order-management
+    ports:
+      - "8086:8086"
+    environment:
+      DB_URL: jdbc:postgresql://order-management-postgres:5432/emporia_order_management
+      DB_USERNAME: postgres
+      DB_PASSWORD: admin123
+      KAFKA_BROKERS: kafka:9092
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      EMPORIA_AUTH_ISSUER: http://localhost:3000
+      EMPORIA_AUTH_JWK_SET_URI: http://authorisation-service:9000/oauth2/jwks
+    depends_on:
+      order-management-postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      authorisation-service:
+        condition: service_healthy
+    healthcheck:
+      <<: *spring-healthcheck
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8086/actuator/health || exit 1"]
+
+  execution-service:
+    build:
+      context: ./execution-service
+    container_name: emporia-execution
+    ports:
+      - "8087:8087"
+    environment:
+      DB_URL: jdbc:postgresql://execution-postgres:5432/emporia_execution
+      DB_USERNAME: postgres
+      DB_PASSWORD: admin123
+      KAFKA_BROKERS: kafka:9092
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    depends_on:
+      execution-postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      <<: *spring-healthcheck
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8087/actuator/health || exit 1"]
+
+  portfolio-service:
+    build:
+      context: ./portfolio-service
+    container_name: emporia-portfolio
+    ports:
+      - "8088:8088"
+    environment:
+      DB_URL: jdbc:postgresql://portfolio-postgres:5432/emporia_portfolio
+      DB_USERNAME: postgres
+      DB_PASSWORD: admin123
+      EMPORIA_AUTH_ISSUER: http://localhost:3000
+      EMPORIA_AUTH_JWK_SET_URI: http://authorisation-service:9000/oauth2/jwks
+    depends_on:
+      portfolio-postgres:
+        condition: service_healthy
+      authorisation-service:
+        condition: service_healthy
+    healthcheck:
+      <<: *spring-healthcheck
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8088/actuator/health || exit 1"]
+
+  gateway:
+    build:
+      context: ./gateway
+    container_name: emporia-gateway
+    ports:
+      - "8082:8082"
+    environment:
+      JAVA_TOOL_OPTIONS: -Dnetworkaddress.cache.ttl=5 -Dnetworkaddress.cache.negative.ttl=1
+      SERVER_PORT: "8082"
+      EMPORIA_AUTH_ISSUER: http://localhost:3000
+      EMPORIA_AUTH_JWK_SET_URI: http://authorisation-service:9000/oauth2/jwks
+      EMPORIA_AUTH_URL: http://authorisation-service:9000
+      EMPORIA_STATIC_DATA_URL: http://static-data-service:8081
+      EMPORIA_USER_PREFERENCES_URL: http://user-preferences-service:8083
+      EMPORIA_MARKET_DATA_URL: http://market-data-service:8084
+      EMPORIA_ORDER_COMMAND_URL: http://order-command-service:8085
+      EMPORIA_ORDER_MANAGEMENT_URL: http://order-management-service:8086
+    depends_on:
+      authorisation-service:
+        condition: service_healthy
+      static-data-service:
+        condition: service_healthy
+      user-preferences-service:
+        condition: service_healthy
+      market-data-service:
+        condition: service_healthy
+      order-command-service:
+        condition: service_healthy
+      order-management-service:
+        condition: service_healthy
+    healthcheck:
+      <<: *spring-healthcheck
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8082/actuator/health || exit 1"]
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: emporia-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+volumes:
+  emporia-authorisation-postgres-data:
+  emporia-static-data-postgres-data:
+  emporia-user-preferences-postgres-data:
+  emporia-order-management-postgres-data:
+  emporia-execution-postgres-data:
+  emporia-portfolio-postgres-data:
+  emporia-kafka-data:

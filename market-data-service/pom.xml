@@ -82,6 +82,9 @@
                         </goals>
                         <configuration>
                             <protoSourceRoot>${project.basedir}/../../protobuf/fix</protoSourceRoot>
+                            <includeDirectories>
+                                <includeDirectory>${project.basedir}/../../protobuf/fix</includeDirectory>
+                            </includeDirectories>
                             <outputDirectory>${project.build.directory}/generated-sources/fix/java</outputDirectory>
                             <temporaryProtoFileDirectory>${project.build.directory}/protoc-dependencies/fix</temporaryProtoFileDirectory>
                             <clearOutputDirectory>false</clearOutputDirectory>
@@ -92,6 +95,9 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <mainClass>com.emporia.marketdata.MarketDataServiceApplication</mainClass>
+                </configuration>
             </plugin>
 
         </plugins>

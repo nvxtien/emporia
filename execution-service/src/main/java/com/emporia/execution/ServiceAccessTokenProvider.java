@@ -1,5 +1,6 @@
 package com.emporia.execution;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -18,6 +19,7 @@ class ServiceAccessTokenProvider {
     private final Clock clock = Clock.systemUTC();
     private volatile CachedToken cached;
 
+    @Autowired
     ServiceAccessTokenProvider(RestClient.Builder builder,
             @Value("${emporia.auth.token-url}") String tokenUrl,
             @Value("${emporia.auth.client-id}") String clientId,

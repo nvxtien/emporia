@@ -91,7 +91,7 @@ mvn test
 ```bash
 docker build -t emporia-authorisation-service emporia/authorisation-service
 docker run --rm -p 9000:9000 \
-  -e DB_URL=jdbc:postgresql://host.docker.internal:5432/emporia \
+  -e DB_URL=jdbc:postgresql://host.docker.internal:5433/emporia_authorisation \
   -e DB_USERNAME=postgres \
   -e DB_PASSWORD='your-local-database-password' \
   -e AUTH_ISSUER=http://localhost:3000 \

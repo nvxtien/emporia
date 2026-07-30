@@ -23,7 +23,9 @@ visibility, and blotter-column visibility in PostgreSQL.
 Quotes remain the responsibility of `market-data-service`, and instrument
 metadata remains the responsibility of `static-data-service`.
 
-The default PostgreSQL schema is `emporia_client_config`.
+For non-Docker local runs, the default PostgreSQL database is `emporia`, and
+the default service-owned schema is `emporia_client_config`. Docker Compose
+overrides `DB_URL` to the service-owned PostgreSQL container.
 
 ## Configuration
 

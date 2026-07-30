@@ -52,6 +52,13 @@ class OrderStreamServiceTest {
         assertThat(emitter).isNotNull();
     }
 
+    @Test
+    void heartbeatKeepsIdleSubscriptionsOpen() {
+        service.subscribe("desk-heartbeat", List.of());
+
+        service.heartbeat();
+    }
+
     // -------------------------------------------------------------------------
     // publish
     // -------------------------------------------------------------------------

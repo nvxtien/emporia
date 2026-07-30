@@ -35,10 +35,19 @@ Set `MARKET_DATA_PROVIDER` to one of:
 
 ### Alpaca IEX
 
+To obtain free Alpaca API credentials:
+
+1. Sign up for a free account at [alpaca.markets](https://alpaca.markets).
+2. Go to the **Paper Trading** dashboard (free sandbox environment).
+3. Click **Generate New API Key** in the right-hand panel.
+4. Copy your **API Key ID** (`APCA_API_KEY_ID`) and **Secret Key** (`APCA_API_SECRET_KEY`).
+
+Run `market-data-service` with Alpaca IEX enabled:
+
 ```bash
 MARKET_DATA_PROVIDER=alpaca-iex \
-APCA_API_KEY_ID='<key-id>' \
-APCA_API_SECRET_KEY='<secret>' \
+APCA_API_KEY_ID='your-alpaca-key-id' \
+APCA_API_SECRET_KEY='your-alpaca-secret-key' \
 mvn spring-boot:run
 ```
 

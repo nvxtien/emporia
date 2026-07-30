@@ -53,6 +53,7 @@ flowchart TD
         Static --> StaticDb[("emporia_static_data")]
         Preferences --> PrefDb[("emporia_client_config")]
         Orders --> OrderDb[("emporia_order_data")]
+        Execution --> ExecutionDb[("emporia_execution")]
         Portfolio --> PortDb[("emporia_portfolio")]
         Auth --> AuthDb[("emporia_authorisation")]
     end
@@ -70,7 +71,7 @@ flowchart TD
 | **`market-data-service`** | `8084` (HTTP)<br>`50551` (gRPC) | Conflated top-of-book market quotes, depth, Alpaca IEX & FIX simulator adapters, SSE/gRPC streaming. | Memory Cache & Stream Subscriptions |
 | **`order-command-service`** | `8085` | Ingress boundary for client order commands (`CREATE`, `MODIFY`, `CANCEL`, `CANCEL_ALL`), listing validation, command correlation. | Command correlation maps |
 | **`order-management-service`** | `8086` | State engine, order lifecycle, PostgreSQL order projections, command idempotency, SSE blotter streaming. | `emporia_order_data` |
-| **`execution-service`** | `8087` | Smart Order Routing (`DMA`, `SMART`, `VWAP`), venue selection (`BestVenueSelector`), `exchange-core` & FIX venue gateways. | Strategy runtimes & checkpoints |
+| **`execution-service`** | `8087` | Smart Order Routing (`DMA`, `SMART`, `VWAP`), venue selection (`BestVenueSelector`), `exchange-core` & FIX venue gateways. | `emporia_execution` |
 | **`portfolio-service`** | `8088` | Fully funded cash and asset balance accounting, idempotent snapshot receipts for exchange engines. | `emporia_portfolio` |
 | **`trading-contracts`** | N/A | Build-time library defining versioned Java records for Kafka topics. | Shared Java Domain Contracts |
 

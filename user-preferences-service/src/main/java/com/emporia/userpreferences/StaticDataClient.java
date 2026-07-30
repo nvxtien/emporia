@@ -1,6 +1,7 @@
 package com.emporia.userpreferences;
 
 import com.emporia.events.TradingEvents.ListingSnapshot;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpHeaders;
@@ -16,6 +17,7 @@ class StaticDataClient {
     private static final ParameterizedTypeReference<List<ListingSnapshot>> LISTINGS = new ParameterizedTypeReference<>() { };
     private final RestClient client;
 
+    @Autowired
     StaticDataClient(@Value("${emporia.static-data.url}") String baseUrl) {
         this(RestClient.builder().baseUrl(baseUrl).build());
     }

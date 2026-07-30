@@ -12,14 +12,34 @@ import org.springframework.security.crypto.factory.PasswordEncoderFactories;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.LoginUrlAuthenticationEntryPoint;
+import org.springframework.security.web.savedrequest.HttpSessionRequestCache;
 import org.springframework.security.web.util.matcher.MediaTypeRequestMatcher;
 import org.springframework.security.oauth2.server.authorization.token.JwtEncodingContext;
 import org.springframework.security.oauth2.server.authorization.token.OAuth2TokenCustomizer;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
-import java.util.Set;
+import java.util.List;
 
 @Configuration(proxyBeanMethods = false)
 public class SecurityConfig {
+
+    @Bean
+    CorsConfigurationSource corsConfigurationSource() {
+        CorsConfiguration config = new CorsConfiguration();
+        config.setAllowedOriginPatterns(List.of("http://localhost:*", "http://127.0.0.1:*"));
+        config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
+        config.setAllowedHeaders(List.of("*"));
+        config.setAllowCredentials(true);
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/.well-known/**", config);
+        source.registerCorsConfiguration("/oauth2/**", config);
+        source.registerCorsConfiguration("/userinfo", config);
+        source.registerCorsConfiguration("/connect/logout", config);
+        source.registerCorsConfiguration("/auth/csrf", config);
+        return source;
+    }
 
     @Bean
     OAuth2TokenCustomizer<JwtEncodingContext> tradingIdentityClaims(UserAccountRepository users) {
@@ -41,18 +61,20 @@ public class SecurityConfig {
     @Bean
     @Order(Ordered.HIGHEST_PRECEDENCE)
     SecurityFilterChain authorizationServerSecurityFilterChain(HttpSecurity http) throws Exception {
+        http.cors(Customizer.withDefaults());
         http.oauth2AuthorizationServer(authorizationServer -> {
             http.securityMatcher(authorizationServer.getEndpointsMatcher());
             authorizationServer.oidc(Customizer.withDefaults());
         });
-        http.authorizeHttpRequests(authorize -> authorize.anyRequest().authenticated());
+        http.authorizeHttpRequests(authorize -> authorize
+                .requestMatchers("/login").permitAll()
+                .anyRequest().authenticated()
+        );
         http.oauth2ResourceServer(resourceServer -> resourceServer.jwt(Customizer.withDefaults()));
 
-        MediaTypeRequestMatcher htmlRequest = new MediaTypeRequestMatcher(MediaType.TEXT_HTML);
-        htmlRequest.setIgnoredMediaTypes(Set.of(MediaType.ALL));
         http.exceptionHandling(exceptions -> exceptions.defaultAuthenticationEntryPointFor(
-                new LoginUrlAuthenticationEntryPoint("/sign-in"),
-                htmlRequest
+                new LoginUrlAuthenticationEntryPoint("/login"),
+                new MediaTypeRequestMatcher(MediaType.TEXT_HTML)
         ));
 
         return http.build();
@@ -61,16 +83,17 @@ public class SecurityConfig {
     @Bean
     @Order(Ordered.LOWEST_PRECEDENCE - 5)
     SecurityFilterChain applicationSecurityFilterChain(HttpSecurity http) throws Exception {
+        http.cors(Customizer.withDefaults());
+
+        HttpSessionRequestCache requestCache = new HttpSessionRequestCache();
+        requestCache.setRequestMatcher(new MediaTypeRequestMatcher(MediaType.TEXT_HTML));
+        http.requestCache(cache -> cache.requestCache(requestCache));
+
         http.authorizeHttpRequests(authorize -> authorize
-                .requestMatchers("/actuator/health", "/actuator/health/**", "/auth/csrf", "/sign-in").permitAll()
+                .requestMatchers("/actuator/health", "/actuator/health/**", "/auth/csrf", "/login", "/error", "/default-ui.css", "/favicon.ico").permitAll()
                 .anyRequest().authenticated()
         );
-        http.formLogin(form -> form
-                .loginPage("/sign-in")
-                .loginProcessingUrl("/login")
-                .failureUrl("/sign-in?error")
-                .permitAll()
-        );
+        http.formLogin(form -> form.loginPage("/login").permitAll());
         return http.build();
     }
 }

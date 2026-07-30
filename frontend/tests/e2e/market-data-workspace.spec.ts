@@ -108,6 +108,10 @@ async function installAuthenticatedSession(page: Page, canTrade = true) {
         `oidc.user:${window.location.origin}:emporia-web`,
         JSON.stringify(user),
       )
+      window.sessionStorage.setItem(
+        'oidc.user:http://localhost:9000:emporia-web',
+        JSON.stringify(user),
+      )
     },
     {
       accessToken: ACCESS_TOKEN,
