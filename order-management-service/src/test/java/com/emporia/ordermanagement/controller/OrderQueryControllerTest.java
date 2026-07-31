@@ -5,6 +5,8 @@ import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.events.TradingEvents.OrderView;
+import com.emporia.ordermanagement.dto.AdminExecutionView;
+import com.emporia.ordermanagement.dto.ExecutionStrategyView;
 import com.emporia.ordermanagement.dto.ExecutionView;
 import com.emporia.ordermanagement.dto.OrderEventView;
 import com.emporia.ordermanagement.model.Execution;
@@ -15,6 +17,7 @@ import com.emporia.ordermanagement.repository.OrderEventRepository;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
 import com.emporia.ordermanagement.service.OrderStreamService;
 import org.junit.jupiter.api.Test;
+import org.springframework.data.domain.Pageable;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.web.server.ResponseStatusException;
@@ -28,6 +31,8 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -82,6 +87,49 @@ class OrderQueryControllerTest {
         List<OrderView> result = controller.orders(jwt("user", "DESK-EMPTY"));
 
         assertThat(result).isEmpty();
+    }
+
+    @Test
+    void recentExecutionsRequireAnAdminAuthority() {
+        assertThatThrownBy(() -> controller.recentExecutions(jwt("user", "DESK-A"), null, null, null, 100))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("Administrator access required");
+    }
+
+    @Test
+    void recentExecutionsReturnsOrderContextForAdmins() {
+        TradingOrder order = liveOrder("SMART");
+        Execution execution = new Execution(
+                UUID.randomUUID(), "venue-fill-admin", order,
+                new BigDecimal("4"), new BigDecimal("102"), "XNAS", Instant.now()
+        );
+        when(executions.findRecentForAdmin(eq("DESK-A"), eq("XNAS"), eq("SMART"), any(Pageable.class)))
+                .thenReturn(List.of(execution));
+
+        List<AdminExecutionView> result = controller.recentExecutions(
+                adminJwt("admin", "admin"), "DESK-A", "XNAS", "SMART", 25);
+
+        assertThat(result).hasSize(1);
+        assertThat(result.getFirst().executionReference()).isEqualTo("venue-fill-admin");
+        assertThat(result.getFirst().orderId()).isEqualTo(order.getId());
+        assertThat(result.getFirst().deskId()).isEqualTo("DESK-A");
+        assertThat(result.getFirst().destination()).isEqualTo("SMART");
+    }
+
+    @Test
+    void strategiesReturnParentOrdersForAdmins() {
+        TradingOrder order = liveOrder("VWAP");
+        when(orders.findByDeskIdAndParentOrderIdIsNullAndDestinationInOrderByUpdatedAtDesc(
+                eq("DESK-A"), eq(List.of("SMART", "VWAP")), any(Pageable.class)))
+                .thenReturn(List.of(order));
+        when(orders.countByParentOrderId(order.getId())).thenReturn(2L);
+
+        List<ExecutionStrategyView> result = controller.strategies(adminJwt("admin", "admin"), "DESK-A", 25);
+
+        assertThat(result).hasSize(1);
+        assertThat(result.getFirst().orderId()).isEqualTo(order.getId());
+        assertThat(result.getFirst().destination()).isEqualTo("VWAP");
+        assertThat(result.getFirst().childOrderCount()).isEqualTo(2L);
     }
 
     // -------------------------------------------------------------------------
@@ -233,6 +281,15 @@ class OrderQueryControllerTest {
             builder.claim("desk", desk);
         }
         return builder.build();
+    }
+
+    private static Jwt adminJwt(String subject, String desk) {
+        return Jwt.withTokenValue("mock-token")
+                .header("alg", "none")
+                .subject(subject)
+                .claim("desk", desk)
+                .claim("authorities", List.of("ROLE_USER", "ROLE_ADMIN"))
+                .build();
     }
 
     private static TradingOrder liveOrder(String destination) {

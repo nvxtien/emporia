@@ -3,6 +3,7 @@ package com.emporia.authorisation.config;
 import com.emporia.authorisation.user.UserAccountRepository;
 import org.springframework.core.convert.converter.Converter;
 import org.springframework.security.authentication.AbstractAuthenticationToken;
+import org.springframework.security.authentication.DisabledException;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
@@ -10,6 +11,7 @@ import org.springframework.core.annotation.Order;
 import org.springframework.http.MediaType;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.crypto.factory.PasswordEncoderFactories;
@@ -18,7 +20,9 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.oauth2.server.resource.authentication.JwtGrantedAuthoritiesConverter;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.AuthenticationFailureHandler;
 import org.springframework.security.web.authentication.LoginUrlAuthenticationEntryPoint;
+import org.springframework.security.web.authentication.SimpleUrlAuthenticationFailureHandler;
 import org.springframework.security.web.savedrequest.HttpSessionRequestCache;
 import org.springframework.security.web.util.matcher.MediaTypeRequestMatcher;
 import org.springframework.security.oauth2.server.authorization.token.JwtEncodingContext;
@@ -69,6 +73,21 @@ public class SecurityConfig {
     }
 
     @Bean
+    AuthenticationFailureHandler loginFailureHandler() {
+        SimpleUrlAuthenticationFailureHandler invalidCredentials =
+                new SimpleUrlAuthenticationFailureHandler("/login?error");
+        SimpleUrlAuthenticationFailureHandler disabledAccount =
+                new SimpleUrlAuthenticationFailureHandler("/login?disabled");
+        return (request, response, exception) -> {
+            if (containsDisabledException(exception)) {
+                disabledAccount.onAuthenticationFailure(request, response, exception);
+                return;
+            }
+            invalidCredentials.onAuthenticationFailure(request, response, exception);
+        };
+    }
+
+    @Bean
     Converter<Jwt, ? extends AbstractAuthenticationToken> jwtAuthenticationConverter() {
         JwtGrantedAuthoritiesConverter scopeAuthorities = new JwtGrantedAuthoritiesConverter();
         JwtAuthenticationConverter converter = new JwtAuthenticationConverter();
@@ -93,6 +112,17 @@ public class SecurityConfig {
             return List.of(new SimpleGrantedAuthority(value));
         }
         return List.of();
+    }
+
+    private static boolean containsDisabledException(AuthenticationException exception) {
+        Throwable cause = exception;
+        while (cause != null) {
+            if (cause instanceof DisabledException) {
+                return true;
+            }
+            cause = cause.getCause();
+        }
+        return false;
     }
 
     @Bean
@@ -125,10 +155,11 @@ public class SecurityConfig {
     @Order(Ordered.LOWEST_PRECEDENCE - 5)
     SecurityFilterChain applicationSecurityFilterChain(
             HttpSecurity http,
-            Converter<Jwt, ? extends AbstractAuthenticationToken> jwtAuthenticationConverter
+            Converter<Jwt, ? extends AbstractAuthenticationToken> jwtAuthenticationConverter,
+            AuthenticationFailureHandler loginFailureHandler
     ) throws Exception {
         http.cors(Customizer.withDefaults());
-        http.csrf(csrf -> csrf.ignoringRequestMatchers("/admin/users/**"));
+        http.csrf(csrf -> csrf.ignoringRequestMatchers("/admin/users/**", "/admin/audit/**"));
 
         HttpSessionRequestCache requestCache = new HttpSessionRequestCache();
         requestCache.setRequestMatcher(new MediaTypeRequestMatcher(MediaType.TEXT_HTML));
@@ -136,10 +167,13 @@ public class SecurityConfig {
 
         http.authorizeHttpRequests(authorize -> authorize
                 .requestMatchers("/actuator/health", "/actuator/health/**", "/auth/csrf", "/login", "/error", "/default-ui.css", "/favicon.ico").permitAll()
-                .requestMatchers("/admin/users/**").hasRole("ADMIN")
+                .requestMatchers("/admin/users/**", "/admin/audit/**").hasRole("ADMIN")
                 .anyRequest().authenticated()
         );
-        http.formLogin(form -> form.loginPage("/login").permitAll());
+        http.formLogin(form -> form
+                .loginPage("/login")
+                .failureHandler(loginFailureHandler)
+                .permitAll());
         http.oauth2ResourceServer(resourceServer ->
                 resourceServer.jwt(jwt -> jwt.jwtAuthenticationConverter(jwtAuthenticationConverter)));
         return http.build();

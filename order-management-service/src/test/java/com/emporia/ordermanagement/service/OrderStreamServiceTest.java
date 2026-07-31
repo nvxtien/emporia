@@ -8,8 +8,10 @@ import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.ordermanagement.model.TradingOrder;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import tools.jackson.databind.ObjectMapper;
 
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -57,6 +59,22 @@ class OrderStreamServiceTest {
         service.subscribe("desk-heartbeat", List.of());
 
         service.heartbeat();
+    }
+
+    @Test
+    void heartbeatRemovesDisconnectedSubscriptionWhenEmitterCompletionFails() {
+        FailingCompletionEmitter emitter = new FailingCompletionEmitter();
+        OrderStreamService streamService = new OrderStreamService(new ObjectMapper()) {
+            @Override
+            SseEmitter newEmitter() {
+                return emitter;
+            }
+        };
+
+        streamService.subscribe("desk-disconnected", List.of());
+
+        streamService.heartbeat();
+        streamService.heartbeat();
     }
 
     // -------------------------------------------------------------------------
@@ -170,5 +188,27 @@ class OrderStreamServiceTest {
         );
         ReflectionTestUtils.setField(order, "version", 1L);
         return order;
+    }
+
+    private static final class FailingCompletionEmitter extends SseEmitter {
+        private int sends;
+
+        private FailingCompletionEmitter() {
+            super(0L);
+        }
+
+        @Override
+        public void send(SseEventBuilder builder) throws IOException {
+            sends++;
+            if (sends > 1) {
+                throw new IllegalStateException("stream is already disconnected");
+            }
+            super.send(builder);
+        }
+
+        @Override
+        public void complete() {
+            throw new IllegalStateException("async context is already failed");
+        }
     }
 }

@@ -23,7 +23,7 @@ public class OrderStreamService {
     }
 
     public SseEmitter subscribe(String deskId, List<OrderView> initialOrders) {
-        SseEmitter emitter = new SseEmitter(0L);
+        SseEmitter emitter = newEmitter();
         Subscription subscription = new Subscription(UUID.randomUUID(), deskId, emitter);
         subscriptions.computeIfAbsent(deskId, ignored -> new CopyOnWriteArrayList<>()).add(subscription);
         emitter.onCompletion(() -> remove(subscription));
@@ -36,7 +36,7 @@ public class OrderStreamService {
             }
         } catch (Exception exception) {
             remove(subscription);
-            emitter.completeWithError(exception);
+            completeWithErrorQuietly(emitter, exception);
         }
         return emitter;
     }
@@ -59,7 +59,7 @@ public class OrderStreamService {
                 send(subscription.emitter(), event.eventId().toString(), order);
             } catch (Exception disconnected) {
                 remove(subscription);
-                subscription.emitter().complete();
+                completeQuietly(subscription.emitter());
             }
         }
     }
@@ -72,10 +72,14 @@ public class OrderStreamService {
                     sendHeartbeat(subscription.emitter());
                 } catch (Exception disconnected) {
                     remove(subscription);
-                    subscription.emitter().complete();
+                    completeQuietly(subscription.emitter());
                 }
             }
         });
+    }
+
+    SseEmitter newEmitter() {
+        return new SseEmitter(0L);
     }
 
     private void send(SseEmitter emitter, String id, Object order) throws Exception {
@@ -84,6 +88,20 @@ public class OrderStreamService {
 
     private void sendHeartbeat(SseEmitter emitter) throws Exception {
         emitter.send(SseEmitter.event().name("heartbeat").reconnectTime(1_000).data("ok"));
+    }
+
+    private void completeQuietly(SseEmitter emitter) {
+        try {
+            emitter.complete();
+        } catch (IllegalStateException ignored) {
+        }
+    }
+
+    private void completeWithErrorQuietly(SseEmitter emitter, Exception exception) {
+        try {
+            emitter.completeWithError(exception);
+        } catch (IllegalStateException ignored) {
+        }
     }
 
     private void remove(Subscription subscription) {

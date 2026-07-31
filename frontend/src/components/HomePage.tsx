@@ -137,7 +137,7 @@ export function HomePage() {
           <a href="#portfolio">Portfolio</a>
           <a href="#trade">Trade</a>
           <a href="#account">Account</a>
-          {isAdmin && <a href="/admin/users">Admin</a>}
+          {isAdmin && <a href="/admin">Admin</a>}
         </nav>
         {isAuthenticated && user ? (
           <div className="header-account">

@@ -6,7 +6,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.server.ResponseStatusException;
 
-@RestControllerAdvice(assignableTypes = AdminUserController.class)
+@RestControllerAdvice(basePackageClasses = AdminUserController.class)
 class AdminProblemHandler {
 
     @ExceptionHandler(ResponseStatusException.class)

@@ -53,6 +53,7 @@ class GatewayRouteIntegrationTest {
         registry.add("emporia.services.market-data-url", () -> apiUrl);
         registry.add("emporia.services.order-command-url", () -> apiUrl);
         registry.add("emporia.services.order-management-url", () -> apiUrl);
+        registry.add("emporia.services.portfolio-url", () -> apiUrl);
         registry.add("emporia.auth.url",
                 () -> "http://127.0.0.1:" + AUTHORIZATION_SERVER.getAddress().getPort());
         registry.add("spring.security.oauth2.resourceserver.jwt.issuer-uri", () -> TEST_ISSUER);
@@ -121,6 +122,46 @@ class GatewayRouteIntegrationTest {
     }
 
     @Test
+    void proxiesAdminAuditReadsToAuthorisationService() throws Exception {
+        HttpResponse<String> response = send("/api/admin/audit/events", null, accessToken());
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).isEqualTo("auth-path=/admin/audit/events");
+    }
+
+    @Test
+    void proxiesAdminStaticDataReadsToStaticDataService() throws Exception {
+        HttpResponse<String> response = send("/api/admin/static-data/listings", null, accessToken());
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).isEqualTo("upstream-path=/admin/static-data/listings");
+    }
+
+    @Test
+    void proxiesAdminStaticDataWritesToStaticDataService() throws Exception {
+        HttpResponse<String> response = send(
+                "/api/admin/static-data/listings/10",
+                null,
+                accessToken(),
+                "PUT");
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).isEqualTo("upstream-path=/admin/static-data/listings/10");
+    }
+
+    @Test
+    void proxiesAdminStaticDataImportsToStaticDataService() throws Exception {
+        HttpResponse<String> response = send(
+                "/api/admin/static-data/listings/import",
+                null,
+                accessToken(),
+                "POST");
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).isEqualTo("upstream-path=/admin/static-data/listings/import");
+    }
+
+    @Test
     void proxiesAuthenticatedMarketDataStreams() throws Exception {
         HttpResponse<String> response = send(
                 "/api/market-data/stream?listingIds=1,2", null, accessToken());
@@ -128,6 +169,34 @@ class GatewayRouteIntegrationTest {
         assertThat(response.statusCode()).isEqualTo(200);
         assertThat(response.body()).isEqualTo("upstream-path=/market-data/stream");
         assertThat(response.headers().firstValue("X-Seen-Authorization")).contains("true");
+    }
+
+    @Test
+    void proxiesPortfolioStateReadsToPortfolioService() throws Exception {
+        HttpResponse<String> response = send("/api/portfolio/state/100", null, accessToken());
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).isEqualTo("upstream-path=/portfolio/state/100");
+    }
+
+    @Test
+    void proxiesPortfolioProvisioningToPortfolioService() throws Exception {
+        HttpResponse<String> response = send(
+                "/api/portfolio/state/100",
+                null,
+                accessToken(),
+                "POST");
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).isEqualTo("upstream-path=/portfolio/state/100");
+    }
+
+    @Test
+    void proxiesPortfolioAuditReadsToPortfolioService() throws Exception {
+        HttpResponse<String> response = send("/api/portfolio/audit/events", null, accessToken());
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).isEqualTo("upstream-path=/portfolio/audit/events");
     }
 
     @Test
