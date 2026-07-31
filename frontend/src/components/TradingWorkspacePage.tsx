@@ -16,6 +16,8 @@ import type {
 } from '../trading/types'
 import '../trading/workspace.css'
 
+type WorkspaceSection = 'desk' | 'portfolio' | 'analytics'
+
 function claim(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
@@ -48,8 +50,19 @@ function money(value: number | null | undefined, currency = 'USD'): string {
   }).format(value)
 }
 
+function signedMoney(value: number, currency = 'USD'): string {
+  const formatted = money(Math.abs(value), currency)
+  if (value > 0) return `+${formatted}`
+  if (value < 0) return `-${formatted}`
+  return formatted
+}
+
 function compactNumber(value: number): string {
   return new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(value)
+}
+
+function percent(value: number): string {
+  return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`
 }
 
 function time(value: string): string {
@@ -159,6 +172,7 @@ export function TradingWorkspacePage() {
   const [layout, setLayout] = useState<WorkspaceLayout>(DEFAULT_LAYOUT)
   const [layoutSaving, setLayoutSaving] = useState(false)
   const [loadingWorkspace, setLoadingWorkspace] = useState(true)
+  const [workspaceSection, setWorkspaceSection] = useState<WorkspaceSection>('desk')
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
@@ -496,6 +510,52 @@ export function TradingWorkspacePage() {
   const maximumDepthSize = selectedQuote
     ? Math.max(1, ...selectedQuote.bids.map((line) => line.size), ...selectedQuote.offers.map((line) => line.size))
     : 1
+  const portfolioRows = watchlist.map((item) => {
+    const listingOrders = orders.filter((order) => order.listing.id === item.listing.id)
+    const positionQuantity = listingOrders.reduce((total, order) => {
+      const signedQuantity = order.side === 'BUY' ? order.tradedQuantity : -order.tradedQuantity
+      return total + signedQuantity
+    }, 0)
+    const quote = quotes[item.listing.id]
+    const markPrice = quote?.lastPrice ?? listingOrders.find((order) => order.averageTradePrice !== null)?.averageTradePrice ?? 0
+    const marketValue = positionQuantity * markPrice
+    const dayPnl = positionQuantity * (quote?.change ?? 0)
+    return {
+      listing: item.listing,
+      quote,
+      orderCount: listingOrders.length,
+      positionQuantity,
+      markPrice,
+      marketValue,
+      dayPnl,
+    }
+  })
+  const portfolioMarketValue = portfolioRows.reduce((total, row) => total + row.marketValue, 0)
+  const portfolioDayPnl = portfolioRows.reduce((total, row) => total + row.dayPnl, 0)
+  const filledQuantity = orders.reduce((total, order) => total + order.tradedQuantity, 0)
+  const liveOrderCount = orders.filter((order) => order.status === 'LIVE' || order.status === 'PARTIALLY_FILLED').length
+  const totalOrderedQuantity = parentOrders.reduce((total, order) => total + order.quantity, 0)
+  const totalTradedQuantity = parentOrders.reduce((total, order) => total + order.tradedQuantity, 0)
+  const fillRate = totalOrderedQuantity > 0 ? (totalTradedQuantity / totalOrderedQuantity) * 100 : 0
+  const destinationMix = ['DMA', 'SMART', 'VWAP'].map((destinationName) => ({
+    destination: destinationName,
+    count: parentOrders.filter((order) => order.destination === destinationName).length,
+  }))
+  const statusMix = ['LIVE', 'PARTIALLY_FILLED', 'FILLED', 'CANCELLED', 'REJECTED'].map((statusName) => ({
+    status: statusName,
+    count: orders.filter((order) => order.status === statusName).length,
+  }))
+  const topMover = watchlist
+    .map((item) => quotes[item.listing.id])
+    .filter((quote): quote is Quote => Boolean(quote))
+    .toSorted((left, right) => Math.abs(right.changePercent) - Math.abs(left.changePercent))[0]
+  const liveNotional = orders
+    .filter((order) => order.status === 'LIVE' || order.status === 'PARTIALLY_FILLED')
+    .reduce((total, order) => {
+      const quote = quotes[order.listing.id]
+      const markPrice = order.limitPrice ?? quote?.lastPrice ?? order.averageTradePrice ?? 0
+      return total + order.remainingQuantity * markPrice
+    }, 0)
 
   return (
     <div className="trading-workspace">
@@ -505,7 +565,10 @@ export function TradingWorkspacePage() {
           <strong>Emporia</strong><small>Trade</small>
         </Link>
         <nav className="workspace-nav" aria-label="Trading workspace">
-          <span className="active">Trading desk</span><span>Portfolio</span><span>Analytics</span>{isAdmin && <Link to="/admin/users">Admin</Link>}
+          <button type="button" className={workspaceSection === 'desk' ? 'active' : undefined} onClick={() => setWorkspaceSection('desk')}>Trading desk</button>
+          <button type="button" className={workspaceSection === 'portfolio' ? 'active' : undefined} onClick={() => setWorkspaceSection('portfolio')}>Portfolio</button>
+          <button type="button" className={workspaceSection === 'analytics' ? 'active' : undefined} onClick={() => setWorkspaceSection('analytics')}>Analytics</button>
+          {isAdmin && <Link to="/admin">Admin</Link>}
         </nav>
         <div className="workspace-account">
           <span className="simulation-badge"><i /> {marketSource}</span>
@@ -521,27 +584,30 @@ export function TradingWorkspacePage() {
         </div>
       )}
 
-      <div className="workspace-tools">
-        <strong>Workspace</strong>
-        {Object.entries(PANEL_LABELS).map(([panel, label]) => (
-          <span className="workspace-tool" key={panel}>
-            <label><input type="checkbox" checked={panelVisible(panel)} onChange={() => togglePanel(panel)} />{label}</label>
-            {panelVisible(panel) && <button type="button" aria-label={`Move ${label} left`} onClick={() => movePanel(panel, -1)}>←</button>}
-            {panelVisible(panel) && <button type="button" aria-label={`Move ${label} right`} onClick={() => movePanel(panel, 1)}>→</button>}
-          </span>
-        ))}
-        <details>
-          <summary>Columns</summary>
-          <div>{Object.keys(DEFAULT_LAYOUT.columns).map((column) => (
-            <label key={column}><input type="checkbox" checked={layout.columns[column] !== false} onChange={() => setLayout((current) => ({
-              ...current,
-              columns: { ...current.columns, [column]: current.columns[column] === false },
-            }))} />{column}</label>
-          ))}</div>
-        </details>
-        <button type="button" disabled={layoutSaving} onClick={() => void saveLayout()}>{layoutSaving ? 'Saving…' : 'Save layout'}</button>
-      </div>
+      {workspaceSection === 'desk' && (
+        <div className="workspace-tools">
+          <strong>Workspace</strong>
+          {Object.entries(PANEL_LABELS).map(([panel, label]) => (
+            <span className="workspace-tool" key={panel}>
+              <label><input type="checkbox" checked={panelVisible(panel)} onChange={() => togglePanel(panel)} />{label}</label>
+              {panelVisible(panel) && <button type="button" aria-label={`Move ${label} left`} onClick={() => movePanel(panel, -1)}>←</button>}
+              {panelVisible(panel) && <button type="button" aria-label={`Move ${label} right`} onClick={() => movePanel(panel, 1)}>→</button>}
+            </span>
+          ))}
+          <details>
+            <summary>Columns</summary>
+            <div>{Object.keys(DEFAULT_LAYOUT.columns).map((column) => (
+              <label key={column}><input type="checkbox" checked={layout.columns[column] !== false} onChange={() => setLayout((current) => ({
+                ...current,
+                columns: { ...current.columns, [column]: current.columns[column] === false },
+              }))} />{column}</label>
+            ))}</div>
+          </details>
+          <button type="button" disabled={layoutSaving} onClick={() => void saveLayout()}>{layoutSaving ? 'Saving…' : 'Save layout'}</button>
+        </div>
+      )}
 
+      {workspaceSection === 'desk' ? (
       <main className="desk-grid">
         <section className="desk-panel watch-panel" hidden={!panelVisible('watchlist')} style={{ order: panelOrder('watchlist') }}>
           <div className="panel-heading">
@@ -737,6 +803,127 @@ export function TradingWorkspacePage() {
           </div>
         </section>
       </main>
+      ) : workspaceSection === 'portfolio' ? (
+        <main className="workspace-section-grid portfolio-view" aria-label="Portfolio workspace">
+          <section className="workspace-kpi-strip" aria-label="Portfolio summary">
+            <div><span>Net exposure</span><strong>{money(portfolioMarketValue)}</strong></div>
+            <div><span>Day P/L</span><strong className={portfolioDayPnl >= 0 ? 'quote-up' : 'quote-down'}>{signedMoney(portfolioDayPnl)}</strong></div>
+            <div><span>Filled quantity</span><strong>{compactNumber(filledQuantity)}</strong></div>
+            <div><span>Tracked symbols</span><strong>{watchlist.length}</strong></div>
+          </section>
+
+          <section className="desk-panel blotter-panel portfolio-ledger">
+            <div className="blotter-heading">
+              <div><span>Portfolio</span><h2>Positions and Marks</h2></div>
+              <small>{marketSource}</small>
+            </div>
+            <div className="blotter-scroll">
+              <table>
+                <thead><tr><th>Symbol</th><th>Position</th><th>Mark</th><th>Market value</th><th>Day P/L</th><th>Linked orders</th></tr></thead>
+                <tbody>
+                  {portfolioRows.length === 0 ? (
+                    <tr><td colSpan={6} className="empty-row">Add instruments to the watchlist to build portfolio context.</td></tr>
+                  ) : portfolioRows.map((row) => (
+                    <tr key={row.listing.id} onClick={() => { setSelectedListing(row.listing); setWorkspaceSection('desk') }}>
+                      <td><strong>{row.listing.symbol}</strong><small>{row.listing.name}</small></td>
+                      <td>{row.positionQuantity === 0 ? 'Watched' : compactNumber(row.positionQuantity)}</td>
+                      <td>{row.markPrice > 0 ? money(row.markPrice, row.listing.currency) : 'No quote'}</td>
+                      <td>{money(row.marketValue, row.listing.currency)}</td>
+                      <td className={row.dayPnl >= 0 ? 'quote-up' : 'quote-down'}>{signedMoney(row.dayPnl, row.listing.currency)}<small>{row.quote ? percent(row.quote.changePercent) : 'No move'}</small></td>
+                      <td>{row.orderCount}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <aside className="desk-panel portfolio-insight">
+            <div className="panel-heading">
+              <div><span>Risk lens</span><h2>Exposure Notes</h2></div>
+            </div>
+            <div className="workspace-insight-list">
+              <article><span>Live order reserve</span><strong>{money(liveNotional)}</strong><small>{liveOrderCount} active order{liveOrderCount === 1 ? '' : 's'}</small></article>
+              <article><span>Top mover</span><strong>{topMover?.symbol ?? 'None'}</strong><small>{topMover ? percent(topMover.changePercent) : 'No streamed quote yet'}</small></article>
+              <article><span>Largest mark</span><strong>{portfolioRows.toSorted((left, right) => Math.abs(right.marketValue) - Math.abs(left.marketValue))[0]?.listing.symbol ?? 'None'}</strong><small>Based on filled order quantity</small></article>
+            </div>
+          </aside>
+        </main>
+      ) : (
+        <main className="workspace-section-grid analytics-view" aria-label="Analytics workspace">
+          <section className="workspace-kpi-strip" aria-label="Analytics summary">
+            <div><span>Parent orders</span><strong>{parentOrders.length}</strong></div>
+            <div><span>Fill rate</span><strong>{fillRate.toFixed(1)}%</strong></div>
+            <div><span>Live notional</span><strong>{money(liveNotional)}</strong></div>
+            <div><span>Market source</span><strong>{marketSource}</strong></div>
+          </section>
+
+          <section className="desk-panel analytics-panel">
+            <div className="blotter-heading">
+              <div><span>Routing</span><h2>Destination Mix</h2></div>
+              <small>{totalOrderedQuantity > 0 ? `${compactNumber(totalOrderedQuantity)} shares ordered` : 'No submitted parent orders'}</small>
+            </div>
+            <div className="analytics-bars">
+              {destinationMix.map((entry) => {
+                const width = parentOrders.length === 0 ? 0 : (entry.count / parentOrders.length) * 100
+                return (
+                  <article key={entry.destination}>
+                    <div><strong>{entry.destination}</strong><span>{entry.count} orders</span></div>
+                    <i><b style={{ width: `${width}%` }} /></i>
+                  </article>
+                )
+              })}
+            </div>
+          </section>
+
+          <section className="desk-panel analytics-panel">
+            <div className="blotter-heading">
+              <div><span>Lifecycle</span><h2>Order State</h2></div>
+              <small>{orders.length} total orders</small>
+            </div>
+            <div className="analytics-bars analytics-bars--status">
+              {statusMix.map((entry) => {
+                const width = orders.length === 0 ? 0 : (entry.count / orders.length) * 100
+                return (
+                  <article key={entry.status}>
+                    <div><strong>{entry.status.replace('_', ' ')}</strong><span>{entry.count} orders</span></div>
+                    <i><b style={{ width: `${width}%` }} /></i>
+                  </article>
+                )
+              })}
+            </div>
+          </section>
+
+          <section className="desk-panel blotter-panel analytics-panel analytics-table">
+            <div className="blotter-heading">
+              <div><span>Market analytics</span><h2>Watchlist Movers</h2></div>
+              <small>{watchlist.length} symbols</small>
+            </div>
+            <div className="blotter-scroll">
+              <table>
+                <thead><tr><th>Symbol</th><th>Last</th><th>Change</th><th>Volume</th><th>Spread</th></tr></thead>
+                <tbody>
+                  {watchlist.length === 0 ? (
+                    <tr><td colSpan={5} className="empty-row">No watchlist symbols are loaded.</td></tr>
+                  ) : watchlist.map((item) => {
+                    const quote = quotes[item.listing.id]
+                    const quotedSpread = quote?.bids[0] && quote.offers[0] ? quote.offers[0].price - quote.bids[0].price : null
+                    return (
+                      <tr key={item.id} onClick={() => { setSelectedListing(item.listing); setWorkspaceSection('desk') }}>
+                        <td><strong>{item.listing.symbol}</strong><small>{item.listing.exchangeMic}</small></td>
+                        <td>{quote ? money(quote.lastPrice, item.listing.currency) : 'No quote'}</td>
+                        <td className={(quote?.change ?? 0) >= 0 ? 'quote-up' : 'quote-down'}>{quote ? percent(quote.changePercent) : '-'}</td>
+                        <td>{quote ? compactNumber(quote.tradedVolume) : '-'}</td>
+                        <td>{quotedSpread === null ? 'N/A' : quotedSpread.toFixed(2)}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </main>
+      )}
 
       {reviewing && selectedListing && (
         <div className="workspace-modal" role="dialog" aria-modal="true" aria-labelledby="review-title">

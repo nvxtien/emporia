@@ -315,6 +315,7 @@ services:
       EMPORIA_MARKET_DATA_URL: http://market-data-service:8084
       EMPORIA_ORDER_COMMAND_URL: http://order-command-service:8085
       EMPORIA_ORDER_MANAGEMENT_URL: http://order-management-service:8086
+      EMPORIA_PORTFOLIO_URL: http://portfolio-service:8088
     depends_on:
       authorisation-service:
         condition: service_healthy
@@ -327,6 +328,8 @@ services:
       order-command-service:
         condition: service_healthy
       order-management-service:
+        condition: service_healthy
+      portfolio-service:
         condition: service_healthy
     healthcheck:
       <<: *spring-healthcheck

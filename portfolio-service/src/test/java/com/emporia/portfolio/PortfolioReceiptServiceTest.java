@@ -1,6 +1,7 @@
 package com.emporia.portfolio;
 
 import com.emporia.portfolio.PortfolioContracts.Balance;
+import com.emporia.portfolio.PortfolioContracts.PortfolioState;
 import com.emporia.portfolio.PortfolioContracts.RiskSeed;
 import com.emporia.portfolio.PortfolioContracts.Snapshot;
 import org.junit.jupiter.api.Test;
@@ -105,6 +106,53 @@ class PortfolioReceiptServiceTest {
     }
 
     @Test
+    void stateDelegatesToStore() {
+        final RecordingPortfolioStore store = new RecordingPortfolioStore();
+        store.stateToReturn = new PortfolioState(1, 101L, 10L, NOW, List.of(), null);
+        final PortfolioReceiptService service = service(store);
+        assertThat(service.state(101L)).isEqualTo(store.stateToReturn);
+    }
+
+    @Test
+    void provisionsANewPortfolioWithSortedBalances() {
+        final RecordingPortfolioStore store = new RecordingPortfolioStore();
+        final PortfolioReceiptService service = service(store);
+
+        PortfolioState result = service.provision(
+                101L,
+                20L,
+                List.of(new Balance(840, 500L), new Balance(1, 100L)));
+
+        assertThat(store.provisionedClientId).isEqualTo(101L);
+        assertThat(store.provisionedFirstTransactionId).isEqualTo(20L);
+        assertThat(store.provisionedAt).isEqualTo(NOW);
+        assertThat(store.provisionedBalances)
+                .containsExactly(new Balance(1, 100L), new Balance(840, 500L));
+        assertThat(result.clientId()).isEqualTo(101L);
+        assertThat(result.balances()).containsExactly(new Balance(1, 100L), new Balance(840, 500L));
+    }
+
+    @Test
+    void provisionRejectsExistingPortfolio() {
+        final RecordingPortfolioStore store = new RecordingPortfolioStore();
+        store.exists = true;
+
+        assertThatThrownBy(() -> service(store).provision(101L, 20L, List.of()))
+                .isInstanceOf(PortfolioAlreadyExistsException.class)
+                .hasMessageContaining("Portfolio already exists");
+    }
+
+    @Test
+    void provisionRejectsDuplicateAssets() {
+        assertThatThrownBy(() -> service(new RecordingPortfolioStore()).provision(
+                101L,
+                20L,
+                List.of(new Balance(1, 100L), new Balance(1, 200L))))
+                .isInstanceOf(PortfolioContractException.class)
+                .hasMessageContaining("Duplicate portfolio balance assetId 1");
+    }
+
+    @Test
     void loadRejectsNonPositiveClientId() {
         final RecordingPortfolioStore store = new RecordingPortfolioStore();
         final PortfolioReceiptService service = service(store);
@@ -154,6 +202,12 @@ class PortfolioReceiptServiceTest {
             implements PortfolioStore {
 
         private RiskSeed seedToReturn;
+        private PortfolioState stateToReturn;
+        private boolean exists;
+        private long provisionedClientId;
+        private long provisionedFirstTransactionId;
+        private List<Balance> provisionedBalances;
+        private Instant provisionedAt;
         private long lockedClientId;
         private PortfolioReceipt existing;
         private String recordedEventId;
@@ -166,6 +220,35 @@ class PortfolioReceiptServiceTest {
         @Override
         public RiskSeed load(final long clientId) {
             return seedToReturn;
+        }
+
+        @Override
+        public PortfolioState state(final long clientId) {
+            return stateToReturn;
+        }
+
+        @Override
+        public boolean exists(final long clientId) {
+            return exists;
+        }
+
+        @Override
+        public PortfolioState provision(
+                final long clientId,
+                final long firstTransactionId,
+                final List<Balance> balances,
+                final Instant updatedAt) {
+            provisionedClientId = clientId;
+            provisionedFirstTransactionId = firstTransactionId;
+            provisionedBalances = List.copyOf(balances);
+            provisionedAt = updatedAt;
+            return new PortfolioState(
+                    1,
+                    clientId,
+                    firstTransactionId,
+                    updatedAt,
+                    provisionedBalances,
+                    null);
         }
 
         @Override

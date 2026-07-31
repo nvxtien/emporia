@@ -15,6 +15,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -28,10 +29,12 @@ public class AdminUserService {
 
     private final UserAccountRepository users;
     private final PasswordEncoder passwordEncoder;
+    private final AdminAuditService audit;
 
-    public AdminUserService(UserAccountRepository users, PasswordEncoder passwordEncoder) {
+    public AdminUserService(UserAccountRepository users, PasswordEncoder passwordEncoder, AdminAuditService audit) {
         this.users = users;
         this.passwordEncoder = passwordEncoder;
+        this.audit = audit;
     }
 
     @Transactional(readOnly = true)
@@ -47,7 +50,7 @@ public class AdminUserService {
     }
 
     @Transactional
-    public AdminUserView create(CreateUserRequest request) {
+    public AdminUserView create(CreateUserRequest request, AdminAuditContext auditContext) {
         requireBody(request);
         String username = username(request.username());
         String email = email(request.email());
@@ -62,13 +65,16 @@ public class AdminUserService {
                 Boolean.TRUE.equals(request.canTrade()),
                 authorities(request.authorities())
         );
-        return AdminUserView.from(users.save(account));
+        AdminUserView created = AdminUserView.from(users.save(account));
+        audit.recordUserEvent(auditContext, "USER_CREATED", null, created, null);
+        return created;
     }
 
     @Transactional
-    public AdminUserView update(UUID userId, UpdateUserRequest request) {
+    public AdminUserView update(UUID userId, UpdateUserRequest request, AdminAuditContext auditContext) {
         requireBody(request);
         UserAccount account = find(userId);
+        AdminUserView before = AdminUserView.from(account);
         String username = username(request.username());
         String email = email(request.email());
         Set<UserAuthority> nextAuthorities = authorities(request.authorities());
@@ -80,23 +86,35 @@ public class AdminUserService {
 
         account.updateAccount(username, email, nextEnabled, nextAuthorities);
         account.updateTradingIdentity(desk(request.desk()), Boolean.TRUE.equals(request.canTrade()));
-        return AdminUserView.from(account);
+        AdminUserView updated = AdminUserView.from(account);
+        audit.recordUserEvent(auditContext, "USER_UPDATED", before, updated, null);
+        return updated;
     }
 
     @Transactional
-    public AdminUserView updatePassword(UUID userId, UpdatePasswordRequest request) {
+    public AdminUserView updatePassword(UUID userId, UpdatePasswordRequest request, AdminAuditContext auditContext) {
         requireBody(request);
         UserAccount account = find(userId);
+        AdminUserView before = AdminUserView.from(account);
         account.updatePasswordHash(passwordEncoder.encode(password(request.password())));
-        return AdminUserView.from(account);
+        AdminUserView updated = AdminUserView.from(account);
+        audit.recordUserEvent(auditContext, "USER_PASSWORD_CHANGED", before, updated, Map.of("passwordChanged", true));
+        return updated;
     }
 
     @Transactional
-    public AdminUserView updateTradingIdentity(UUID userId, UpdateTradingIdentityRequest request) {
+    public AdminUserView updateTradingIdentity(
+            UUID userId,
+            UpdateTradingIdentityRequest request,
+            AdminAuditContext auditContext
+    ) {
         requireBody(request);
         UserAccount account = find(userId);
+        AdminUserView before = AdminUserView.from(account);
         account.updateTradingIdentity(desk(request.desk()), request.canTrade());
-        return AdminUserView.from(account);
+        AdminUserView updated = AdminUserView.from(account);
+        audit.recordUserEvent(auditContext, "USER_TRADING_IDENTITY_UPDATED", before, updated, null);
+        return updated;
     }
 
     private UserAccount find(UUID userId) {

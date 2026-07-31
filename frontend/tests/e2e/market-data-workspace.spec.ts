@@ -269,6 +269,19 @@ test('renders Alpaca IEX quotes from the API through the watchlist and depth pan
   await expect(depthPanel.locator('.spread-line')).toContainText('0.10')
   await expect(depthPanel.locator('.simulation-note')).toContainText('Alpaca IEX top-of-book')
 
+  await page.getByRole('button', { name: 'Portfolio' }).click()
+  await expect(page.getByRole('heading', { name: 'Positions and Marks' })).toBeVisible()
+  await expect(page.getByRole('cell', { name: /Apple Inc/ })).toBeVisible()
+  await expect(page.getByText('Net exposure')).toBeVisible()
+
+  await page.getByRole('button', { name: 'Analytics' }).click()
+  await expect(page.getByRole('heading', { name: 'Destination Mix' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Watchlist Movers' })).toBeVisible()
+  await expect(page.getByRole('cell', { name: /AAPL/ })).toBeVisible()
+
+  await page.getByRole('button', { name: 'Trading desk' }).click()
+  await expect(page.locator('.depth-panel').getByRole('heading', { name: 'AAPL' })).toBeVisible()
+
   await expect.poll(() => authorizationHeaders.length).toBeGreaterThanOrEqual(3)
   expect(authorizationHeaders).toEqual(
     expect.arrayContaining([`Bearer ${ACCESS_TOKEN}`]),

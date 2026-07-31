@@ -9,9 +9,20 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 public class LoginController {
+    private static final String DISABLED_ACCOUNT_ALERT = """
+            <div class="alert alert-error">
+              <span>Your account is disabled. Contact an administrator before signing in again.</span>
+            </div>
+            """;
+    private static final String INVALID_CREDENTIALS_ALERT = """
+            <div class="alert alert-error">
+              <span>Invalid username or password. Please try again.</span>
+            </div>
+            """;
 
     @GetMapping(value = "/login", produces = MediaType.TEXT_HTML_VALUE)
     public String loginPage(@RequestParam(value = "error", required = false) String error,
+                            @RequestParam(value = "disabled", required = false) String disabled,
                             @RequestParam(value = "logout", required = false) String logout,
                             HttpServletRequest request) {
         CsrfToken csrfToken = (CsrfToken) request.getAttribute(CsrfToken.class.getName());
@@ -19,9 +30,12 @@ public class LoginController {
                 ? "<input type=\"hidden\" name=\"" + csrfToken.getParameterName() + "\" value=\"" + csrfToken.getToken() + "\"/>"
                 : "";
 
-        String errorAlert = error != null
-                ? "<div class=\"alert alert-error\"><span>Invalid username or password. Please try again.</span></div>"
-                : "";
+        String errorAlert = "";
+        if (disabled != null) {
+            errorAlert = DISABLED_ACCOUNT_ALERT;
+        } else if (error != null) {
+            errorAlert = INVALID_CREDENTIALS_ALERT;
+        }
 
         String logoutAlert = logout != null
                 ? "<div class=\"alert alert-success\"><span>You have been signed out successfully.</span></div>"

@@ -48,6 +48,23 @@ class InstrumentListing {
 
     boolean isEnabled() { return enabled; }
 
+    void replace(ListingSnapshot snapshot, boolean nextEnabled) {
+        this.id = snapshot.id();
+        this.version = snapshot.version();
+        this.symbol = snapshot.symbol();
+        this.name = snapshot.name();
+        this.marketSymbol = snapshot.marketSymbol();
+        this.exchangeMic = snapshot.exchangeMic();
+        this.exchangeName = snapshot.exchangeName();
+        this.countryCode = snapshot.countryCode();
+        this.currency = snapshot.currency();
+        this.tickSize = snapshot.tickSize();
+        this.sizeIncrement = snapshot.sizeIncrement();
+        this.referencePrice = snapshot.referencePrice();
+        this.previousClose = snapshot.previousClose();
+        this.enabled = nextEnabled;
+    }
+
     ListingSnapshot snapshot() {
         return new ListingSnapshot(id, version, symbol, name, marketSymbol, exchangeMic, exchangeName,
                 countryCode, currency, tickSize, sizeIncrement, referencePrice, previousClose);

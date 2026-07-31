@@ -1,5 +1,6 @@
 package com.emporia.portfolio;
 
+import java.time.Instant;
 import java.util.List;
 
 public final class PortfolioContracts {
@@ -19,6 +20,22 @@ public final class PortfolioContracts {
             long clientId,
             long firstTransactionId,
             List<Balance> balances) {
+    }
+
+    public record PortfolioState(
+            int schemaVersion,
+            long clientId,
+            long firstTransactionId,
+            Instant updatedAt,
+            List<Balance> balances,
+            LatestReceipt latestReceipt) {
+    }
+
+    public record LatestReceipt(
+            String eventId,
+            String exchangeId,
+            long deliveryId,
+            Instant receivedAt) {
     }
 
     public record Snapshot(

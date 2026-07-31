@@ -182,6 +182,30 @@ class AuthorisationServiceApplicationTests {
         assertThat(tradingIdentity.body())
                 .contains("\"desk\":\"client-b\"")
                 .contains("\"canTrade\":true");
+
+        HttpResponse<String> password = send(client,
+                "/admin/users/" + managed.getId() + "/password", "PUT", """
+                        {
+                          "password": "Managed67890!"
+                        }
+                        """);
+
+        assertThat(password.statusCode()).isEqualTo(200);
+        assertThat(password.body()).doesNotContain("Managed67890!");
+
+        HttpResponse<String> audit = send(client,
+                "/admin/audit/events?entityId=" + managed.getId(), "GET", null);
+
+        assertThat(audit.statusCode()).isEqualTo(200);
+        assertThat(audit.body())
+                .contains("\"actorUsername\":\"" + adminUsername + "\"")
+                .contains("\"entityId\":\"" + managed.getId() + "\"")
+                .contains("USER_CREATED")
+                .contains("USER_TRADING_IDENTITY_UPDATED")
+                .contains("USER_PASSWORD_CHANGED")
+                .doesNotContain("Managed12345!")
+                .doesNotContain("Managed67890!")
+                .doesNotContain("passwordHash");
     }
 
     @Test
@@ -193,8 +217,10 @@ class AuthorisationServiceApplicationTests {
 
         HttpClient client = loggedInClient(username, "Viewer12345!");
         HttpResponse<String> response = send(client, "/admin/users", "GET", null);
+        HttpResponse<String> audit = send(client, "/admin/audit/events", "GET", null);
 
         assertThat(response.statusCode()).isEqualTo(403);
+        assertThat(audit.statusCode()).isEqualTo(403);
     }
 
     @Test
@@ -224,6 +250,41 @@ class AuthorisationServiceApplicationTests {
         assertThat(response.body()).contains("\"detail\":\"At least one enabled administrator is required\"");
     }
 
+    @Test
+    void redirectsDisabledUsersToAccountDisabledLoginMessage() throws Exception {
+        String suffix = UUID.randomUUID().toString();
+        String username = "disabled-" + suffix;
+        saveUser(username, username + "@example.test", "Disabled12345!", "suspended", false, false,
+                Set.of(UserAuthority.ROLE_USER));
+
+        HttpClient client = browserClient();
+        HttpResponse<String> login = login(client, username, "Disabled12345!");
+
+        assertThat(login.statusCode()).isIn(302, 303);
+        assertThat(login.headers().firstValue("Location").orElse("")).contains("/login?disabled");
+
+        HttpResponse<String> disabledLoginPage = send(client, "/login?disabled", "GET", null);
+        assertThat(disabledLoginPage.statusCode()).isEqualTo(200);
+        assertThat(disabledLoginPage.body())
+                .contains("Your account is disabled. Contact an administrator before signing in again.")
+                .doesNotContain("Invalid username or password. Please try again.");
+    }
+
+    @Test
+    void keepsInvalidCredentialsOnGenericLoginMessage() throws Exception {
+        HttpClient client = browserClient();
+        HttpResponse<String> login = login(client, "missing-user", "Wrong12345!");
+
+        assertThat(login.statusCode()).isIn(302, 303);
+        assertThat(login.headers().firstValue("Location").orElse("")).contains("/login?error");
+
+        HttpResponse<String> invalidLoginPage = send(client, "/login?error", "GET", null);
+        assertThat(invalidLoginPage.statusCode()).isEqualTo(200);
+        assertThat(invalidLoginPage.body())
+                .contains("Invalid username or password. Please try again.")
+                .doesNotContain("Your account is disabled.");
+    }
+
     private void saveUser(
             String username,
             String email,
@@ -232,22 +293,51 @@ class AuthorisationServiceApplicationTests {
             boolean canTrade,
             Set<UserAuthority> authorities
     ) {
-        userAccountRepository.save(new UserAccount(
+        saveUser(username, email, password, desk, canTrade, true, authorities);
+    }
+
+    private void saveUser(
+            String username,
+            String email,
+            String password,
+            String desk,
+            boolean canTrade,
+            boolean enabled,
+            Set<UserAuthority> authorities
+    ) {
+        UserAccount account = new UserAccount(
                 username,
                 email,
                 passwordEncoder.encode(password),
                 desk,
                 canTrade,
                 authorities
-        ));
+        );
+        if (!enabled) {
+            account.updateAccount(username, email, false, authorities);
+        }
+        userAccountRepository.save(account);
     }
 
-    private HttpClient loggedInClient(String username, String password) throws Exception {
-        HttpClient client = HttpClient.newBuilder()
+    private HttpClient browserClient() {
+        return HttpClient.newBuilder()
                 .cookieHandler(new CookieManager())
                 .followRedirects(HttpClient.Redirect.NEVER)
                 .build();
+    }
 
+    private HttpClient loggedInClient(String username, String password) throws Exception {
+        HttpClient client = browserClient();
+        HttpResponse<String> login = login(client, username, password);
+
+        assertThat(login.statusCode()).isIn(302, 303);
+        assertThat(login.headers().firstValue("Location").orElse(""))
+                .doesNotContain("error")
+                .doesNotContain("disabled");
+        return client;
+    }
+
+    private HttpResponse<String> login(HttpClient client, String username, String password) throws Exception {
         HttpResponse<String> csrf = client.send(
                 HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/auth/csrf")).build(),
                 HttpResponse.BodyHandlers.ofString()
@@ -265,10 +355,7 @@ class AuthorisationServiceApplicationTests {
                         .build(),
                 HttpResponse.BodyHandlers.ofString()
         );
-
-        assertThat(login.statusCode()).isIn(302, 303);
-        assertThat(login.headers().firstValue("Location").orElse("")).doesNotContain("error");
-        return client;
+        return login;
     }
 
     private HttpResponse<String> send(HttpClient client, String path, String method, String body) throws Exception {

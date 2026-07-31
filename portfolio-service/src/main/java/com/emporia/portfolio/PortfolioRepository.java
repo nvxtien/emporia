@@ -1,7 +1,10 @@
 package com.emporia.portfolio;
 
 import com.emporia.portfolio.PortfolioContracts.Balance;
+import com.emporia.portfolio.PortfolioContracts.LatestReceipt;
+import com.emporia.portfolio.PortfolioContracts.PortfolioState;
 import com.emporia.portfolio.PortfolioContracts.RiskSeed;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -21,37 +24,83 @@ class PortfolioRepository implements PortfolioStore {
 
     @Override
     public RiskSeed load(final long clientId) {
-        final Long firstTransactionId;
-        try {
-            firstTransactionId = jdbc.queryForObject(
-                    """
-                    SELECT first_transaction_id
-                    FROM portfolio_state
-                    WHERE client_id = ?
-                    """,
-                    Long.class,
-                    clientId);
-        } catch (final EmptyResultDataAccessException error) {
-            throw new PortfolioNotFoundException(
-                    clientId,
-                    error);
-        }
-        final List<Balance> balances = jdbc.query(
-                """
-                SELECT asset_id, available_balance
-                FROM portfolio_balance
-                WHERE client_id = ?
-                ORDER BY asset_id
-                """,
-                (result, row) -> new Balance(
-                        result.getInt("asset_id"),
-                        result.getLong("available_balance")),
-                clientId);
+        final StateRow state = findState(clientId);
         return new RiskSeed(
                 PortfolioContracts.SCHEMA_VERSION,
                 clientId,
+                state.firstTransactionId(),
+                List.copyOf(balances(clientId)));
+    }
+
+    @Override
+    public PortfolioState state(final long clientId) {
+        final StateRow state = findState(clientId);
+        return new PortfolioState(
+                PortfolioContracts.SCHEMA_VERSION,
+                clientId,
+                state.firstTransactionId(),
+                state.updatedAt(),
+                List.copyOf(balances(clientId)),
+                latestReceipt(clientId));
+    }
+
+    @Override
+    public boolean exists(final long clientId) {
+        final Integer count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM portfolio_state WHERE client_id = ?",
+                Integer.class,
+                clientId);
+        return count != null && count > 0;
+    }
+
+    @Override
+    public PortfolioState provision(
+            final long clientId,
+            final long firstTransactionId,
+            final List<Balance> balances,
+            final Instant updatedAt) {
+        try {
+            jdbc.update(
+                    """
+                    INSERT INTO portfolio_state (
+                        client_id,
+                        first_transaction_id,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?)
+                    """,
+                    clientId,
+                    firstTransactionId,
+                    Timestamp.from(updatedAt));
+        } catch (final DuplicateKeyException error) {
+            throw new PortfolioAlreadyExistsException(clientId, error);
+        }
+
+        if (!balances.isEmpty()) {
+            jdbc.batchUpdate(
+                    """
+                    INSERT INTO portfolio_balance (
+                        client_id,
+                        asset_id,
+                        available_balance
+                    )
+                    VALUES (?, ?, ?)
+                    """,
+                    balances.stream()
+                            .map(balance -> new Object[] {
+                                    clientId,
+                                    balance.assetId(),
+                                    balance.amount()
+                            })
+                            .toList());
+        }
+        return new PortfolioState(
+                PortfolioContracts.SCHEMA_VERSION,
+                clientId,
                 firstTransactionId,
-                List.copyOf(balances));
+                updatedAt,
+                List.copyOf(balances),
+                null);
     }
 
     @Override
@@ -154,6 +203,62 @@ class PortfolioRepository implements PortfolioStore {
                 """,
                 Timestamp.from(updatedAt),
                 snapshot.clientId());
+    }
+
+    private StateRow findState(final long clientId) {
+        try {
+            return jdbc.queryForObject(
+                    """
+                    SELECT first_transaction_id, updated_at
+                    FROM portfolio_state
+                    WHERE client_id = ?
+                    """,
+                    (result, row) -> new StateRow(
+                            result.getLong("first_transaction_id"),
+                            result.getTimestamp("updated_at").toInstant()),
+                    clientId);
+        } catch (final EmptyResultDataAccessException error) {
+            throw new PortfolioNotFoundException(
+                    clientId,
+                    error);
+        }
+    }
+
+    private List<Balance> balances(final long clientId) {
+        return jdbc.query(
+                """
+                SELECT asset_id, available_balance
+                FROM portfolio_balance
+                WHERE client_id = ?
+                ORDER BY asset_id
+                """,
+                (result, row) -> new Balance(
+                        result.getInt("asset_id"),
+                        result.getLong("available_balance")),
+                clientId);
+    }
+
+    private LatestReceipt latestReceipt(final long clientId) {
+        final List<LatestReceipt> receipts = jdbc.query(
+                """
+                SELECT event_id, exchange_id, delivery_id, received_at
+                FROM received_portfolio_event
+                WHERE client_id = ?
+                ORDER BY received_at DESC
+                LIMIT 1
+                """,
+                (result, row) -> new LatestReceipt(
+                        result.getString("event_id"),
+                        result.getString("exchange_id"),
+                        result.getLong("delivery_id"),
+                        result.getTimestamp("received_at").toInstant()),
+                clientId);
+        return receipts.isEmpty() ? null : receipts.getFirst();
+    }
+
+    private record StateRow(
+            long firstTransactionId,
+            Instant updatedAt) {
     }
 
 }

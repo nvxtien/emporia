@@ -25,10 +25,24 @@ spring:
                 - Path=/api/admin/users/**
               filters:
                 - StripPrefix=1
+            - id: authorisation-admin-audit-service
+              uri: ${emporia.auth.url}
+              predicates:
+                - Path=/api/admin/audit/**
+                - Method=GET
+              filters:
+                - StripPrefix=1
             - id: static-data-service
               uri: ${emporia.services.static-data-url}
               predicates:
                 - Path=/api/instruments/**
+              filters:
+                - StripPrefix=1
+            - id: static-data-admin-service
+              uri: ${emporia.services.static-data-url}
+              predicates:
+                - Path=/api/admin/static-data/**
+                - Method=GET,POST,PUT
               filters:
                 - StripPrefix=1
             - id: user-preferences-service
@@ -62,6 +76,13 @@ spring:
               predicates:
                 - Path=/api/orders/**
                 - Method=PUT
+              filters:
+                - StripPrefix=1
+            - id: portfolio-service
+              uri: ${emporia.services.portfolio-url}
+              predicates:
+                - Path=/api/portfolio/**
+                - Method=GET,POST
               filters:
                 - StripPrefix=1
           globalcors:
@@ -109,6 +130,7 @@ emporia:
     market-data-url: ${EMPORIA_MARKET_DATA_URL:http://localhost:8084}
     order-command-url: ${EMPORIA_ORDER_COMMAND_URL:http://localhost:8085}
     order-management-url: ${EMPORIA_ORDER_MANAGEMENT_URL:http://localhost:8086}
+    portfolio-url: ${EMPORIA_PORTFOLIO_URL:http://localhost:8088}
 
 management:
   endpoints:
