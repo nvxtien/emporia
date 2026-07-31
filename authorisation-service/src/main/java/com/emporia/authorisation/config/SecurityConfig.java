@@ -1,6 +1,8 @@
 package com.emporia.authorisation.config;
 
 import com.emporia.authorisation.user.UserAccountRepository;
+import org.springframework.core.convert.converter.Converter;
+import org.springframework.security.authentication.AbstractAuthenticationToken;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
@@ -8,8 +10,13 @@ import org.springframework.core.annotation.Order;
 import org.springframework.http.MediaType;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.crypto.factory.PasswordEncoderFactories;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
+import org.springframework.security.oauth2.server.resource.authentication.JwtGrantedAuthoritiesConverter;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.LoginUrlAuthenticationEntryPoint;
 import org.springframework.security.web.savedrequest.HttpSessionRequestCache;
@@ -20,6 +27,8 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 
 @Configuration(proxyBeanMethods = false)
@@ -38,6 +47,7 @@ public class SecurityConfig {
         source.registerCorsConfiguration("/userinfo", config);
         source.registerCorsConfiguration("/connect/logout", config);
         source.registerCorsConfiguration("/auth/csrf", config);
+        source.registerCorsConfiguration("/admin/**", config);
         return source;
     }
 
@@ -59,8 +69,38 @@ public class SecurityConfig {
     }
 
     @Bean
+    Converter<Jwt, ? extends AbstractAuthenticationToken> jwtAuthenticationConverter() {
+        JwtGrantedAuthoritiesConverter scopeAuthorities = new JwtGrantedAuthoritiesConverter();
+        JwtAuthenticationConverter converter = new JwtAuthenticationConverter();
+        converter.setJwtGrantedAuthoritiesConverter(jwt -> {
+            List<GrantedAuthority> authorities = new ArrayList<>(scopeAuthorities.convert(jwt));
+            authorities.addAll(authorities(jwt.getClaim("authorities")));
+            return authorities;
+        });
+        return converter;
+    }
+
+    private static Collection<GrantedAuthority> authorities(Object claim) {
+        if (claim instanceof Collection<?> values) {
+            return values.stream()
+                    .filter(String.class::isInstance)
+                    .map(String.class::cast)
+                    .map(SimpleGrantedAuthority::new)
+                    .map(GrantedAuthority.class::cast)
+                    .toList();
+        }
+        if (claim instanceof String value && !value.isBlank()) {
+            return List.of(new SimpleGrantedAuthority(value));
+        }
+        return List.of();
+    }
+
+    @Bean
     @Order(Ordered.HIGHEST_PRECEDENCE)
-    SecurityFilterChain authorizationServerSecurityFilterChain(HttpSecurity http) throws Exception {
+    SecurityFilterChain authorizationServerSecurityFilterChain(
+            HttpSecurity http,
+            Converter<Jwt, ? extends AbstractAuthenticationToken> jwtAuthenticationConverter
+    ) throws Exception {
         http.cors(Customizer.withDefaults());
         http.oauth2AuthorizationServer(authorizationServer -> {
             http.securityMatcher(authorizationServer.getEndpointsMatcher());
@@ -70,7 +110,8 @@ public class SecurityConfig {
                 .requestMatchers("/login").permitAll()
                 .anyRequest().authenticated()
         );
-        http.oauth2ResourceServer(resourceServer -> resourceServer.jwt(Customizer.withDefaults()));
+        http.oauth2ResourceServer(resourceServer ->
+                resourceServer.jwt(jwt -> jwt.jwtAuthenticationConverter(jwtAuthenticationConverter)));
 
         http.exceptionHandling(exceptions -> exceptions.defaultAuthenticationEntryPointFor(
                 new LoginUrlAuthenticationEntryPoint("/login"),
@@ -82,8 +123,12 @@ public class SecurityConfig {
 
     @Bean
     @Order(Ordered.LOWEST_PRECEDENCE - 5)
-    SecurityFilterChain applicationSecurityFilterChain(HttpSecurity http) throws Exception {
+    SecurityFilterChain applicationSecurityFilterChain(
+            HttpSecurity http,
+            Converter<Jwt, ? extends AbstractAuthenticationToken> jwtAuthenticationConverter
+    ) throws Exception {
         http.cors(Customizer.withDefaults());
+        http.csrf(csrf -> csrf.ignoringRequestMatchers("/admin/users/**"));
 
         HttpSessionRequestCache requestCache = new HttpSessionRequestCache();
         requestCache.setRequestMatcher(new MediaTypeRequestMatcher(MediaType.TEXT_HTML));
@@ -91,9 +136,12 @@ public class SecurityConfig {
 
         http.authorizeHttpRequests(authorize -> authorize
                 .requestMatchers("/actuator/health", "/actuator/health/**", "/auth/csrf", "/login", "/error", "/default-ui.css", "/favicon.ico").permitAll()
+                .requestMatchers("/admin/users/**").hasRole("ADMIN")
                 .anyRequest().authenticated()
         );
         http.formLogin(form -> form.loginPage("/login").permitAll());
+        http.oauth2ResourceServer(resourceServer ->
+                resourceServer.jwt(jwt -> jwt.jwtAuthenticationConverter(jwtAuthenticationConverter)));
         return http.build();
     }
 }

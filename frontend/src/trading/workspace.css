@@ -50,7 +50,7 @@
 .workspace-brand-mark svg { width: 20px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
 
 .workspace-nav { display: flex; gap: 6px; padding: 4px; border: 1px solid var(--desk-line); border-radius: 7px; background: rgba(255,255,255,.02); }
-.workspace-nav span { padding: 7px 13px; border-radius: 4px; color: var(--desk-muted); font-size: 0.64rem; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; }
+.workspace-nav span, .workspace-nav a { padding: 7px 13px; border-radius: 4px; color: var(--desk-muted); font-size: 0.64rem; font-weight: 800; letter-spacing: 0.06em; text-decoration: none; text-transform: uppercase; }
 .workspace-nav .active { color: #102018; background: var(--desk-lime); }
 
 .workspace-account { display: flex; align-items: center; justify-self: end; gap: 10px; }

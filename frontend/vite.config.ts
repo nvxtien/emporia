@@ -2,7 +2,8 @@ import { defineConfig, loadEnv, type ProxyOptions } from 'vite'
 import react from '@vitejs/plugin-react'
 
 const gatewayPaths = [
-  '/.well-known',
+  '/.well-known/openid-configuration',
+  '/.well-known/oauth-authorization-server',
   '/oauth2',
   '/userinfo',
   '/connect',

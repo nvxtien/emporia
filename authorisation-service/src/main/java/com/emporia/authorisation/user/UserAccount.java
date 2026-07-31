@@ -110,4 +110,15 @@ public class UserAccount {
         this.desk = desk;
         this.canTrade = canTrade;
     }
+
+    public void updateAccount(String username, String email, boolean enabled, Set<UserAuthority> authorities) {
+        this.username = username;
+        this.email = email;
+        this.enabled = enabled;
+        this.authorities = new HashSet<>(authorities);
+    }
+
+    public void updatePasswordHash(String passwordHash) {
+        this.passwordHash = passwordHash;
+    }
 }

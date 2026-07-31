@@ -1,20 +1,28 @@
 package com.emporia.authorisation;
 
+import com.emporia.authorisation.user.UserAccount;
+import com.emporia.authorisation.user.UserAccountRepository;
+import com.emporia.authorisation.user.UserAuthority;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.oauth2.core.AuthorizationGrantType;
 import org.springframework.security.oauth2.core.ClientAuthenticationMethod;
 import org.springframework.security.oauth2.server.authorization.client.RegisteredClient;
 import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
 
+import java.net.CookieManager;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.Set;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -23,6 +31,10 @@ import static org.assertj.core.api.Assertions.assertThat;
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
+        "spring.datasource.hikari.schema=public",
+        "spring.flyway.default-schema=public",
+        "spring.flyway.schemas=public",
+        "spring.jpa.properties.hibernate.default_schema=public",
         "spring.jpa.hibernate.ddl-auto=validate",
         "emporia.auth.bootstrap-admin.enabled=false"
 })
@@ -33,6 +45,12 @@ class AuthorisationServiceApplicationTests {
 
     @Autowired
     private RegisteredClientRepository registeredClientRepository;
+
+    @Autowired
+    private UserAccountRepository userAccountRepository;
+
+    @Autowired
+    private PasswordEncoder passwordEncoder;
 
     @Test
     void exposesHealthAndOpenIdConfiguration() throws Exception {
@@ -117,5 +135,167 @@ class AuthorisationServiceApplicationTests {
                 .contains("\"access_token\":")
                 .contains("\"token_type\":\"Bearer\"")
                 .contains("\"scope\":\"internal\"");
+    }
+
+    @Test
+    void exposesAdminUserManagementToAdministrators() throws Exception {
+        String suffix = UUID.randomUUID().toString();
+        String adminUsername = "admin-" + suffix;
+        saveUser(adminUsername, adminUsername + "@example.test", "Admin12345!", "ops", true,
+                Set.of(UserAuthority.ROLE_USER, UserAuthority.ROLE_ADMIN));
+
+        HttpClient client = loggedInClient(adminUsername, "Admin12345!");
+
+        HttpResponse<String> list = send(client, "/admin/users", "GET", null);
+
+        assertThat(list.statusCode()).isEqualTo(200);
+        assertThat(list.body()).contains(adminUsername);
+
+        String managedUsername = "managed-" + suffix;
+        HttpResponse<String> created = send(client, "/admin/users", "POST", """
+                {
+                  "username": "%s",
+                  "email": "%s@example.test",
+                  "password": "Managed12345!",
+                  "desk": "client-a",
+                  "canTrade": false,
+                  "authorities": ["ROLE_USER"]
+                }
+                """.formatted(managedUsername, managedUsername));
+
+        assertThat(created.statusCode()).isEqualTo(201);
+        assertThat(created.body())
+                .contains("\"username\":\"" + managedUsername + "\"")
+                .contains("\"canTrade\":false")
+                .doesNotContain("Managed12345!");
+
+        UserAccount managed = userAccountRepository.findByUsernameIgnoreCase(managedUsername).orElseThrow();
+        HttpResponse<String> tradingIdentity = send(client,
+                "/admin/users/" + managed.getId() + "/trading-identity", "PUT", """
+                        {
+                          "desk": "client-b",
+                          "canTrade": true
+                        }
+                        """);
+
+        assertThat(tradingIdentity.statusCode()).isEqualTo(200);
+        assertThat(tradingIdentity.body())
+                .contains("\"desk\":\"client-b\"")
+                .contains("\"canTrade\":true");
+    }
+
+    @Test
+    void rejectsAdminUserManagementForNonAdministrators() throws Exception {
+        String suffix = UUID.randomUUID().toString();
+        String username = "viewer-" + suffix;
+        saveUser(username, username + "@example.test", "Viewer12345!", "read-only", false,
+                Set.of(UserAuthority.ROLE_USER));
+
+        HttpClient client = loggedInClient(username, "Viewer12345!");
+        HttpResponse<String> response = send(client, "/admin/users", "GET", null);
+
+        assertThat(response.statusCode()).isEqualTo(403);
+    }
+
+    @Test
+    void rejectsDisablingTheLastEnabledAdministratorWithProblemDetail() throws Exception {
+        String suffix = UUID.randomUUID().toString();
+        String adminUsername = "admin-" + suffix;
+        saveUser(adminUsername, adminUsername + "@example.test", "Admin12345!", "ops", true,
+                Set.of(UserAuthority.ROLE_USER, UserAuthority.ROLE_ADMIN));
+        saveUser("viewer-" + suffix, "viewer-" + suffix + "@example.test", "Viewer12345!", "read-only", false,
+                Set.of(UserAuthority.ROLE_USER));
+
+        HttpClient client = loggedInClient(adminUsername, "Admin12345!");
+        UserAccount admin = userAccountRepository.findByUsernameIgnoreCase(adminUsername).orElseThrow();
+
+        HttpResponse<String> response = send(client, "/admin/users/" + admin.getId(), "PUT", """
+                {
+                  "username": "%s",
+                  "email": "%s@example.test",
+                  "desk": "ops",
+                  "canTrade": true,
+                  "enabled": false,
+                  "authorities": ["ROLE_USER", "ROLE_ADMIN"]
+                }
+                """.formatted(adminUsername, adminUsername));
+
+        assertThat(response.statusCode()).isEqualTo(409);
+        assertThat(response.body()).contains("\"detail\":\"At least one enabled administrator is required\"");
+    }
+
+    private void saveUser(
+            String username,
+            String email,
+            String password,
+            String desk,
+            boolean canTrade,
+            Set<UserAuthority> authorities
+    ) {
+        userAccountRepository.save(new UserAccount(
+                username,
+                email,
+                passwordEncoder.encode(password),
+                desk,
+                canTrade,
+                authorities
+        ));
+    }
+
+    private HttpClient loggedInClient(String username, String password) throws Exception {
+        HttpClient client = HttpClient.newBuilder()
+                .cookieHandler(new CookieManager())
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .build();
+
+        HttpResponse<String> csrf = client.send(
+                HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/auth/csrf")).build(),
+                HttpResponse.BodyHandlers.ofString()
+        );
+        String parameterName = jsonValue(csrf.body(), "parameterName");
+        String token = jsonValue(csrf.body(), "token");
+        String body = form("username", username)
+                + "&" + form("password", password)
+                + "&" + form(parameterName, token);
+
+        HttpResponse<String> login = client.send(
+                HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/login"))
+                        .header("Content-Type", "application/x-www-form-urlencoded")
+                        .POST(HttpRequest.BodyPublishers.ofString(body))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString()
+        );
+
+        assertThat(login.statusCode()).isIn(302, 303);
+        assertThat(login.headers().firstValue("Location").orElse("")).doesNotContain("error");
+        return client;
+    }
+
+    private HttpResponse<String> send(HttpClient client, String path, String method, String body) throws Exception {
+        HttpRequest.Builder request = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + path))
+                .method(method, body == null
+                        ? HttpRequest.BodyPublishers.noBody()
+                        : HttpRequest.BodyPublishers.ofString(body));
+        if (body != null) {
+            request.header("Content-Type", "application/json");
+        }
+        return client.send(request.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static String form(String name, String value) {
+        return URLEncoder.encode(name, StandardCharsets.UTF_8)
+                + "="
+                + URLEncoder.encode(value, StandardCharsets.UTF_8);
+    }
+
+    private static String jsonValue(String json, String field) {
+        String needle = "\"" + field + "\":\"";
+        int start = json.indexOf(needle);
+        assertThat(start).isGreaterThanOrEqualTo(0);
+        int valueStart = start + needle.length();
+        int valueEnd = json.indexOf('"', valueStart);
+        assertThat(valueEnd).isGreaterThan(valueStart);
+        return json.substring(valueStart, valueEnd);
     }
 }

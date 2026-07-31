@@ -113,6 +113,14 @@ class GatewayRouteIntegrationTest {
     }
 
     @Test
+    void proxiesAdminUserManagementToAuthorisationService() throws Exception {
+        HttpResponse<String> response = send("/api/admin/users", null, accessToken());
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).isEqualTo("auth-path=/admin/users");
+    }
+
+    @Test
     void proxiesAuthenticatedMarketDataStreams() throws Exception {
         HttpResponse<String> response = send(
                 "/api/market-data/stream?listingIds=1,2", null, accessToken());
@@ -219,6 +227,8 @@ class GatewayRouteIntegrationTest {
                 exchange.getResponseHeaders().set("Content-Type", "application/json");
                 writeResponse(exchange, "{\"issuer\":\"" + TEST_ISSUER + "\"}");
             });
+            server.createContext("/admin/", exchange -> writeResponse(exchange,
+                    "auth-path=" + exchange.getRequestURI().getPath()));
             server.start();
             return server;
         } catch (IOException exception) {

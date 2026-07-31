@@ -19,6 +19,12 @@ spring:
                 - Path=/.well-known/**,/oauth2/**,/userinfo,/connect/logout,/login,/logout,/auth/csrf,/default-ui.css,/favicon.ico
               filters:
                 - PreserveHostHeader
+            - id: authorisation-admin-service
+              uri: ${emporia.auth.url}
+              predicates:
+                - Path=/api/admin/users/**
+              filters:
+                - StripPrefix=1
             - id: static-data-service
               uri: ${emporia.services.static-data-url}
               predicates:
