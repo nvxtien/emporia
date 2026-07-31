@@ -53,6 +53,16 @@ function claim(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
+function claimList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((entry): entry is string => typeof entry === 'string')
+  if (typeof value === 'string') return value.split(/[,\s]+/).filter(Boolean)
+  return []
+}
+
+function hasAuthority(user: User | null, authority: string): boolean {
+  return user ? claimList(user.profile.authorities).includes(authority) : false
+}
+
 function displayName(user: User): string {
   return (
     claim(user.profile.name) ??
@@ -112,6 +122,7 @@ function MiniChart({ path, positive }: { path: string; positive: boolean }) {
 export function HomePage() {
   const { user, isAuthenticated, isLoading, error, login, logout, clearError } = useAuth()
   const name = user ? displayName(user) : ''
+  const isAdmin = hasAuthority(user, 'ROLE_ADMIN')
 
   return (
     <div className="site-shell">
@@ -126,6 +137,7 @@ export function HomePage() {
           <a href="#portfolio">Portfolio</a>
           <a href="#trade">Trade</a>
           <a href="#account">Account</a>
+          {isAdmin && <a href="/admin/users">Admin</a>}
         </nav>
         {isAuthenticated && user ? (
           <div className="header-account">

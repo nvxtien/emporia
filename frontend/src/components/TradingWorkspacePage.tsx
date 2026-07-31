@@ -20,6 +20,16 @@ function claim(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
+function claimList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((entry): entry is string => typeof entry === 'string')
+  if (typeof value === 'string') return value.split(/[,\s]+/).filter(Boolean)
+  return []
+}
+
+function hasAuthority(user: User | null, authority: string): boolean {
+  return user ? claimList(user.profile.authorities).includes(authority) : false
+}
+
 function displayName(user: User): string {
   return claim(user.profile.name) ?? claim(user.profile.preferred_username) ?? user.profile.sub
 }
@@ -156,6 +166,7 @@ export function TradingWorkspacePage() {
   const name = user ? displayName(user) : ''
   const desk = user ? claim(user.profile.desk) ?? user.profile.sub : ''
   const canTrade = user?.profile.can_trade === true
+  const isAdmin = hasAuthority(user, 'ROLE_ADMIN')
   const marketSource = Object.values(quotes).find((quote) => quote.source === 'ALPACA_IEX')
     ? 'Live IEX'
     : Object.values(quotes).find((quote) => quote.source === 'AGGREGATED')
@@ -494,7 +505,7 @@ export function TradingWorkspacePage() {
           <strong>Emporia</strong><small>Trade</small>
         </Link>
         <nav className="workspace-nav" aria-label="Trading workspace">
-          <span className="active">Trading desk</span><span>Portfolio</span><span>Analytics</span>
+          <span className="active">Trading desk</span><span>Portfolio</span><span>Analytics</span>{isAdmin && <Link to="/admin/users">Admin</Link>}
         </nav>
         <div className="workspace-account">
           <span className="simulation-badge"><i /> {marketSource}</span>
