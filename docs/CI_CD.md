@@ -45,9 +45,9 @@ In order, stopping at the first failure:
    && vite build` — this is also the typecheck).
 
 It always builds `clean`, never incrementally — a CI gate that passes on a
-stale `target/` and fails on a fresh clone isn't trustworthy. See [Known
-issue](#known-issue-market-data-service-flake) for the one place this cost
-something.
+stale `target/` and fails on a fresh clone isn't trustworthy. See [Resolved
+issue](#resolved-issue-market-data-service-flake) for the one place this
+cost something, and how it was actually fixed rather than just mitigated.
 
 ## What `local-deploy.sh` does
 
@@ -66,65 +66,70 @@ service you're debugging, a database with in-progress test data, etc.).
 Deploying locally is something you choose to do, not something that should
 ambush you.
 
-## Known issue: market-data-service flake
+## Resolved issue: market-data-service flake
 
-`local-ci.sh`'s backend step retries once on failure. This isn't a generic
-"tests are flaky, just retry" policy — it's a specific, investigated,
-documented mitigation for one known issue:
-
-`market-data-service` intermittently (roughly 1-in-4 to 1-in-9 clean builds)
-fails with a `NoSuchMethodError` on a protobuf-generated `Builder`'s
+`market-data-service` used to intermittently (roughly 1-in-4 to 1-in-9 clean
+builds) fail with a `NoSuchMethodError` on a protobuf-generated `Builder`'s
 synthetic `access$N()` accessor — the signature of a compiled inner class
 out of sync with its outer class, despite every build starting from `mvn
-clean`. What's been established so far:
+clean`. `local-ci.sh` briefly carried a retry-once mitigation for this;
+that's been removed now that the underlying cause is fixed.
 
-- It predates and is unrelated to the FIX-simulator proto vendoring
-  (`c790ed1`) — confirmed by reproducing it against the pre-vendoring pom
-  (external `../../protobuf/fix` path) and by it hitting `ClobQuote`, which
-  comes from the **other**, untouched proto execution.
-- The module has two separate executions of `org.xolstice:protobuf-maven-plugin`
-  (`emporia-market-data-contract` and `fix-simulator-contract`), both bound
-  to `generate-sources`, both processing a proto file declaring `package
-  marketdataservice;` (different `java_package` Java-side, so no Java class
-  collision, but the same proto-level namespace) — a plausible site for
-  shared/stale descriptor-pool state across the two executions within one
-  Maven JVM.
+What was established during investigation:
+
+- It predated and was unrelated to the FIX-simulator proto vendoring
+  (`c790ed1`) — reproduced against the pre-vendoring pom (external
+  `../../protobuf/fix` path) too, and it hit `ClobQuote`, which comes from
+  the *other*, untouched proto execution, just as often as it hit anything
+  FIX-related.
+- The module had two separate executions of `org.xolstice:protobuf-maven-plugin`
+  (`emporia-market-data-contract` and `fix-simulator-contract`) bound to the
+  same module's `generate-sources` phase, both processing a proto file
+  declaring `package marketdataservice;` (different `java_package`
+  Java-side, so no Java class collision, but the same proto-level
+  namespace) — a plausible site for shared/stale descriptor-pool state
+  across the two executions within one Maven JVM compiling one set of
+  sources together.
 - A same-JVM phase-ordering fix (running the second execution in a later
-  lifecycle phase instead of immediately after the first) **did not**
-  resolve it.
-- The plugin itself (`xolstice/protobuf-maven-plugin`) was **archived by its
-  maintainers in April 2025** — no upstream fix is coming, and the
-  maintainers' own response to multi-execution complaints is "migrate to a
-  different plugin."
-- The vendored `.proto` files were deliberately **not** modified to test
-  further theories (e.g. renaming the shared package) — they're a wire
-  contract with a real external FIX-simulator gRPC service, and an
-  experiment that silently breaks interop with that service is worse than
-  the flake it would be testing.
+  lifecycle phase instead of immediately after the first) did **not**
+  resolve it, ruling out simple timing/ordering as the cause.
+- The plugin itself (`xolstice/protobuf-maven-plugin`) is **archived by its
+  maintainers as of April 2025** — no upstream fix, and the maintainers'
+  own response to multi-execution complaints is "migrate to a different
+  plugin."
 
-**If you want to actually fix this** rather than live with the retry, the
-two real options are: isolate the `fix-simulator-contract` proto compile
-into its own Maven module (a different reactor build context, likely
-avoiding whatever shared state causes this), or migrate the module off the
-archived plugin. Both are real, scoped pieces of work — not something to
-start as a drive-by.
+**The actual fix**: isolate the FIX-simulator proto compile into its own
+Maven module, [`fix-simulator-contracts`](../fix-simulator-contracts),
+following the same pattern already established by
+[`trading-contracts`](../trading-contracts) — a small module whose only job
+is generating and packaging contract classes, consumed by other modules as
+an ordinary jar dependency. `market-data-service` now has exactly one
+protobuf-maven-plugin execution again; the two executions never share a
+compile unit. This is a real fix, not a workaround: it removes the
+structural precondition (two executions, one module) rather than papering
+over the symptom, and it does not touch the vendored `.proto` files'
+semantic content at all, so the real external FIX-simulator gRPC service
+interop is untouched. Verified with 10 consecutive clean full-module
+rebuilds and a full 10-module reactor `mvn clean verify`, all green.
 
 ## Guidelines
 
 - **Don't bypass the hook to route around a real failure.** `git push
   --no-verify` exists for genuine emergencies, not for "the pipeline is
-  slow today." If `local-ci.sh` fails and it isn't the documented
-  market-data-service flake, something is actually broken — fix it or ask,
-  don't push around it.
+  slow today." If `local-ci.sh` fails, something is actually broken — fix
+  it or ask, don't push around it.
 - **If you add a new backend module or a new frontend check, wire it into
   `local-ci.sh`.** The pipeline is only as trustworthy as its coverage; a
   CI script that silently stops checking something is worse than no CI
-  script, because it looks like a safety net that isn't one.
-- **Don't add more retries to paper over new flakiness.** The one retry in
-  `local-ci.sh` is scoped to a specific, investigated, documented issue. If
-  you hit a *different* flaky failure, investigate and document it the same
-  way before deciding a retry is the right mitigation — reflexively
-  retrying makes the pipeline gradually meaningless.
+  script, because it looks like a safety net that isn't one. New Maven
+  modules are picked up automatically by `mvn verify`; nothing to add there
+  unless you're introducing a new *kind* of check.
+- **Don't reach for a retry to paper over flakiness.** The
+  market-data-service flake documented below briefly had one; it was
+  removed once the actual cause got fixed. If you hit a flaky failure,
+  investigate and document it with the same rigor before deciding a retry
+  is the right call, rather than the first one — a pipeline that reflexively
+  retries past failures stops meaning anything.
 - **`local-deploy.sh` is opt-in, not part of the push path.** Don't wire it
   into the hook. If you want push-triggered deployment later, that's a
   deliberate design decision (what triggers it, what environment, what

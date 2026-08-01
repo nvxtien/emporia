@@ -18,20 +18,7 @@ if ! mvn -q -f pom.xml dependency:get \
 fi
 
 echo "==> Backend: compile, test, PMD (mvn clean verify)"
-# market-data-service intermittently fails with a NoSuchMethodError on a
-# protobuf-generated Builder's synthetic access$N() accessor -- a stale/
-# out-of-sync compiled inner class, roughly 1-in-4 to 1-in-9 clean builds.
-# Root cause looks like an interaction between the module's two separate
-# protobuf-maven-plugin executions (org.xolstice:protobuf-maven-plugin,
-# archived/unmaintained as of 2025); a same-JVM phase-ordering fix did not
-# resolve it, and the vendored .proto files can't be safely changed to test
-# further since they're a wire contract with a real external gRPC service.
-# Retrying once is a pragmatic mitigation until that gets a real fix.
-if ! mvn -f pom.xml clean verify; then
-    echo "First attempt failed -- retrying once (see comment above re: known" >&2
-    echo "market-data-service protobuf-plugin flake)." >&2
-    mvn -f pom.xml clean verify
-fi
+mvn -f pom.xml clean verify
 
 echo "==> Frontend: install, lint, typecheck+build"
 (
