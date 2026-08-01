@@ -96,6 +96,7 @@ HTTP method to the service that owns each business capability.
 | `gateway` | 8082 | Browser security boundary and routing |
 | `frontend` | 3001 | React trading workspace |
 | `trading-contracts` | not deployed | Versioned Java/Kafka contracts shared at build time |
+| `fix-simulator-contracts` | not deployed | Generated FIX-simulator protobuf/gRPC contracts, consumed by `market-data-service` |
 
 No running service reads or writes another Emporia service's PostgreSQL database
 or schema.
@@ -354,9 +355,8 @@ the OIDC/Kafka smoke test.
 
 Run `scripts/install-git-hooks.sh` once per clone to enable local CI: a
 pre-push hook that runs the same `mvn verify` + frontend checks before code
-leaves your machine. See [docs/CI_CD.md](docs/CI_CD.md) for what it checks,
-the on-demand local deploy script, and a known intermittent
-`market-data-service` build issue with a documented mitigation.
+leaves your machine. See [docs/CI_CD.md](docs/CI_CD.md) for what it checks
+and the on-demand local deploy script.
 
 ---
 
