@@ -81,9 +81,9 @@
                             <goal>compile-custom</goal>
                         </goals>
                         <configuration>
-                            <protoSourceRoot>${project.basedir}/../../protobuf/fix</protoSourceRoot>
+                            <protoSourceRoot>${project.basedir}/src/main/proto-fix</protoSourceRoot>
                             <includeDirectories>
-                                <includeDirectory>${project.basedir}/../../protobuf/fix</includeDirectory>
+                                <includeDirectory>${project.basedir}/src/main/proto-fix</includeDirectory>
                             </includeDirectories>
                             <outputDirectory>${project.build.directory}/generated-sources/fix/java</outputDirectory>
                             <temporaryProtoFileDirectory>${project.build.directory}/protoc-dependencies/fix</temporaryProtoFileDirectory>
