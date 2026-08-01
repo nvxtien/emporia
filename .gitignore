@@ -1,5 +1,6 @@
 target/
 market-data-service/target_old*/
+.local-run/
 
 .idea/
 .vscode/

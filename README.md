@@ -5,6 +5,7 @@
 [![Java 21](https://img.shields.io/badge/Java-21-orange?style=for-the-badge&logo=openjdk)](https://github.com/nvxtien/emporia)
 [![Spring Boot](https://img.shields.io/badge/Spring_Boot-4.0.7-green?style=for-the-badge&logo=springboot)](https://github.com/nvxtien/emporia)
 [![React 19](https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react)](https://github.com/nvxtien/emporia)
+[![Discord](https://img.shields.io/badge/Discord-Join_chat-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/ZbsryA3Tb)
 
 > 📖 **Comprehensive Platform Documentation & Architectural Specifications are published on the [Emporia GitHub Wiki](https://github.com/nvxtien/emporia/wiki)!**
 
@@ -163,7 +164,10 @@ boundaries. Service-level configuration is collected in
 Non-Docker local PostgreSQL settings:
 
 - Database: `emporia`
-- Username: `postgres`
+- Username: your OS username by default (the role Homebrew's `postgresql`
+  formula creates), not `postgres` — `scripts/run-local.sh` and
+  `scripts/seed-portfolio-client.sh` default `DB_USERNAME` accordingly;
+  override `DB_USERNAME` if your local Postgres uses a different role
 - Password: `admin123`
 
 Flyway creates these service-owned schemas in the local `emporia` database:
@@ -178,10 +182,18 @@ Flyway creates these service-owned schemas in the local `emporia` database:
 | Infrastructure-only Docker | Host JVM | Docker containers exposed on `5433`-`5438` | One PostgreSQL database/container per service that owns persistent data |
 | Full Docker | Docker containers | Docker containers | One PostgreSQL database/container per service that owns persistent data |
 
+See [Start locally](#start-locally) below for how each mode is brought up.
+
 ## Start locally
 
-Run all commands from the repository root. Keep each long-running Maven or npm
-command in its own terminal.
+`scripts/run-local.sh` (Mode 1) and `scripts/run-infra-docker.sh` (Mode 2)
+build the reactor, start every service in the background, wait for each
+`/actuator/health` to report up, and print the frontend URL. **This is the
+supported way to bring up the stack — don't start services one-by-one by
+hand.** Full Docker mode already has `scripts/local-deploy.sh` and the
+compose commands in the Docker Deployment section below.
+
+Run all commands from the repository root.
 
 1. Clone and install the `exchange-core` dependency into your local Maven repository:
 
@@ -189,157 +201,111 @@ command in its own terminal.
    git clone https://github.com/nvxtien/exchange-core.git
    cd exchange-core
    mvn clean install
+   cd ..
    ```
 
-2. Confirm the shared local PostgreSQL database is running, then start Kafka:
-
-   The non-Docker local path uses one PostgreSQL database at
-   `localhost:5432/emporia`; Flyway creates the service-owned schemas when the
-   services start. Use the Docker deployment section below if you want
-   Docker-managed PostgreSQL instances.
+2. Start the stack. For Mode 1 (Local), first confirm the shared
+   non-Docker PostgreSQL database is running on `localhost:5432` (see
+   [Local prerequisites](#local-prerequisites) above):
 
    ```bash
-   docker compose up -d kafka
-   docker compose ps kafka
+   scripts/run-local.sh
    ```
 
-3. Build and install the shared Kafka contract and all split services:
+   For Mode 2 (Infrastructure-only Docker), no local PostgreSQL is needed —
+   the script starts the per-service containers itself:
 
    ```bash
-   mvn -f emporia/pom.xml install
+   scripts/run-infra-docker.sh
    ```
 
-4. Start the authentication service:
+3. Open `http://localhost:3001` and sign in with `admin` / `admin123` once
+   the script prints "stack is up".
 
-   ```bash
-   cd emporia/authentication
-   SERVER_PORT=9000 \
-   AUTH_ISSUER=http://localhost:3001 \
-   OAUTH_REDIRECT_URI=http://localhost:3001/auth/callback \
-   OAUTH_POST_LOGOUT_REDIRECT_URI=http://localhost:3001/auth/logout-callback \
-   BOOTSTRAP_ADMIN_ENABLED=true \
-   BOOTSTRAP_ADMIN_USERNAME=admin \
-   BOOTSTRAP_ADMIN_EMAIL=admin@localhost \
-   BOOTSTRAP_ADMIN_PASSWORD=admin123 \
-   BOOTSTRAP_ADMIN_DESK=default \
-   BOOTSTRAP_ADMIN_CAN_TRADE=true \
-   DB_PASSWORD=admin123 \
-   mvn spring-boot:run
-   ```
+Both scripts default `execution-service` to `EXECUTION_VENUE_MODE=exchange-core`
+with `EXCHANGE_CORE_ACCOUNTING_MODE=full-equity-risk`, and automatically seed
+a USD portfolio balance for the bootstrap admin so it can receive an
+exchange-core risk seed. `market-data-service` defaults to
+`MARKET_DATA_PROVIDER=simulated`; export `MARKET_DATA_PROVIDER=alpaca-iex`
+plus `APCA_API_KEY_ID`/`APCA_API_SECRET_KEY` before running either script to
+use live Alpaca IEX data instead:
 
-4. Start the seven trading microservices, one command per terminal:
+```bash
+MARKET_DATA_PROVIDER=alpaca-iex \
+APCA_API_KEY_ID='your-alpaca-key-id' \
+APCA_API_SECRET_KEY='your-alpaca-secret-key' \
+scripts/run-local.sh
+```
 
-   ```bash
-   cd emporia/static-data-service && mvn spring-boot:run
-   ```
+> **🔑 Registering Alpaca API Credentials**:
+> 1. Sign up for a free account at [alpaca.markets](https://alpaca.markets).
+> 2. Open the **Paper Trading** dashboard (free sandbox).
+> 3. Click **Generate New API Key** in the right-hand panel.
+> 4. Copy your **API Key ID** (`APCA_API_KEY_ID`) and **Secret Key** (`APCA_API_SECRET_KEY`).
 
-   To optionally import active US-equity reference data or connect to Alpaca's real-time IEX feed:
+To instead consume incremental order books from one or more FIX simulator
+gRPC sources, export `MARKET_DATA_PROVIDER=fix-simulator` and
+`FIX_SIMULATOR_CONNECTIONS`; see the
+[market-data service runbook](market-data-service/README.md) for the
+connection string format and behavior.
 
-   ```bash
-   cd emporia/market-data-service
-   MARKET_DATA_PROVIDER=alpaca-iex \
-   APCA_API_KEY_ID=your-alpaca-key-id \
-   APCA_API_SECRET_KEY=your-alpaca-secret-key \
-   mvn spring-boot:run
-   ```
+Each script logs every service to `.local-run/logs/<service>.log` and tracks
+its pid in `.local-run/pids/<service>.pid`.
 
-   *Credentials are read directly from process environment variables and are never persisted to disk or databases. See [docs/market-data/README.md](docs/market-data/README.md) for details.*
+#### Check service status
 
-   ```bash
-   cd emporia/user-preferences-service && mvn spring-boot:run
-   ```
+Health check every service (all default to `GET /actuator/health` without a
+token):
 
-   ```bash
-   cd emporia/market-data-service && mvn spring-boot:run
-   ```
+```bash
+for pair in "authentication:9000" "static-data-service:8081" "user-preferences-service:8083" \
+            "market-data-service:8084" "order-command-service:8085" "order-management-service:8086" \
+            "execution-service:8087" "portfolio-service:8088" "gateway:8082"; do
+  name="${pair%%:*}"; port="${pair##*:}"
+  echo "$name: $(curl -fsS http://localhost:$port/actuator/health)"
+done
+curl -fsS -o /dev/null -w 'frontend: %{http_code}\n' http://localhost:3001
+```
 
-   The market-data service uses its deterministic simulator by default. It also
-   exposes a browser SSE stream on port `8084` and the
-   `marketdataservice.MarketDataService` gRPC interface on port `50551`.
+Other useful checks:
 
-   To consume incremental order books directly from one or more FIX simulator
-   gRPC sources:
+```bash
+cat .local-run/pids/*.pid                    # pid recorded per running service
+tail -f .local-run/logs/execution-service.log  # live logs for one service
+docker compose ps kafka                        # Kafka container health
+```
 
-   ```bash
-   cd emporia/market-data-service
-   MARKET_DATA_PROVIDER=fix-simulator \
-   FIX_SIMULATOR_CONNECTIONS='XNAS=localhost:50051,XNYS=localhost:50052' \
-   mvn spring-boot:run
-   ```
+Stop everything either script started, including the Kafka and/or
+per-service PostgreSQL containers:
 
-   Multiple replicas for one venue are separated with `|`, for example
-   `XNAS=nasdaq-a:50051|nasdaq-b:50051`. Listings are assigned
-   deterministically across those replicas. The provider reconnects,
-   resubscribes, maintains entries by FIX entry ID, and applies
-   `NEW`, `CHANGE`, `OVERLAY`, and `DELETE` updates.
+```bash
+scripts/stop-services.sh
+```
 
-   Browser clients use `GET /api/market-data/stream` and receive conflated
-   continuous quotes. Snapshot REST endpoints remain available for compatibility.
-   Composite listings use exchange MIC `XOSR`; the service combines all
-   same-symbol venue books while retaining each level's source listing and MIC.
+If you create additional trading users after the stack is up (e.g. through
+the admin user-management UI), seed their exchange-core portfolio balance the
+same way the bootstrap admin is seeded:
 
-    See the [market-data service runbook](market-data-service/README.md) for
-    configuration, observability, and deployment details.
+```bash
+scripts/seed-portfolio-client.sh <username>
+```
 
-    > **🔑 Registering Alpaca API Credentials**:
-    > 1. Sign up for a free account at [alpaca.markets](https://alpaca.markets).
-    > 2. Open the **Paper Trading** dashboard (free sandbox).
-    > 3. Click **Generate New API Key** in the right-hand panel.
-    > 4. Copy your **API Key ID** (`APCA_API_KEY_ID`) and **Secret Key** (`APCA_API_SECRET_KEY`).
-    > 5. Export them when launching `market-data-service` or `static-data-service`:
-    >    ```bash
-    >    export APCA_API_KEY_ID='your-alpaca-key-id'
-    >    export APCA_API_SECRET_KEY='your-alpaca-secret-key'
-    >    ```
+### Manual, per-service startup
 
-   ```bash
-   cd emporia/order-command-service && mvn spring-boot:run
-   ```
-
-   `order-command-service` owns create, modify, single-cancel, and cancel-all
-   HTTP commands. There is no separate `order-monitor` process or port.
-
-   ```bash
-   cd emporia/order-management-service && mvn spring-boot:run
-   ```
-
-   ```bash
-   cd emporia/execution-service && mvn spring-boot:run
-   ```
-
-   The execution service uses delayed simulated venue fills by default. Its
-   OAuth client is registered automatically by the local authentication
-   configuration. Use the same `EXECUTION_OAUTH_CLIENT_SECRET` value in both
-   services when overriding the local default.
-
-   ```bash
-   cd emporia/portfolio-service && mvn spring-boot:run
-   ```
-
-   The portfolio service is an internal exchange accounting boundary; the
-   browser gateway does not route to it. Provision clients before exchange-core
-   requests a risk seed. See
-   [portfolio-service/README.md](portfolio-service/README.md) for its API,
-   idempotency contract, and PostgreSQL integration test.
-
-5. Start the gateway on the browser's proxy port:
-
-   ```bash
-   cd emporia/gateway
-   SERVER_PORT=8082 \
-   EMPORIA_AUTH_ISSUER=http://localhost:3001 \
-   mvn spring-boot:run
-   ```
-
-6. Start React:
-
-   ```bash
-   cd emporia/frontend
-   npm install
-   VITE_GATEWAY_PROXY_TARGET=http://localhost:8082 npm run dev -- --port 3001
-   ```
-
-7. Open `http://localhost:3001` and sign in with `admin` / `admin123`.
+Running one service by hand (for example under a debugger) is still
+supported. Kafka must already be running (`docker compose up -d kafka`), and
+`authentication` should start before any service that validates its own OAuth
+tokens. Each service's own README documents its environment variables and
+`mvn spring-boot:run` / `npm run dev` command:
+[`authentication`](authentication/README.md),
+[`static-data-service`](static-data-service/README.md),
+[`user-preferences-service`](user-preferences-service/README.md),
+[`market-data-service`](market-data-service/README.md),
+[`order-command-service`](order-command-service/README.md),
+[`order-management-service`](order-management-service/README.md),
+[`execution-service`](execution-service/README.md),
+[`portfolio-service`](portfolio-service/README.md),
+[`gateway`](gateway/README.md), and [`frontend`](frontend/README.md).
 
 Every service supports `GET /actuator/health` without a token. Kafka is healthy
 when `docker compose ps kafka` reports `healthy`.
@@ -363,18 +329,17 @@ and the on-demand local deploy script.
 
 ## 🐳 Docker Deployment
 
-In addition to running services locally on your host machine, Emporia supports containerized deployment with Docker and Docker Compose:
+In addition to running services locally on your host machine, Emporia supports
+containerized deployment with Docker and Docker Compose. As with
+[Start locally](#start-locally) above, use the provided scripts rather than
+starting containers or services by hand.
 
 ### 1. Infrastructure-Only Docker Setup
 
-The Docker Compose files intentionally use one PostgreSQL container per service
-that owns persistent data. The Spring Boot `application.yml` defaults remain
-pointed at the single non-Docker local database; Docker Compose supplies
-service-specific `DB_URL` values for containerized deployments.
-
-Infrastructure-only Compose spins up service-owned PostgreSQL 16 instances
-(`5433`-`5438`) and Apache Kafka 4.3.1 (`9092`) while running Spring Boot
-services on your local JVM:
+This is Mode 2 from [Start locally](#start-locally): `scripts/run-infra-docker.sh`
+starts one PostgreSQL 16 container per service that owns persistent data
+(ports `5433`-`5438`) plus Apache Kafka 4.3.1 (`9092`), then runs every Spring
+Boot service and the frontend on your host JVM against those containers.
 
 | Service | Host port | Database | Schema |
 |---|---:|---|---|
@@ -385,52 +350,53 @@ services on your local JVM:
 | `execution-service` | `5437` | `emporia_execution` | `emporia_execution` |
 | `portfolio-service` | `5438` | `emporia_portfolio` | `emporia_portfolio` |
 
-Set each service's `DB_URL` to the matching host port when running that service
-on the host JVM against Docker-managed databases.
+```bash
+scripts/run-infra-docker.sh
+```
+
+To bring up just the containers, for example to run one service manually
+against them (see [Manual, per-service startup](#manual-per-service-startup)):
 
 ```bash
-# Start PostgreSQL instances & Kafka
 docker compose up -d
-
-# Check health
 docker compose ps
 ```
 
 ### 2. Full-Stack Docker Container Deployment
 
 To launch all 9 microservices, API Gateway, React UI, service-owned PostgreSQL
-instances, and Kafka in containers:
+instances, and Kafka in containers, build the Maven jars first — each
+Dockerfile copies a pre-built `target/*.jar` rather than building from
+source — then run `scripts/local-deploy.sh`:
 
 ```bash
 # 1. Build and install exchange-core into your local Maven repo
-git clone https://github.com/nvxtien/exchange-core.git && cd exchange-core && mvn clean install
+git clone https://github.com/nvxtien/exchange-core.git && cd exchange-core && mvn clean install && cd ..
 
 # 2. Build local Maven JAR artifacts
 mvn clean install -DskipTests
 
-# 3. Start full-stack Docker containers (Default: Simulated market data)
-docker compose -f docker-compose.full.yml up --build -d
+# 3. Build images and start the full-stack containers (default: simulated market data)
+scripts/local-deploy.sh
 
-# Or start full-stack Docker with live Alpaca IEX market data:
+# Or with live Alpaca IEX market data:
 MARKET_DATA_PROVIDER=alpaca-iex \
 APCA_API_KEY_ID='your-alpaca-key-id' \
 APCA_API_SECRET_KEY='your-alpaca-secret-key' \
-docker compose -f docker-compose.full.yml up --build -d
+scripts/local-deploy.sh
 ```
 
 ### 3. Stop Docker
 
-Stop the infrastructure-only Docker containers:
+One command stops everything regardless of which mode you used — host-JVM
+processes from `run-local.sh`/`run-infra-docker.sh`, the infra containers
+from `docker-compose.yml`, and the full-stack containers from
+`docker-compose.full.yml`:
 
 ```bash
-docker compose down
+scripts/stop-services.sh
 ```
 
-Stop the full-stack Docker deployment:
-
-```bash
-docker compose -f docker-compose.full.yml down
-```
-
-Do not add `-v` unless you intentionally want to delete the local per-service
-database volumes and the Kafka volume.
+Do not add `-v` to the `docker compose` commands inside it unless you
+intentionally want to delete the local per-service database volumes and the
+Kafka volume.
