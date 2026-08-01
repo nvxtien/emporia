@@ -61,6 +61,12 @@ function compactNumber(value: number): string {
   return new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(value)
 }
 
+function isAligned(value: number, increment: number): boolean {
+  if (!(increment > 0)) return false
+  const ratio = value / increment
+  return Math.abs(ratio - Math.round(ratio)) < 1e-6
+}
+
 function percent(value: number): string {
   return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`
 }
@@ -346,7 +352,28 @@ export function TradingWorkspacePage() {
     const numericPrice = Number(price)
     if (!selectedListing) return setError('Select an instrument before creating an order')
     if (!Number.isFinite(numericQuantity) || numericQuantity <= 0) return setError('Enter a valid order quantity')
-    if (orderType === 'LIMIT' && (!Number.isFinite(numericPrice) || numericPrice <= 0)) return setError('Enter a valid limit price')
+    if (!isAligned(numericQuantity, selectedListing.sizeIncrement)) {
+      return setError(`Quantity must align with the ${selectedListing.sizeIncrement} share size increment`)
+    }
+    if (orderToModify && numericQuantity <= orderToModify.tradedQuantity) {
+      return setError(`Quantity must be greater than the ${orderToModify.tradedQuantity} already traded`)
+    }
+    if (orderType === 'LIMIT') {
+      if (!Number.isFinite(numericPrice) || numericPrice <= 0) return setError('Enter a valid limit price')
+      if (!isAligned(numericPrice, selectedListing.tickSize)) {
+        return setError(`Limit price must align with the ${selectedListing.tickSize} tick size`)
+      }
+    }
+    if (destination === 'VWAP') {
+      const numericDuration = Number(durationMinutes)
+      if (!Number.isFinite(numericDuration) || numericDuration <= 0) {
+        return setError('Enter a valid VWAP duration in minutes')
+      }
+      const numericParticipation = Number(participationRate)
+      if (!Number.isFinite(numericParticipation) || numericParticipation <= 0 || numericParticipation > 100) {
+        return setError('Enter a VWAP participation rate between 1 and 100')
+      }
+    }
     setReviewing(true)
   }
 
@@ -775,7 +802,7 @@ export function TradingWorkspacePage() {
                       <td><span className={order.side === 'BUY' ? 'side-chip side-chip--buy' : 'side-chip side-chip--sell'}>{order.side}</span></td>
                       <td>{compactNumber(order.quantity)}</td>{layout.columns.filled !== false && <td>{compactNumber(order.tradedQuantity)}</td>}{layout.columns.price !== false && <td>{money(order.limitPrice, order.listing.currency)}</td>}{layout.columns.destination !== false && <td>{order.destination}</td>}
                       <td><span className={`status-chip status-chip--${order.status.toLowerCase().replace('_', '-')}`}><i />{order.status.replace('_', ' ')}</span></td>
-                      <td>{active && canTrade && <><button className="row-cancel" type="button" onClick={(event) => { event.stopPropagation(); startModify(order) }}>Modify</button><button className="row-cancel" type="button" onClick={(event) => { event.stopPropagation(); void cancelOrder(order) }}>Cancel</button></>}</td>
+                      <td>{active && canTrade && <>{order.destination === 'DMA' && <button className="row-cancel" type="button" onClick={(event) => { event.stopPropagation(); startModify(order) }}>Modify</button>}<button className="row-cancel" type="button" onClick={(event) => { event.stopPropagation(); void cancelOrder(order) }}>Cancel</button></>}</td>
                     </tr>
                   )
                 })}
