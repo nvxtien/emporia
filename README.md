@@ -96,8 +96,8 @@ HTTP method to the service that owns each business capability.
 | `gateway` | 8082 | Browser security boundary and routing |
 | `frontend` | 3001 | React trading workspace |
 | `trading-contracts` | not deployed | Versioned Java/Kafka contracts shared at build time |
-| `fix-simulator-contracts` | not deployed | Generated FIX-simulator protobuf/gRPC contracts, consumed by `market-data-service` and `fixmarketsimulator` |
-| `fixmarketsimulator` | 9876 FIX / 50051 gRPC / 8501 REST | Standalone FIX/gRPC market simulator (QuickFIX/J + Guice + Jetty), an optional data source for `market-data-service`'s `FIX_SIMULATOR_CONNECTIONS` mode |
+| `fix-simulator-contracts` | not deployed | Generated FIX-simulator protobuf/gRPC contracts, consumed by `market-data-service` and `fix-market-simulator` |
+| `fix-market-simulator` | 9876 FIX / 50051 gRPC / 8501 REST | Standalone FIX/gRPC market simulator (QuickFIX/J + Guice + Jetty), an optional data source for `market-data-service`'s `FIX_SIMULATOR_CONNECTIONS` mode |
 
 No running service reads or writes another Emporia service's PostgreSQL database
 or schema.

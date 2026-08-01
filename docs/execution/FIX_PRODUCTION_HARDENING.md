@@ -202,11 +202,12 @@ session-level reject drills). It cannot be "implemented"; it's an onboarding
 workflow with the counterparty.
 
 What's buildable in-repo to *rehearse* for it: a FIX order-routing
-conformance harness. `java/fixmarketsimulator` (in the parent `j-trading`
-workspace, outside `emporia/`) already contains a generated FIX protocol
-object model and an order book/exchange simulation
-(`OrderBookImpl`, `ExchangeImpl`, `LimitOrderImpl`) — but it's currently wired
-as `market-data-service`'s book-building data source over gRPC, not as an
+conformance harness. [`fix-market-simulator`](../../fix-market-simulator)
+(now an emporia module in its own right, copied in from the wider
+`j-trading` workspace it originally lived in) already contains an order
+book/exchange simulation (`OrderBookImpl`, `ExchangeImpl`, `LimitOrderImpl`)
+and a FIX protocol object model — but it's currently wired as
+`market-data-service`'s book-building data source over gRPC, not as an
 order-entry FIX counterparty for `execution-service`. Whether it already
 speaks order-entry FIX (`NewOrderSingle`/`ExecutionReport`) as a session
 counterparty, or would need that added, needs a closer look before committing

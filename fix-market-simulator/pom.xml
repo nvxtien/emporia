@@ -6,10 +6,10 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>com.ettech</groupId>
-  <artifactId>fixmarketsimulator</artifactId>
+  <artifactId>fix-market-simulator</artifactId>
   <version>1.0</version>
 
-  <name>fixmarketsimulator</name>
+  <name>fix-market-simulator</name>
 
   <!--
     Deliberately not parented to com.emporia:emporia-services: this is a
