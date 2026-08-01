@@ -96,7 +96,7 @@ No cross-service database read is used. Resolution goes through
 | `EMPORIA_STATIC_DATA_URL` | `http://localhost:8081` | Listing service |
 | `EMPORIA_AUTH_TOKEN_URL` | `http://localhost:9000/oauth2/token` | Machine token endpoint |
 | `MARKET_DATA_OAUTH_CLIENT_ID` | `emporia-market-data` | Confidential service client |
-| `MARKET_DATA_OAUTH_CLIENT_SECRET` | local development value | Must match authorisation service |
+| `MARKET_DATA_OAUTH_CLIENT_SECRET` | local development value | Must match authentication service |
 | `FIX_SIMULATOR_CLIENT_ID` | `emporia-market-data` | Upstream stream client identity |
 | `FIX_SIMULATOR_CONNECTIONS` | empty | MIC-to-source routing map |
 | `FIX_SIMULATOR_INITIAL_DATA_TIMEOUT` | `5s` | First-book timeout |
@@ -106,7 +106,7 @@ No cross-service database read is used. Resolution goes through
 | `ALPACA_MAX_SYMBOLS` | `30` | Alpaca subscription cap |
 
 The local OAuth secret is for development only. Use the same
-`MARKET_DATA_OAUTH_CLIENT_SECRET` value in the authorisation and market-data
+`MARKET_DATA_OAUTH_CLIENT_SECRET` value in the authentication and market-data
 processes and inject a strong secret in shared environments.
 
 ## Observability

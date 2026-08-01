@@ -15,16 +15,16 @@ x-postgres-healthcheck: &postgres-healthcheck
   retries: 10
 
 services:
-  authorisation-postgres:
+  authentication-postgres:
     image: postgres:16-alpine
-    container_name: emporia-authorisation-postgres
+    container_name: emporia-authentication-postgres
     environment:
       <<: *postgres-env
-      POSTGRES_DB: emporia_authorisation
+      POSTGRES_DB: emporia_authentication
     ports:
       - "5433:5432"
     volumes:
-      - emporia-authorisation-postgres-data:/var/lib/postgresql/data
+      - emporia-authentication-postgres-data:/var/lib/postgresql/data
     healthcheck:
       <<: *postgres-healthcheck
 
@@ -119,14 +119,14 @@ services:
       retries: 20
       start_period: 10s
 
-  authorisation-service:
+  authentication:
     build:
-      context: ./authorisation-service
-    container_name: emporia-authorisation
+      context: ./authentication
+    container_name: emporia-authentication
     ports:
       - "9000:9000"
     environment:
-      DB_URL: jdbc:postgresql://authorisation-postgres:5432/emporia_authorisation
+      DB_URL: jdbc:postgresql://authentication-postgres:5432/emporia_authentication
       DB_USERNAME: postgres
       DB_PASSWORD: admin123
       AUTH_ISSUER: http://localhost:3000
@@ -139,7 +139,7 @@ services:
       BOOTSTRAP_ADMIN_DESK: default
       BOOTSTRAP_ADMIN_CAN_TRADE: "true"
     depends_on:
-      authorisation-postgres:
+      authentication-postgres:
         condition: service_healthy
     healthcheck:
       <<: *spring-healthcheck
@@ -156,7 +156,7 @@ services:
       DB_USERNAME: postgres
       DB_PASSWORD: admin123
       EMPORIA_AUTH_ISSUER: http://localhost:3000
-      EMPORIA_AUTH_JWK_SET_URI: http://authorisation-service:9000/oauth2/jwks
+      EMPORIA_AUTH_JWK_SET_URI: http://authentication:9000/oauth2/jwks
     depends_on:
       static-data-postgres:
         condition: service_healthy
@@ -176,7 +176,7 @@ services:
       DB_PASSWORD: admin123
       EMPORIA_STATIC_DATA_URL: http://static-data-service:8081
       EMPORIA_AUTH_ISSUER: http://localhost:3000
-      EMPORIA_AUTH_JWK_SET_URI: http://authorisation-service:9000/oauth2/jwks
+      EMPORIA_AUTH_JWK_SET_URI: http://authentication:9000/oauth2/jwks
     depends_on:
       user-preferences-postgres:
         condition: service_healthy
@@ -193,14 +193,14 @@ services:
       - "50551:50551"
     environment:
       EMPORIA_STATIC_DATA_URL: http://static-data-service:8081
-      EMPORIA_AUTH_TOKEN_URL: http://authorisation-service:9000/oauth2/token
+      EMPORIA_AUTH_TOKEN_URL: http://authentication:9000/oauth2/token
       EMPORIA_AUTH_ISSUER: http://localhost:3000
-      EMPORIA_AUTH_JWK_SET_URI: http://authorisation-service:9000/oauth2/jwks
+      EMPORIA_AUTH_JWK_SET_URI: http://authentication:9000/oauth2/jwks
       MARKET_DATA_PROVIDER: ${MARKET_DATA_PROVIDER:-simulated}
       APCA_API_KEY_ID: ${APCA_API_KEY_ID:-}
       APCA_API_SECRET_KEY: ${APCA_API_SECRET_KEY:-}
     depends_on:
-      authorisation-service:
+      authentication:
         condition: service_healthy
       static-data-service:
         condition: service_healthy
@@ -219,11 +219,11 @@ services:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       EMPORIA_STATIC_DATA_URL: http://static-data-service:8081
       EMPORIA_AUTH_ISSUER: http://localhost:3000
-      EMPORIA_AUTH_JWK_SET_URI: http://authorisation-service:9000/oauth2/jwks
+      EMPORIA_AUTH_JWK_SET_URI: http://authentication:9000/oauth2/jwks
     depends_on:
       kafka:
         condition: service_healthy
-      authorisation-service:
+      authentication:
         condition: service_healthy
       static-data-service:
         condition: service_healthy
@@ -244,13 +244,13 @@ services:
       KAFKA_BROKERS: kafka:9092
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       EMPORIA_AUTH_ISSUER: http://localhost:3000
-      EMPORIA_AUTH_JWK_SET_URI: http://authorisation-service:9000/oauth2/jwks
+      EMPORIA_AUTH_JWK_SET_URI: http://authentication:9000/oauth2/jwks
     depends_on:
       order-management-postgres:
         condition: service_healthy
       kafka:
         condition: service_healthy
-      authorisation-service:
+      authentication:
         condition: service_healthy
     healthcheck:
       <<: *spring-healthcheck
@@ -288,11 +288,11 @@ services:
       DB_USERNAME: postgres
       DB_PASSWORD: admin123
       EMPORIA_AUTH_ISSUER: http://localhost:3000
-      EMPORIA_AUTH_JWK_SET_URI: http://authorisation-service:9000/oauth2/jwks
+      EMPORIA_AUTH_JWK_SET_URI: http://authentication:9000/oauth2/jwks
     depends_on:
       portfolio-postgres:
         condition: service_healthy
-      authorisation-service:
+      authentication:
         condition: service_healthy
     healthcheck:
       <<: *spring-healthcheck
@@ -308,8 +308,8 @@ services:
       JAVA_TOOL_OPTIONS: -Dnetworkaddress.cache.ttl=5 -Dnetworkaddress.cache.negative.ttl=1
       SERVER_PORT: "8082"
       EMPORIA_AUTH_ISSUER: http://localhost:3000
-      EMPORIA_AUTH_JWK_SET_URI: http://authorisation-service:9000/oauth2/jwks
-      EMPORIA_AUTH_URL: http://authorisation-service:9000
+      EMPORIA_AUTH_JWK_SET_URI: http://authentication:9000/oauth2/jwks
+      EMPORIA_AUTH_URL: http://authentication:9000
       EMPORIA_STATIC_DATA_URL: http://static-data-service:8081
       EMPORIA_USER_PREFERENCES_URL: http://user-preferences-service:8083
       EMPORIA_MARKET_DATA_URL: http://market-data-service:8084
@@ -317,7 +317,7 @@ services:
       EMPORIA_ORDER_MANAGEMENT_URL: http://order-management-service:8086
       EMPORIA_PORTFOLIO_URL: http://portfolio-service:8088
     depends_on:
-      authorisation-service:
+      authentication:
         condition: service_healthy
       static-data-service:
         condition: service_healthy
@@ -346,7 +346,7 @@ services:
         condition: service_healthy
 
 volumes:
-  emporia-authorisation-postgres-data:
+  emporia-authentication-postgres-data:
   emporia-static-data-postgres-data:
   emporia-user-preferences-postgres-data:
   emporia-order-management-postgres-data:

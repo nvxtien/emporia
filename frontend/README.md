@@ -15,7 +15,7 @@ exchange or execution venue is connected yet.
 - Node.js 22.12 or newer
 - npm 11 or newer
 - Gateway running on `http://localhost:8082`
-- Authorisation service running behind the gateway
+- Authentication service running behind the gateway
 - Trading service running on `http://localhost:8081`
 
 ## Install and run
@@ -35,7 +35,7 @@ example, `http://localhost:3000/login`). After login and consent, the
 authorization server returns to `/auth/callback` and the frontend exchanges the
 code using its PKCE verifier.
 
-To create the initial local user, start the authorisation service with its
+To create the initial local user, start the authentication service with its
 bootstrap administrator enabled. See the service README for the environment
 variables.
 

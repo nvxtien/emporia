@@ -32,9 +32,9 @@ spec:
             - name: EMPORIA_STATIC_DATA_URL
               value: http://static-data-service:8081
             - name: EMPORIA_AUTH_TOKEN_URL
-              value: http://authorisation-service:9000/oauth2/token
+              value: http://authentication:9000/oauth2/token
             - name: EMPORIA_AUTH_JWK_SET_URI
-              value: http://authorisation-service:9000/oauth2/jwks
+              value: http://authentication:9000/oauth2/jwks
             - name: MARKET_DATA_OAUTH_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:

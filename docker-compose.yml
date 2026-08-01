@@ -9,16 +9,16 @@ x-postgres-healthcheck: &postgres-healthcheck
   retries: 10
 
 services:
-  authorisation-postgres:
+  authentication-postgres:
     image: postgres:16-alpine
-    container_name: emporia-authorisation-postgres
+    container_name: emporia-authentication-postgres
     environment:
       <<: *postgres-env
-      POSTGRES_DB: emporia_authorisation
+      POSTGRES_DB: emporia_authentication
     ports:
       - "5433:5432"
     volumes:
-      - emporia-authorisation-postgres-data:/var/lib/postgresql/data
+      - emporia-authentication-postgres-data:/var/lib/postgresql/data
     healthcheck:
       <<: *postgres-healthcheck
 
@@ -114,7 +114,7 @@ services:
       start_period: 10s
 
 volumes:
-  emporia-authorisation-postgres-data:
+  emporia-authentication-postgres-data:
   emporia-static-data-postgres-data:
   emporia-user-preferences-postgres-data:
   emporia-order-management-postgres-data:

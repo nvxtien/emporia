@@ -48,7 +48,7 @@ final class ServiceAccessTokenProvider {
                 .retrieve()
                 .body(TOKEN_BODY);
         if (body == null || !(body.get("access_token") instanceof String token) || token.isBlank()) {
-            throw new IllegalStateException("Authorisation server returned no service access token");
+            throw new IllegalStateException("Authentication server returned no service access token");
         }
         long expiresIn = body.get("expires_in") instanceof Number seconds ? seconds.longValue() : 300;
         CachedToken replacement = new CachedToken(token, now.plusSeconds(Math.max(30, expiresIn)));
