@@ -1,6 +1,6 @@
 export type AdminAuditSource =
   | 'all'
-  | 'authorisation-service'
+  | 'authentication'
   | 'static-data-service'
   | 'portfolio-service'
 
@@ -70,7 +70,7 @@ function query(filters: AdminAuditFilters): string {
 }
 
 const AUDIT_ENDPOINTS: Array<{ source: Exclude<AdminAuditSource, 'all'>; basePath: string }> = [
-  { source: 'authorisation-service', basePath: '/api/admin/audit' },
+  { source: 'authentication', basePath: '/api/admin/audit' },
   { source: 'static-data-service', basePath: '/api/admin/static-data/audit' },
   { source: 'portfolio-service', basePath: '/api/portfolio/audit' },
 ]

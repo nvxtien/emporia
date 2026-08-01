@@ -40,7 +40,7 @@ This document details the software design patterns used across the **Emporia Tra
 - **Benefits**: Ensures at-least-once Kafka processing guarantees without duplicate order execution or lost portfolio receipts.
 
 ### Database-per-Service Pattern
-- **Component**: Service-owned PostgreSQL persistence for `authorisation-service`, `static-data-service`, `user-preferences-service`, `order-management-service`, `execution-service`, and `portfolio-service`.
+- **Component**: Service-owned PostgreSQL persistence for `authentication`, `static-data-service`, `user-preferences-service`, `order-management-service`, `execution-service`, and `portfolio-service`.
 - **Implementation**: Docker deployments use an isolated PostgreSQL instance per stateful service. Non-Docker local runs use one local PostgreSQL instance with separate Flyway-managed schemas. No cross-database or cross-schema foreign keys or SQL queries exist.
 - **Benefits**: Independent persistence ownership, independent schema migrations via Flyway, zero tight coupling between services.
 

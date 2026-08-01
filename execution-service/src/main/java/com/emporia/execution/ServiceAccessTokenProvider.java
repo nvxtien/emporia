@@ -48,7 +48,7 @@ class ServiceAccessTokenProvider {
                 .retrieve()
                 .body(Map.class);
         if (response == null || !(response.get("access_token") instanceof String value)) {
-            throw new IllegalStateException("Authorisation service returned no execution access token");
+            throw new IllegalStateException("Authentication service returned no execution access token");
         }
         int expiresIn = response.get("expires_in") instanceof Number number ? number.intValue() : 600;
         cached = new CachedToken(value, now.plusSeconds(expiresIn));

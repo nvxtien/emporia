@@ -29,7 +29,7 @@ const DEFAULT_PAGE_SIZE = 50
 const PAGE_SIZE_OPTIONS = [25, 50, 100, 200]
 const SOURCE_OPTIONS: Array<{ value: AdminAuditSource; label: string }> = [
   { value: 'all', label: 'All services' },
-  { value: 'authorisation-service', label: 'Authorisation' },
+  { value: 'authentication', label: 'Authentication' },
   { value: 'static-data-service', label: 'Static data' },
   { value: 'portfolio-service', label: 'Portfolio' },
 ]
@@ -84,7 +84,7 @@ function shortId(value: string): string {
 }
 
 function sourceLabel(value: AdminAuditEvent['source']): string {
-  if (value === 'authorisation-service') return 'Authorisation'
+  if (value === 'authentication') return 'Authentication'
   if (value === 'static-data-service') return 'Static data'
   if (value === 'portfolio-service') return 'Portfolio'
   return 'Unknown'

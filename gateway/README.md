@@ -9,7 +9,7 @@ backend service, and assigns an `X-Request-Id`.
 
 | Public path and method | Upstream |
 |---|---|
-| `/.well-known/**`, `/oauth2/**`, `/login`, `/logout`, `/userinfo`, `/auth/csrf` | authorisation-service |
+| `/.well-known/**`, `/oauth2/**`, `/login`, `/logout`, `/userinfo`, `/auth/csrf` | authentication |
 | `/api/instruments/**` | static-data-service |
 | `/api/watchlist/**` | user-preferences-service |
 | `/api/market-data/**` | market-data-service |

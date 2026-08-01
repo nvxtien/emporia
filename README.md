@@ -40,7 +40,7 @@ For in-depth architectural guides, domain design patterns, microservice deep div
 ```mermaid
 flowchart TD
     Browser[React :3001] -->|OIDC + PKCE / Bearer token| Gateway[Spring Cloud Gateway :8082]
-    Gateway --> Auth[Authorisation :9000]
+    Gateway --> Auth[Authentication :9000]
     Gateway --> Static[Static data :8081]
     Gateway --> Preferences[User preferences :8083]
     Gateway --> Market[Market data :8084]
@@ -70,7 +70,7 @@ flowchart TD
     Execution -->|same-instrument listings| Static
     Execution -->|venue quotes| Market
 
-    Auth --> AuthDb[(PostgreSQL\nemporia_authorisation)]
+    Auth --> AuthDb[(PostgreSQL\nemporia_authentication)]
     Static --> StaticDb[(PostgreSQL\nemporia_static_data)]
     Preferences --> PreferencesDb[(PostgreSQL\nemporia_client_config)]
     Orders --> OrderDb[(PostgreSQL\nemporia_order_data)]
@@ -85,7 +85,7 @@ HTTP method to the service that owns each business capability.
 
 | Directory | Port | Owns |
 |---|---:|---|
-| `authorisation-service` | 9000 | OAuth2/OIDC login, users, tokens |
+| `authentication` | 9000 | OAuth2/OIDC login, users, tokens |
 | `static-data-service` | 8081 | Instruments and exchange listings |
 | `user-preferences-service` | 8083 | Per-user watchlists and persisted workspace layouts |
 | `market-data-service` | 8084 HTTP / 50551 gRPC | Simulated, Alpaca IEX, or FIX-simulator market data; venue/composite books; REST, SSE, and gRPC distribution |
@@ -167,7 +167,7 @@ Non-Docker local PostgreSQL settings:
 - Password: `admin123`
 
 Flyway creates these service-owned schemas in the local `emporia` database:
-`emporia_authorisation`, `emporia_static_data`, `emporia_client_config`,
+`emporia_authentication`, `emporia_static_data`, `emporia_client_config`,
 `emporia_order_data`, `emporia_execution`, and `emporia_portfolio`.
 
 ## Run modes
@@ -209,10 +209,10 @@ command in its own terminal.
    mvn -f emporia/pom.xml install
    ```
 
-4. Start the authorisation service:
+4. Start the authentication service:
 
    ```bash
-   cd emporia/authorisation-service
+   cd emporia/authentication
    SERVER_PORT=9000 \
    AUTH_ISSUER=http://localhost:3001 \
    OAUTH_REDIRECT_URI=http://localhost:3001/auth/callback \
@@ -308,7 +308,7 @@ command in its own terminal.
    ```
 
    The execution service uses delayed simulated venue fills by default. Its
-   OAuth client is registered automatically by the local authorisation
+   OAuth client is registered automatically by the local authentication
    configuration. Use the same `EXECUTION_OAUTH_CLIENT_SECRET` value in both
    services when overriding the local default.
 
@@ -378,7 +378,7 @@ services on your local JVM:
 
 | Service | Host port | Database | Schema |
 |---|---:|---|---|
-| `authorisation-service` | `5433` | `emporia_authorisation` | `emporia_authorisation` |
+| `authentication` | `5433` | `emporia_authentication` | `emporia_authentication` |
 | `static-data-service` | `5434` | `emporia_static_data` | `emporia_static_data` |
 | `user-preferences-service` | `5435` | `emporia_user_preferences` | `emporia_client_config` |
 | `order-management-service` | `5436` | `emporia_order_management` | `emporia_order_data` |

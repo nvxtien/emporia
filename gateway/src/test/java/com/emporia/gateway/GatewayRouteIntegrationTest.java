@@ -114,7 +114,7 @@ class GatewayRouteIntegrationTest {
     }
 
     @Test
-    void proxiesAdminUserManagementToAuthorisationService() throws Exception {
+    void proxiesAdminUserManagementToAuthenticationService() throws Exception {
         HttpResponse<String> response = send("/api/admin/users", null, accessToken());
 
         assertThat(response.statusCode()).isEqualTo(200);
@@ -122,7 +122,7 @@ class GatewayRouteIntegrationTest {
     }
 
     @Test
-    void proxiesAdminAuditReadsToAuthorisationService() throws Exception {
+    void proxiesAdminAuditReadsToAuthenticationService() throws Exception {
         HttpResponse<String> response = send("/api/admin/audit/events", null, accessToken());
 
         assertThat(response.statusCode()).isEqualTo(200);

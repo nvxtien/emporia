@@ -14,7 +14,7 @@ flowchart TD
 
     subgraph Security Boundary
         Gateway["Spring Cloud Gateway :8082"]
-        Auth["Authorisation Service :9000"]
+        Auth["Authentication Service :9000"]
         Browser --> Gateway
         Gateway --> Auth
     end
@@ -55,7 +55,7 @@ flowchart TD
         Orders --> OrderDb[("emporia_order_data")]
         Execution --> ExecutionDb[("emporia_execution")]
         Portfolio --> PortDb[("emporia_portfolio")]
-        Auth --> AuthDb[("emporia_authorisation")]
+        Auth --> AuthDb[("emporia_authentication")]
     end
 ```
 
@@ -65,7 +65,7 @@ flowchart TD
 
 | Microservice | Port | Primary Responsibility | Key Data Ownership |
 |---|---:|---|---|
-| **`authorisation-service`** | `9000` | OAuth2 / OpenID Connect provider, user authentication, desk permissions, client credentials token issuer. | `emporia_authorisation` |
+| **`authentication`** | `9000` | OAuth2 / OpenID Connect provider, user authentication, desk permissions, client credentials token issuer. | `emporia_authentication` |
 | **`static-data-service`** | `8081` | Reference data master, asset & listing search, Alpaca asset master importer. | `emporia_static_data` |
 | **`user-preferences-service`** | `8083` | User-configured watchlists and workspace UI layout configurations. | `emporia_client_config` |
 | **`market-data-service`** | `8084` (HTTP)<br>`50551` (gRPC) | Conflated top-of-book market quotes, depth, Alpaca IEX & FIX simulator adapters, SSE/gRPC streaming. | Memory Cache & Stream Subscriptions |

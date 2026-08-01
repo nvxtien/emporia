@@ -1,0 +1,120 @@
+server:
+  port: ${SERVER_PORT:9000}
+  shutdown: graceful
+  forward-headers-strategy: framework
+  servlet:
+    session:
+      tracking-modes: cookie
+
+spring:
+  application:
+    name: authentication
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/emporia}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD}
+    hikari:
+      pool-name: ${DB_POOL_NAME:authentication-pool}
+      schema: ${DB_SCHEMA:emporia_authentication}
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:10}
+      minimum-idle: ${DB_POOL_MIN_IDLE:2}
+      connection-timeout: ${DB_POOL_CONNECTION_TIMEOUT_MS:30000}
+      validation-timeout: ${DB_POOL_VALIDATION_TIMEOUT_MS:5000}
+      idle-timeout: ${DB_POOL_IDLE_TIMEOUT_MS:600000}
+      max-lifetime: ${DB_POOL_MAX_LIFETIME_MS:1800000}
+      keepalive-time: ${DB_POOL_KEEPALIVE_TIME_MS:120000}
+      leak-detection-threshold: ${DB_POOL_LEAK_DETECTION_THRESHOLD_MS:0}
+  flyway:
+    default-schema: ${DB_SCHEMA:emporia_authentication}
+    schemas: ${DB_SCHEMA:emporia_authentication}
+    create-schemas: true
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: ${DB_SCHEMA:emporia_authentication}
+        jdbc:
+          time_zone: UTC
+  security:
+    oauth2:
+      authorizationserver:
+        issuer: ${AUTH_ISSUER:http://localhost:3000}
+        client:
+          emporia-web:
+            registration:
+              client-id: ${OAUTH_CLIENT_ID:emporia-web}
+              client-authentication-methods:
+                - none
+              authorization-grant-types:
+                - authorization_code
+              redirect-uris:
+                - ${OAUTH_REDIRECT_URI:http://localhost:3000/auth/callback}
+              post-logout-redirect-uris:
+                - ${OAUTH_POST_LOGOUT_REDIRECT_URI:http://localhost:3000/auth/logout-callback}
+              scopes:
+                - openid
+                - profile
+            require-authorization-consent: false
+            require-proof-key: true
+            token:
+              access-token-time-to-live: 10m
+          emporia-market-data:
+            registration:
+              client-id: ${MARKET_DATA_OAUTH_CLIENT_ID:emporia-market-data}
+              client-secret: "{noop}${MARKET_DATA_OAUTH_CLIENT_SECRET:emporia-market-data-local-secret}"
+              client-authentication-methods:
+                - client_secret_basic
+              authorization-grant-types:
+                - client_credentials
+              scopes:
+                - internal
+            require-authorization-consent: false
+            token:
+              access-token-time-to-live: 10m
+          emporia-execution:
+            registration:
+              client-id: ${EXECUTION_OAUTH_CLIENT_ID:emporia-execution}
+              client-secret: "{noop}${EXECUTION_OAUTH_CLIENT_SECRET:emporia-execution-local-secret}"
+              client-authentication-methods:
+                - client_secret_basic
+              authorization-grant-types:
+                - client_credentials
+              scopes:
+                - internal
+            require-authorization-consent: false
+            token:
+              access-token-time-to-live: 10m
+
+emporia:
+  auth:
+    bootstrap-admin:
+      enabled: ${BOOTSTRAP_ADMIN_ENABLED:false}
+      username: ${BOOTSTRAP_ADMIN_USERNAME:}
+      email: ${BOOTSTRAP_ADMIN_EMAIL:}
+      password: ${BOOTSTRAP_ADMIN_PASSWORD:}
+      desk: ${BOOTSTRAP_ADMIN_DESK:default}
+      can-trade: ${BOOTSTRAP_ADMIN_CAN_TRADE:true}
+    legacy-user-import:
+      enabled: ${LEGACY_USER_IMPORT_ENABLED:true}
+      schema: ${LEGACY_USER_SCHEMA:users}
+      initial-password: ${LEGACY_USER_INITIAL_PASSWORD:}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+
+info:
+  application:
+    name: ${spring.application.name}
+    description: OAuth 2.0 and OpenID Connect authentication service for Emporia
