@@ -26,6 +26,7 @@
     <modules>
         <module>trading-contracts</module>
         <module>fix-simulator-contracts</module>
+        <module>fixmarketsimulator</module>
         <module>static-data-service</module>
         <module>user-preferences-service</module>
         <module>market-data-service</module>
