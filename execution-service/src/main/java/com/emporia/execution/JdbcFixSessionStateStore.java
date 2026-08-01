@@ -1,5 +1,6 @@
 package com.emporia.execution;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
@@ -13,6 +14,7 @@ class JdbcFixSessionStateStore implements FixSessionStateStore {
     private final JdbcTemplate jdbc;
     private final Clock clock;
 
+    @Autowired
     JdbcFixSessionStateStore(JdbcTemplate jdbc) {
         this(jdbc, Clock.systemUTC());
     }

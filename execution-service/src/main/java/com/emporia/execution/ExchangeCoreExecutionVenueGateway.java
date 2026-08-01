@@ -66,6 +66,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     private final Set<Integer> symbols = ConcurrentHashMap.newKeySet();
     private final Map<Long, Correlation> correlations = new ConcurrentHashMap<>();
 
+    @Autowired
     public ExchangeCoreExecutionVenueGateway(
             ExecutionCommandPublisher commands,
             ServiceAccessTokenProvider tokenProvider,
