@@ -352,6 +352,12 @@ It covers Maven `verify`, PMD reports, frontend checks, property tests,
 PostgreSQL integration tests, Fray concurrency checks, TLA+ model checking, and
 the OIDC/Kafka smoke test.
 
+Run `scripts/install-git-hooks.sh` once per clone to enable local CI: a
+pre-push hook that runs the same `mvn verify` + frontend checks before code
+leaves your machine. See [docs/CI_CD.md](docs/CI_CD.md) for what it checks,
+the on-demand local deploy script, and a known intermittent
+`market-data-service` build issue with a documented mitigation.
+
 ---
 
 ## 🐳 Docker Deployment
