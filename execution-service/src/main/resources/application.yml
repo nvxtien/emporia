@@ -45,6 +45,11 @@ emporia:
   execution:
     venue-mode: ${EXECUTION_VENUE_MODE:simulated}
     fix-venues: ${FIX_EXECUTION_VENUES:}
+    fix-tls-enabled: ${FIX_TLS_ENABLED:false}
+    fix-tls-truststore-path: ${FIX_TLS_TRUSTSTORE_PATH:}
+    fix-tls-truststore-password: ${FIX_TLS_TRUSTSTORE_PASSWORD:}
+    fix-tls-keystore-path: ${FIX_TLS_KEYSTORE_PATH:}
+    fix-tls-keystore-password: ${FIX_TLS_KEYSTORE_PASSWORD:}
     fill-delay: ${EXECUTION_FILL_DELAY:100ms}
     strategy-time-compression: ${STRATEGY_TIME_COMPRESSION:60}
     vwap-default-buckets: ${VWAP_DEFAULT_BUCKETS:10}

@@ -5,29 +5,48 @@ import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.events.TradingEvents.OrderView;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManagerFactory;
 import java.io.ByteArrayOutputStream;
+import java.io.FileInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyStore;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 @Component
 @ConditionalOnProperty(name = "emporia.execution.venue-mode", havingValue = "fix")
@@ -43,9 +62,24 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
     private final ExecutionCommandPublisher commands;
     private final AtomicBoolean running = new AtomicBoolean();
 
+    FixExecutionVenueGateway(String definitions, ExecutionCommandPublisher commands,
+                             FixSessionStateStore sessionState, FixMessageLogStore messageLog) {
+        this(definitions, commands, sessionState, messageLog, false, "", "", "", "");
+    }
+
+    @Autowired
     FixExecutionVenueGateway(@Value("${emporia.execution.fix-venues:}") String definitions,
-                             ExecutionCommandPublisher commands) {
+                             ExecutionCommandPublisher commands, FixSessionStateStore sessionState,
+                             FixMessageLogStore messageLog,
+                             @Value("${emporia.execution.fix-tls-enabled:false}") boolean tlsEnabled,
+                             @Value("${emporia.execution.fix-tls-truststore-path:}") String trustStorePath,
+                             @Value("${emporia.execution.fix-tls-truststore-password:}") String trustStorePassword,
+                             @Value("${emporia.execution.fix-tls-keystore-path:}") String keyStorePath,
+                             @Value("${emporia.execution.fix-tls-keystore-password:}") String keyStorePassword) {
         this.commands = commands;
+        SSLSocketFactory tlsSocketFactory = tlsEnabled
+                ? buildTlsSocketFactory(trustStorePath, trustStorePassword, keyStorePath, keyStorePassword)
+                : null;
         Map<String, FixSession> parsed = new LinkedHashMap<>();
         if (definitions != null && !definitions.isBlank()) {
             for (String definition : definitions.split(",")) {
@@ -57,10 +91,43 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
                 }
                 String mic = entry[0].strip().toUpperCase(java.util.Locale.ROOT);
                 parsed.put(mic, new FixSession(mic, connection[0], Integer.parseInt(connection[1]),
-                        connection[2], connection[3], this::onMessage));
+                        connection[2], connection[3], this::onMessage, sessionState, messageLog, tlsSocketFactory));
             }
         }
         this.sessions = Map.copyOf(parsed);
+    }
+
+    // No explicit truststore uses the JVM's default trust store (public CAs), which is
+    // correct for a venue with a publicly trusted certificate. An internal/private CA
+    // requires FIX_TLS_TRUSTSTORE_PATH. The keystore is only needed for mutual TLS.
+    private static SSLSocketFactory buildTlsSocketFactory(String trustStorePath, String trustStorePassword,
+                                                           String keyStorePath, String keyStorePassword) {
+        try {
+            TrustManagerFactory trustManagerFactory = null;
+            if (trustStorePath != null && !trustStorePath.isBlank()) {
+                KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
+                try (FileInputStream in = new FileInputStream(trustStorePath)) {
+                    trustStore.load(in, trustStorePassword == null ? null : trustStorePassword.toCharArray());
+                }
+                trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+                trustManagerFactory.init(trustStore);
+            }
+            KeyManagerFactory keyManagerFactory = null;
+            if (keyStorePath != null && !keyStorePath.isBlank()) {
+                KeyStore keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
+                try (FileInputStream in = new FileInputStream(keyStorePath)) {
+                    keyStore.load(in, keyStorePassword == null ? null : keyStorePassword.toCharArray());
+                }
+                keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+                keyManagerFactory.init(keyStore, keyStorePassword == null ? null : keyStorePassword.toCharArray());
+            }
+            SSLContext context = SSLContext.getInstance("TLSv1.3");
+            context.init(keyManagerFactory == null ? null : keyManagerFactory.getKeyManagers(),
+                    trustManagerFactory == null ? null : trustManagerFactory.getTrustManagers(), null);
+            return context.getSocketFactory();
+        } catch (Exception exception) {
+            throw new IllegalStateException("Unable to initialize FIX TLS configuration", exception);
+        }
     }
 
     @Override
@@ -187,26 +254,47 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
 
     private static final class FixSession {
         private static final byte SOH = 1;
+        private static final int HEARTBEAT_INTERVAL_SECONDS = 30;
+        private static final int POLL_TIMEOUT_MS = 5_000;
+        // NewOrderSingle, OrderCancelReplaceRequest, OrderCancelRequest: the only
+        // message types worth persisting for resend. Admin/session messages are
+        // never individually replayed; a gap of those is bridged with a GapFill.
+        private static final Set<String> APPLICATION_MESSAGE_TYPES = Set.of("D", "G", "F");
         private final String mic;
         private final String host;
         private final int port;
         private final String senderCompId;
         private final String targetCompId;
         private final MessageSink sink;
+        private final FixSessionStateStore sessionState;
+        private final FixMessageLogStore messageLog;
         private final AtomicBoolean running = new AtomicBoolean();
         private final AtomicInteger outgoingSequence = new AtomicInteger(1);
+        private final AtomicInteger incomingSequence = new AtomicInteger(1);
+        private final AtomicBoolean loggingOut = new AtomicBoolean();
+        private final AtomicReference<CountDownLatch> logoutAcknowledged = new AtomicReference<>();
+        // Out-of-order arrivals held until the gap ahead of them is filled. Only
+        // ever touched from the single read-loop executor thread, so a plain
+        // TreeMap (not a concurrent one) is safe.
+        private final TreeMap<Integer, Map<Integer, String>> pendingMessages = new TreeMap<>();
         private final ExecutorService executor;
+        private final SSLSocketFactory tlsSocketFactory;
         private volatile Socket socket;
         private volatile OutputStream output;
+        private boolean resendRequestedForCurrentGap;
 
         private FixSession(String mic, String host, int port, String senderCompId, String targetCompId,
-                           MessageSink sink) {
+                           MessageSink sink, FixSessionStateStore sessionState, FixMessageLogStore messageLog,
+                           SSLSocketFactory tlsSocketFactory) {
             this.mic = mic;
             this.host = host;
             this.port = port;
             this.senderCompId = senderCompId;
             this.targetCompId = targetCompId;
             this.sink = sink;
+            this.sessionState = sessionState;
+            this.messageLog = messageLog;
+            this.tlsSocketFactory = tlsSocketFactory;
             this.executor = Executors.newSingleThreadExecutor(runnable -> {
                 Thread thread = new Thread(runnable, "fix-" + mic.toLowerCase(java.util.Locale.ROOT));
                 thread.setDaemon(true);
@@ -214,20 +302,70 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
             });
         }
 
+        // Unconnected: the caller connects with an explicit timeout, same as a
+        // plain Socket, then triggers the TLS handshake separately.
+        private Socket openSocket() throws IOException {
+            if (tlsSocketFactory == null) return new Socket();
+            SSLSocket sslSocket = (SSLSocket) tlsSocketFactory.createSocket();
+            SSLParameters parameters = sslSocket.getSSLParameters();
+            parameters.setEndpointIdentificationAlgorithm("HTTPS");
+            sslSocket.setSSLParameters(parameters);
+            return sslSocket;
+        }
+
         void start() {
             if (running.compareAndSet(false, true)) executor.submit(this::connectLoop);
         }
 
         void stop() {
-            running.set(false);
+            if (running.compareAndSet(true, false)) sendLogoutAndAwaitAcknowledgement();
             close();
             executor.shutdownNow();
         }
 
+        // Sends a Logout and waits briefly for the counterparty's Logout reply
+        // before tearing down the socket, rather than disconnecting abruptly.
+        // Best-effort: a missing or slow reply still falls through to close().
+        private void sendLogoutAndAwaitAcknowledgement() {
+            if (output == null) return;
+            CountDownLatch latch = new CountDownLatch(1);
+            logoutAcknowledged.set(latch);
+            loggingOut.set(true);
+            try {
+                send("5", new LinkedHashMap<>());
+                latch.await(2, TimeUnit.SECONDS);
+            } catch (Exception exception) {
+                log.warn("FIX session {} Logout handshake did not complete cleanly: {}", mic, exception.getMessage());
+            } finally {
+                loggingOut.set(false);
+            }
+        }
+
         synchronized void send(String messageType, LinkedHashMap<Integer, String> fields) {
+            int seqNum = outgoingSequence.getAndIncrement();
+            // Persisted before the write is attempted, not after it succeeds: delivery
+            // is ambiguous once write() is called (the counterparty may have received a
+            // fragment before a failure), so a reconnect must never hand this number out
+            // again. Persisting only on success would let a reload-on-reconnect reuse it.
+            sessionState.saveOutgoing(mic, outgoingSequence.get());
+            Instant sentAt = Instant.now();
+            if (APPLICATION_MESSAGE_TYPES.contains(messageType)) {
+                // Logged before the write for the same reason: if the counterparty
+                // never actually received this, a future resend must still be able
+                // to hand it back, and there is no cheap way to un-log it otherwise.
+                messageLog.record(mic, seqNum, messageType, fields, sentAt);
+            }
+            rawSend(messageType, seqNum, sentAt, fields);
+        }
+
+        // Writes a message with an explicit sequence number and sending time,
+        // used both for normal sends and for verbatim resends/GapFills, which
+        // must reuse the original sequence number rather than consume a new one.
+        private synchronized void rawSend(String messageType, int seqNum, Instant sendingTime,
+                                          LinkedHashMap<Integer, String> fields) {
             if (output == null) throw new IllegalStateException("FIX session " + mic + " is disconnected");
             try {
-                output.write(encode(messageType, fields));
+                output.write(encode(messageType, seqNum, sendingTime, fields));
                 output.flush();
             } catch (Exception exception) {
                 close();
@@ -235,16 +373,108 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
             }
         }
 
+        // Retransmits a previously logged application message with PossDupFlag
+        // set and the original SendingTime preserved as OrigSendingTime, using
+        // its original sequence number.
+        private void resendLogged(FixMessageLogStore.LoggedMessage message) {
+            LinkedHashMap<Integer, String> fields = new LinkedHashMap<>(message.fields());
+            fields.put(43, "Y");
+            fields.put(122, FIX_TIME.format(message.sentAt()));
+            rawSend(message.msgType(), message.seqNum(), Instant.now(), fields);
+        }
+
+        // Bridges a range of un-logged (admin/session) outgoing sequence numbers
+        // with a single SequenceReset-GapFill instead of replaying them, which is
+        // meaningless for messages like heartbeats. fromSeq is the sequence number
+        // the gap starts at; newSeqNo is what the counterparty should expect next.
+        private void sendGapFill(int fromSeq, int newSeqNo) {
+            LinkedHashMap<Integer, String> fields = new LinkedHashMap<>();
+            fields.put(123, "Y");
+            fields.put(36, String.valueOf(newSeqNo));
+            rawSend("4", fromSeq, Instant.now(), fields);
+        }
+
+        // Answers a counterparty ResendRequest by walking the requested range:
+        // logged application messages are replayed verbatim, and any gaps
+        // (admin/session messages we never logged) are bridged with GapFills.
+        // Synchronized so "through current" (EndSeqNo=0) resolves against a
+        // snapshot of outgoingSequence that can't be invalidated by a concurrent
+        // send() from another thread (order commands arrive on a Kafka consumer
+        // thread, independent of this session's own read-loop thread).
+        private synchronized void handleResendRequest(Map<Integer, String> fields) {
+            int beginSeqNo = integer(fields, 7, 1);
+            int endSeqNoRaw = integer(fields, 16, 0);
+            int endSeqNo = endSeqNoRaw == 0 ? outgoingSequence.get() - 1 : endSeqNoRaw;
+            if (endSeqNo < beginSeqNo) return;
+            List<FixMessageLogStore.LoggedMessage> logged = messageLog.range(mic, beginSeqNo, endSeqNo);
+            Map<Integer, FixMessageLogStore.LoggedMessage> bySeq = new HashMap<>();
+            logged.forEach(message -> bySeq.put(message.seqNum(), message));
+
+            int gapStart = -1;
+            for (int seq = beginSeqNo; seq <= endSeqNo; seq++) {
+                FixMessageLogStore.LoggedMessage message = bySeq.get(seq);
+                if (message == null) {
+                    if (gapStart == -1) gapStart = seq;
+                    continue;
+                }
+                if (gapStart != -1) {
+                    sendGapFill(gapStart, seq);
+                    gapStart = -1;
+                }
+                resendLogged(message);
+            }
+            if (gapStart != -1) sendGapFill(gapStart, endSeqNo + 1);
+        }
+
+        // Asks the counterparty to resend a range we noticed is missing. Uses the
+        // normal send() path: a ResendRequest is itself a new outgoing message
+        // with its own sequence number, not a replay.
+        private void requestResend(int fromSeq, int toSeq) {
+            LinkedHashMap<Integer, String> fields = new LinkedHashMap<>();
+            fields.put(7, String.valueOf(fromSeq));
+            fields.put(16, String.valueOf(toSeq));
+            send("2", fields);
+        }
+
+        private static int integer(Map<Integer, String> fields, int tag, int defaultValue) {
+            String value = fields.get(tag);
+            if (value == null) return defaultValue;
+            try {
+                return Integer.parseInt(value);
+            } catch (NumberFormatException malformed) {
+                return defaultValue;
+            }
+        }
+
         private void connectLoop() {
             while (running.get()) {
-                try (Socket connected = new Socket()) {
+                try (Socket connected = openSocket()) {
                     connected.connect(new InetSocketAddress(host, port), 5_000);
                     connected.setKeepAlive(true);
                     connected.setTcpNoDelay(true);
+                    if (connected instanceof SSLSocket) {
+                        connected.setSoTimeout(10_000);
+                        ((SSLSocket) connected).startHandshake();
+                    }
                     socket = connected;
                     output = connected.getOutputStream();
-                    send("A", linkedFields(98, "0", 108, "30", 1137, "9"));
-                    log.info("Connected FIX execution session {} to {}:{}", mic, host, port);
+                    FixSessionStateStore.SessionState state = sessionState.loadForToday(mic);
+                    outgoingSequence.set(state.outgoingSeqNum());
+                    incomingSequence.set(state.incomingSeqNum());
+                    pendingMessages.clear();
+                    resendRequestedForCurrentGap = false;
+                    if (state.freshSession()) {
+                        // Sequence numbers restart at 1 on a new session day, so
+                        // yesterday's log would collide on (mic, seq_num) and is
+                        // meaningless for today's resend requests anyway.
+                        messageLog.clear(mic);
+                    }
+                    LinkedHashMap<Integer, String> logon = linkedFields(98, "0",
+                            108, String.valueOf(HEARTBEAT_INTERVAL_SECONDS), 1137, "9");
+                    if (state.freshSession()) logon.put(141, "Y");
+                    send("A", logon);
+                    log.info("Connected FIX execution session {} to {}:{} (outgoing={}, incoming={}, fresh={})",
+                            mic, host, port, state.outgoingSeqNum(), state.incomingSeqNum(), state.freshSession());
                     read(connected.getInputStream());
                 } catch (Exception exception) {
                     if (running.get()) log.warn("FIX execution session {} disconnected: {}", mic, exception.getMessage());
@@ -263,17 +493,42 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
         }
 
         private void read(InputStream input) throws Exception {
+            socket.setSoTimeout(POLL_TIMEOUT_MS);
+            Instant lastReceivedAt = Instant.now();
+            boolean testRequestSent = false;
             ByteArrayOutputStream buffered = new ByteArrayOutputStream();
             byte[] chunk = new byte[4096];
             while (running.get()) {
-                int count = input.read(chunk);
+                int count;
+                try {
+                    count = input.read(chunk);
+                } catch (SocketTimeoutException timeout) {
+                    // No SO_TIMEOUT-driven poll produced traffic; decide whether the
+                    // silence is still within HeartBtInt tolerance, warrants a
+                    // TestRequest, or means the connection is dead.
+                    Duration silence = Duration.between(lastReceivedAt, Instant.now());
+                    if (silence.compareTo(Duration.ofSeconds(HEARTBEAT_INTERVAL_SECONDS * 2L)) > 0) {
+                        log.warn("FIX session {} missed heartbeats for {}s; reconnecting", mic, silence.toSeconds());
+                        return;
+                    }
+                    if (!testRequestSent
+                            && silence.compareTo(Duration.ofSeconds(HEARTBEAT_INTERVAL_SECONDS + 10L)) > 0) {
+                        LinkedHashMap<Integer, String> testRequest = new LinkedHashMap<>();
+                        testRequest.put(112, "TEST-" + System.currentTimeMillis());
+                        send("1", testRequest);
+                        testRequestSent = true;
+                    }
+                    continue;
+                }
                 if (count < 0) return;
+                lastReceivedAt = Instant.now();
+                testRequestSent = false;
                 buffered.write(chunk, 0, count);
                 byte[] bytes = buffered.toByteArray();
                 int boundary = messageBoundary(bytes);
                 while (boundary >= 0) {
                     byte[] message = Arrays.copyOfRange(bytes, 0, boundary);
-                    handle(message);
+                    onIncomingMessage(message);
                     bytes = Arrays.copyOfRange(bytes, boundary, bytes.length);
                     boundary = messageBoundary(bytes);
                 }
@@ -282,8 +537,56 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
             }
         }
 
-        private void handle(byte[] message) {
+        // Entry point for every parsed inbound message. Compares its MsgSeqNum
+        // against what's expected before any message-type handling runs: an
+        // out-of-order arrival is buffered and triggers a ResendRequest instead
+        // of being processed immediately, so a lost message can never be
+        // silently skipped over.
+        private void onIncomingMessage(byte[] message) {
             Map<Integer, String> fields = parse(message);
+            Integer seqNum = integerOrNull(fields.get(34));
+            if (seqNum == null) {
+                // No usable MsgSeqNum to compare; handle it directly rather than
+                // dropping a message we can't place in the sequence at all.
+                handle(fields);
+                return;
+            }
+
+            int expected = incomingSequence.get();
+            if (seqNum < expected) {
+                log.debug("FIX session {} ignoring MsgSeqNum {} (already at {})", mic, seqNum, expected);
+                return;
+            }
+            if (seqNum > expected) {
+                boolean gapAlreadyOpen = !pendingMessages.isEmpty();
+                pendingMessages.put(seqNum, fields);
+                if (!gapAlreadyOpen && !resendRequestedForCurrentGap) {
+                    resendRequestedForCurrentGap = true;
+                    requestResend(expected, seqNum - 1);
+                }
+                return;
+            }
+
+            advanceAndHandle(seqNum, fields);
+            // Draining here (rather than only on ResendRequest replies) means a
+            // gap that closes because of ordinary in-order traffic - not just a
+            // resend - still releases whatever was buffered behind it.
+            while (true) {
+                Map.Entry<Integer, Map<Integer, String>> next = pendingMessages.firstEntry();
+                if (next == null || next.getKey() != incomingSequence.get()) break;
+                pendingMessages.remove(next.getKey());
+                advanceAndHandle(next.getKey(), next.getValue());
+            }
+            if (pendingMessages.isEmpty()) resendRequestedForCurrentGap = false;
+        }
+
+        private void advanceAndHandle(int seqNum, Map<Integer, String> fields) {
+            incomingSequence.set(seqNum + 1);
+            sessionState.saveIncoming(mic, seqNum + 1);
+            handle(fields);
+        }
+
+        private void handle(Map<Integer, String> fields) {
             String messageType = fields.get(35);
             if ("0".equals(messageType)) return;
             if ("1".equals(messageType)) {
@@ -291,19 +594,56 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
                 if (fields.get(112) != null) heartbeat.put(112, fields.get(112));
                 send("0", heartbeat);
             } else if ("5".equals(messageType)) {
+                if (loggingOut.get()) {
+                    CountDownLatch latch = logoutAcknowledged.get();
+                    if (latch != null) latch.countDown();
+                } else {
+                    // Unsolicited Logout: acknowledge with our own before disconnecting,
+                    // rather than dropping the connection without a reply.
+                    try {
+                        send("5", new LinkedHashMap<>());
+                    } catch (Exception replyFailed) {
+                        log.warn("FIX session {} could not send a Logout reply: {}", mic, replyFailed.getMessage());
+                    }
+                }
                 running.set(false);
+            } else if ("3".equals(messageType)) {
+                log.error("FIX session {} received a session-level Reject: reason={} refSeqNum={} text={}",
+                        mic, fields.get(373), fields.get(45), fields.get(58));
+            } else if ("2".equals(messageType)) {
+                handleResendRequest(fields);
+            } else if ("4".equals(messageType)) {
+                // SequenceReset (plain or GapFill): the counterparty is telling us
+                // to jump ahead, typically in response to our own ResendRequest
+                // skipping over admin messages it never logged either. A reset
+                // can only move forward - a lower NewSeqNo would regress our
+                // expectation and make later, legitimate messages look like gaps.
+                Integer newSeqNo = integerOrNull(fields.get(36));
+                if (newSeqNo != null && newSeqNo > incomingSequence.get()) {
+                    incomingSequence.set(newSeqNo);
+                    sessionState.saveIncoming(mic, newSeqNo);
+                }
             } else {
                 sink.accept(mic, fields);
             }
         }
 
-        private byte[] encode(String messageType, LinkedHashMap<Integer, String> fields) {
+        private static Integer integerOrNull(String value) {
+            if (value == null) return null;
+            try {
+                return Integer.parseInt(value);
+            } catch (NumberFormatException malformed) {
+                return null;
+            }
+        }
+
+        private byte[] encode(String messageType, int seqNum, Instant sendingTime, LinkedHashMap<Integer, String> fields) {
             StringBuilder body = new StringBuilder();
             append(body, 35, messageType);
-            append(body, 34, String.valueOf(outgoingSequence.getAndIncrement()));
+            append(body, 34, String.valueOf(seqNum));
             append(body, 49, senderCompId);
             append(body, 56, targetCompId);
-            append(body, 52, FIX_TIME.format(Instant.now()));
+            append(body, 52, FIX_TIME.format(sendingTime));
             fields.forEach((tag, value) -> append(body, tag, value));
             byte[] bodyBytes = body.toString().getBytes(StandardCharsets.US_ASCII);
             String header = "8=FIXT.1.1\u00019=" + bodyBytes.length + "\u0001";
