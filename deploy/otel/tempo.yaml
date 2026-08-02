@@ -14,9 +14,15 @@ distributor:
           endpoint: 0.0.0.0:4318
 
 ingester:
-  # Flush quickly so a trace is searchable moments after an order is submitted,
-  # which is what scripts/perf/trace-smoke.sh depends on.
-  max_block_duration: 5m
+  # Local-development tuning for fast searchability. Tempo does not make a
+  # trace searchable until it is considered complete and cut into a block, so
+  # with the defaults a freshly submitted order stays invisible for minutes -
+  # long enough that scripts/perf/trace-smoke.sh times out on a system that is
+  # actually working. These values trade block efficiency, which does not
+  # matter locally, for a trace that is searchable within seconds.
+  trace_idle_period: 5s
+  max_block_duration: 30s
+  complete_block_timeout: 1m
 
 compactor:
   compaction:
