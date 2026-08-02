@@ -1,0 +1,33 @@
+# Prometheus — scrapes the Emporia services' /actuator/prometheus endpoints.
+# Phase 1_1 keeps these endpoints during the transition rather than moving
+# metrics onto OTLP.
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: emporia
+    metrics_path: /actuator/prometheus
+    static_configs:
+      # Host names resolve inside the compose network (full-stack mode).
+      # For host-JVM modes (run-local.sh / run-infra-docker.sh) the services
+      # run outside the container, so host.docker.internal is used instead.
+      - targets:
+          - order-command-service:8085
+          - order-management-service:8086
+          - execution-service:8087
+          - portfolio-service:8088
+          - market-data-service:8084
+        labels:
+          deployment: docker
+  - job_name: emporia-host
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets:
+          - host.docker.internal:8085
+          - host.docker.internal:8086
+          - host.docker.internal:8087
+          - host.docker.internal:8088
+          - host.docker.internal:8084
+        labels:
+          deployment: host

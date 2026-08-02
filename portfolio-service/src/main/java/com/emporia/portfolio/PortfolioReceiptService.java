@@ -4,6 +4,8 @@ import com.emporia.portfolio.PortfolioContracts.Balance;
 import com.emporia.portfolio.PortfolioContracts.PortfolioState;
 import com.emporia.portfolio.PortfolioContracts.RiskSeed;
 import com.emporia.portfolio.PortfolioContracts.Snapshot;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -26,21 +28,31 @@ class PortfolioReceiptService {
     private final PortfolioStore portfolios;
     private final PortfolioSnapshotValidator validator;
     private final Clock clock;
+    private final ObservationRegistry observations;
+
+    PortfolioReceiptService(
+            final PortfolioStore portfolios,
+            final PortfolioSnapshotValidator validator) {
+        this(portfolios, validator, Clock.systemUTC(), ObservationRegistry.NOOP);
+    }
 
     @Autowired
     PortfolioReceiptService(
             final PortfolioStore portfolios,
-            final PortfolioSnapshotValidator validator) {
-        this(portfolios, validator, Clock.systemUTC());
+            final PortfolioSnapshotValidator validator,
+            final ObservationRegistry observations) {
+        this(portfolios, validator, Clock.systemUTC(), observations);
     }
 
     PortfolioReceiptService(
             final PortfolioStore portfolios,
             final PortfolioSnapshotValidator validator,
-            final Clock clock) {
+            final Clock clock,
+            final ObservationRegistry observations) {
         this.portfolios = portfolios;
         this.validator = validator;
         this.clock = clock;
+        this.observations = observations;
     }
 
     @Transactional(readOnly = true)
@@ -86,6 +98,17 @@ class PortfolioReceiptService {
                 clock.instant());
     }
 
+    /**
+     * Records {@code emporia.portfolio.snapshot.apply}. The {@code lockClient}
+     * row lock is the expected latency tail and sits inside this observation.
+     *
+     * <p>Note: {@code outcome=duplicate} extends the tag vocabulary fixed by
+     * REWORK_NOTE Phase 1_1 ({@code success|rejected|timeout|error}). An
+     * idempotent redelivery does succeed, but collapsing it into
+     * {@code success} would hide the redelivery rate, which is exactly what the
+     * idempotency contract exists to control. Still a bounded, low-cardinality
+     * value.
+     */
     @Transactional
     ReceiptResult apply(
             final long pathDeliveryId,
@@ -93,34 +116,52 @@ class PortfolioReceiptService {
             final String eventId,
             final byte[] payload,
             final Snapshot snapshot) {
-        final ValidatedPortfolioSnapshot validated =
-                validator.validate(
-                        pathDeliveryId,
-                        pathClientId,
-                        eventId,
-                        snapshot);
-        final String digest = sha256(payload);
+        final Observation observation = Observation
+                .createNotStarted("emporia.portfolio.snapshot.apply", observations)
+                .start();
+        String outcome = "success";
+        try {
+            final ValidatedPortfolioSnapshot validated =
+                    validator.validate(
+                            pathDeliveryId,
+                            pathClientId,
+                            eventId,
+                            snapshot);
+            final String digest = sha256(payload);
 
-        portfolios.lockClient(pathClientId);
-        final PortfolioReceipt existing =
-                portfolios.findReceipt(eventId);
-        if (existing != null) {
-            if (digest.equals(existing.payloadSha256())
-                    && Arrays.equals(payload, existing.payload())) {
-                return ReceiptResult.DUPLICATE;
+            portfolios.lockClient(pathClientId);
+            final PortfolioReceipt existing =
+                    portfolios.findReceipt(eventId);
+            if (existing != null) {
+                if (digest.equals(existing.payloadSha256())
+                        && Arrays.equals(payload, existing.payload())) {
+                    outcome = "duplicate";
+                    return ReceiptResult.DUPLICATE;
+                }
+                outcome = "rejected";
+                throw new PortfolioIdempotencyConflictException(eventId);
             }
-            throw new PortfolioIdempotencyConflictException(eventId);
-        }
 
-        final Instant now = clock.instant();
-        portfolios.recordReceipt(
-                eventId,
-                digest,
-                payload,
-                validated,
-                now);
-        portfolios.replaceBalances(validated, now);
-        return ReceiptResult.APPLIED;
+            final Instant now = clock.instant();
+            portfolios.recordReceipt(
+                    eventId,
+                    digest,
+                    payload,
+                    validated,
+                    now);
+            portfolios.replaceBalances(validated, now);
+            return ReceiptResult.APPLIED;
+        } catch (PortfolioContractException | PortfolioIdempotencyConflictException rejection) {
+            outcome = "rejected";
+            observation.error(rejection);
+            throw rejection;
+        } catch (RuntimeException exception) {
+            outcome = "error";
+            observation.error(exception);
+            throw exception;
+        } finally {
+            observation.lowCardinalityKeyValue("outcome", outcome).stop();
+        }
     }
 
     private static List<Balance> validateProvisionedBalances(

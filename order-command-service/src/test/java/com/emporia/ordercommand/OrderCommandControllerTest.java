@@ -7,6 +7,10 @@ import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.events.TradingEvents.OrderView;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.observation.ObservationRegistry;
+import io.micrometer.core.instrument.observation.DefaultMeterObservationHandler;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -32,11 +36,17 @@ class OrderCommandControllerTest {
     private final StaticDataClient staticData = mock(StaticDataClient.class);
     private final KafkaCommandGateway commands = mock(KafkaCommandGateway.class);
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final MeterRegistry meters = new SimpleMeterRegistry();
+    private final ObservationRegistry observations = ObservationRegistry.create();
     private OrderCommandController controller;
 
     @BeforeEach
     void setUp() {
-        controller = new OrderCommandController(staticData, commands, objectMapper);
+        // Wiring a meter handler turns observations into timers, so the tests
+        // can assert on them exactly like OrderMetricsTest does.
+        observations.observationConfig()
+                .observationHandler(new DefaultMeterObservationHandler(meters));
+        controller = new OrderCommandController(staticData, commands, objectMapper, observations);
     }
 
     @Test

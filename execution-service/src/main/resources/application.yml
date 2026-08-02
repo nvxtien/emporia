@@ -18,6 +18,10 @@ spring:
     create-schemas: true
   kafka:
     bootstrap-servers: ${KAFKA_BROKERS:localhost:9092}
+    # Off by default. Without both flags no traceparent header is written or
+    # read, so trace context does not propagate across Kafka and one order
+    # fragments into several disconnected traces.
+    template.observation-enabled: true
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
@@ -27,7 +31,9 @@ spring:
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
       properties.spring.json.trusted.packages: com.emporia.events
-    listener.ack-mode: record
+    listener:
+      ack-mode: record
+      observation-enabled: true
 
 emporia:
   kafka:
@@ -66,3 +72,19 @@ emporia:
 management:
   endpoints.web.exposure.include: health,info,prometheus
   endpoint.health.probes.enabled: true
+  tracing.sampling.probability: ${OTEL_TRACE_SAMPLE_RATE:1.0}
+  # NOT management.otlp.tracing.endpoint: that name is deprecated at level=error
+  # in Boot 4, meaning it is no longer bound and is silently ignored.
+  opentelemetry.tracing.export.otlp.endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318}/v1/traces
+  # Traces go over OTLP; metrics stay on Prometheus per Phase 1_1. The
+  # starter enables OTLP metrics export by default, which also drags in a
+  # protobuf 4.x runtime that conflicts with the gRPC protobuf pin.
+  otlp.metrics.export.enabled: false
+  metrics.distribution:
+    percentiles-histogram:
+      emporia: true
+      http: true
+      spring.kafka: true
+      jdbc: true
+    minimum-expected-value.emporia: 1ms
+    maximum-expected-value.emporia: 10s

@@ -113,6 +113,63 @@ services:
       retries: 20
       start_period: 10s
 
+  # --- Observability (REWORK_NOTE Phase 1_1) -------------------------------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.116.1
+    container_name: emporia-otel-collector
+    command: ["--config=/etc/otel/collector.yaml"]
+    volumes:
+      - ./deploy/otel/collector.yaml:/etc/otel/collector.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    depends_on:
+      - tempo
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    container_name: emporia-tempo
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    user: "0:0"
+    volumes:
+      - ./deploy/otel/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - emporia-tempo-data:/var/tempo
+    ports:
+      - "3200:3200"
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: emporia-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=24h
+    volumes:
+      - ./deploy/otel/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - emporia-prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      # Lets the emporia-host scrape job reach services on the host JVM
+      # (run-local.sh / run-infra-docker.sh modes) on Linux as well as macOS.
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: emporia-grafana
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./deploy/otel/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/emporia.yaml:ro
+      - emporia-grafana-data:/var/lib/grafana
+    ports:
+      # 3000 and 3001 are taken by the frontend in Docker and local modes.
+      - "3300:3000"
+    depends_on:
+      - tempo
+      - prometheus
+
 volumes:
   emporia-authentication-postgres-data:
   emporia-static-data-postgres-data:
@@ -121,3 +178,6 @@ volumes:
   emporia-execution-postgres-data:
   emporia-portfolio-postgres-data:
   emporia-kafka-data:
+  emporia-tempo-data:
+  emporia-prometheus-data:
+  emporia-grafana-data:

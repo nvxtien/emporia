@@ -38,6 +38,11 @@ echo "==> Starting Kafka (Docker)"
 docker compose up -d kafka
 wait_docker_healthy kafka docker-compose.yml
 
+# Observability stack (REWORK_NOTE Phase 1_1). Not health-waited: services
+# export OTLP best-effort and start fine if the collector lags.
+echo "==> Starting observability stack (collector, Tempo, Prometheus, Grafana)"
+docker compose up -d otel-collector tempo prometheus grafana
+
 # clean is required: the protobuf-maven-plugin has produced inconsistent
 # incremental builds against a stale target/ from an earlier run.
 echo "==> Building and installing reactor modules (mvn clean install -DskipTests)"
@@ -101,6 +106,7 @@ cat <<EOF
     Gateway:          http://localhost:8082
     Execution venue:  ${EXECUTION_VENUE_MODE:-exchange-core} (accounting: ${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk})
     Market data:      ${MARKET_DATA_PROVIDER:-simulated}
+    Traces/metrics:   http://localhost:3300  (Grafana: Tempo + Prometheus)
     Logs:             $log_dir
     Stop with:        scripts/stop-services.sh
 EOF

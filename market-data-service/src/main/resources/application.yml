@@ -33,4 +33,19 @@ emporia:
       initial-data-timeout: ${ALPACA_INITIAL_DATA_TIMEOUT:5s}
       reconnect-delay: ${ALPACA_RECONNECT_DELAY:5s}
       maximum-symbols: ${ALPACA_MAX_SYMBOLS:30}
-management.endpoints.web.exposure.include: health,info,prometheus
+management:
+  endpoints.web.exposure.include: health,info,prometheus
+  tracing.sampling.probability: ${OTEL_TRACE_SAMPLE_RATE:1.0}
+  # NOT management.otlp.tracing.endpoint: that name is deprecated at level=error
+  # in Boot 4, meaning it is no longer bound and is silently ignored.
+  opentelemetry.tracing.export.otlp.endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://localhost:4318}/v1/traces
+  # Traces go over OTLP; metrics stay on Prometheus per Phase 1_1. The
+  # starter enables OTLP metrics export by default, which also drags in a
+  # protobuf 4.x runtime that conflicts with the gRPC protobuf pin.
+  otlp.metrics.export.enabled: false
+  metrics.distribution:
+    percentiles-histogram:
+      emporia: true
+      http: true
+    minimum-expected-value.emporia: 1ms
+    maximum-expected-value.emporia: 10s

@@ -14,6 +14,7 @@
         <protobuf.version>3.25.3</protobuf.version>
     </properties>
     <dependencies>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-opentelemetry</artifactId></dependency>
         <dependency><groupId>com.emporia</groupId><artifactId>trading-contracts</artifactId><version>${project.version}</version></dependency>
         <dependency><groupId>com.emporia</groupId><artifactId>fix-simulator-contracts</artifactId><version>${project.version}</version></dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
