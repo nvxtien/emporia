@@ -1,0 +1,17 @@
+# Grafana dashboard provisioning. Dashboards live in git as JSON so the
+# observability setup is reproducible from a clean checkout rather than living
+# only in a Grafana volume.
+apiVersion: 1
+
+providers:
+  - name: emporia
+    orgId: 1
+    folder: Emporia
+    type: file
+    disableDeletion: false
+    # Edits made in the UI are overwritten on restart. That is intentional:
+    # the JSON in git is the source of truth.
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/provisioning/dashboards/emporia
+      foldersFromFilesStructure: false

@@ -1,33 +1,49 @@
-# Prometheus — scrapes the Emporia services' /actuator/prometheus endpoints.
-# Phase 1_1 keeps these endpoints during the transition rather than moving
-# metrics onto OTLP.
+# Prometheus — scrapes the Emporia services' /actuator/prometheus endpoints
+# and the Kafka exporter. Phase 1_1 keeps the actuator endpoints during the
+# transition rather than moving metrics onto OTLP.
 global:
   scrape_interval: 10s
   evaluation_interval: 10s
 
 scrape_configs:
+  # Broker-side consumer group lag. This is the source of truth for lag
+  # dashboards: it keeps reporting when a consumer process is down, and it
+  # carries the consumergroup label that Kafka client metrics do not expose.
+  - job_name: kafka-exporter
+    static_configs:
+      - targets: ['kafka-exporter:9308']
+
+  # Each target carries an explicit `service` label. Kafka client metrics
+  # identify a consumer only by client_id, so without this there is no way to
+  # group application-side panels by service.
+  #
+  # Full-stack Docker mode: services run as containers on the compose network.
   - job_name: emporia
     metrics_path: /actuator/prometheus
     static_configs:
-      # Host names resolve inside the compose network (full-stack mode).
-      # For host-JVM modes (run-local.sh / run-infra-docker.sh) the services
-      # run outside the container, so host.docker.internal is used instead.
-      - targets:
-          - order-command-service:8085
-          - order-management-service:8086
-          - execution-service:8087
-          - portfolio-service:8088
-          - market-data-service:8084
-        labels:
-          deployment: docker
+      - targets: ['order-command-service:8085']
+        labels: { service: order-command-service, deployment: docker }
+      - targets: ['order-management-service:8086']
+        labels: { service: order-management-service, deployment: docker }
+      - targets: ['execution-service:8087']
+        labels: { service: execution-service, deployment: docker }
+      - targets: ['portfolio-service:8088']
+        labels: { service: portfolio-service, deployment: docker }
+      - targets: ['market-data-service:8084']
+        labels: { service: market-data-service, deployment: docker }
+
+  # Host-JVM modes (run-local.sh / run-infra-docker.sh): the services run
+  # outside the container, so they are reached through host.docker.internal.
   - job_name: emporia-host
     metrics_path: /actuator/prometheus
     static_configs:
-      - targets:
-          - host.docker.internal:8085
-          - host.docker.internal:8086
-          - host.docker.internal:8087
-          - host.docker.internal:8088
-          - host.docker.internal:8084
-        labels:
-          deployment: host
+      - targets: ['host.docker.internal:8085']
+        labels: { service: order-command-service, deployment: host }
+      - targets: ['host.docker.internal:8086']
+        labels: { service: order-management-service, deployment: host }
+      - targets: ['host.docker.internal:8087']
+        labels: { service: execution-service, deployment: host }
+      - targets: ['host.docker.internal:8088']
+        labels: { service: portfolio-service, deployment: host }
+      - targets: ['host.docker.internal:8084']
+        labels: { service: market-data-service, deployment: host }

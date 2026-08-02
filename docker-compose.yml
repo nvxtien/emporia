@@ -137,6 +137,22 @@ services:
     ports:
       - "3200:3200"
 
+  # Broker-side consumer group lag (REWORK_NOTE Phase 1_2). Required because
+  # application-side Kafka metrics disappear exactly when a consumer is down,
+  # which is when lag matters most. This also supplies the consumer group
+  # dimension, which the client metrics do not expose at all.
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.8.0
+    container_name: emporia-kafka-exporter
+    command:
+      - --kafka.server=kafka:9092
+      - --web.listen-address=:9308
+    ports:
+      - "9308:9308"
+    depends_on:
+      kafka:
+        condition: service_healthy
+
   prometheus:
     image: prom/prometheus:v3.1.0
     container_name: emporia-prometheus
@@ -162,6 +178,8 @@ services:
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
     volumes:
       - ./deploy/otel/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/emporia.yaml:ro
+      - ./deploy/otel/grafana-dashboards.yaml:/etc/grafana/provisioning/dashboards/emporia.yaml:ro
+      - ./deploy/otel/dashboards:/etc/grafana/provisioning/dashboards/emporia:ro
       - emporia-grafana-data:/var/lib/grafana
     ports:
       # 3000 and 3001 are taken by the frontend in Docker and local modes.
