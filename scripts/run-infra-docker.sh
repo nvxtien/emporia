@@ -110,6 +110,7 @@ cat <<EOF
     Gateway:          http://localhost:8082
     Execution venue:  ${EXECUTION_VENUE_MODE:-exchange-core} (accounting: ${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk})
     Market data:      ${MARKET_DATA_PROVIDER:-simulated}
+    Traces/metrics:   http://localhost:3300  (Grafana: Tempo + Prometheus)
     Postgres/Kafka:   docker compose ps
     Logs:             $log_dir
     Stop Spring services with: scripts/stop-services.sh

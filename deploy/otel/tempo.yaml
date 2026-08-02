@@ -1,0 +1,31 @@
+# Grafana Tempo — local development configuration.
+# Local filesystem storage: no object store (S3/GCS) is needed for dev.
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9096
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  # Flush quickly so a trace is searchable moments after an order is submitted,
+  # which is what scripts/perf/trace-smoke.sh depends on.
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    block_retention: 24h
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks

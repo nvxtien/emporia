@@ -4,6 +4,10 @@ import com.emporia.portfolio.PortfolioContracts.Balance;
 import com.emporia.portfolio.PortfolioContracts.PortfolioState;
 import com.emporia.portfolio.PortfolioContracts.RiskSeed;
 import com.emporia.portfolio.PortfolioContracts.Snapshot;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.observation.DefaultMeterObservationHandler;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -17,6 +21,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class PortfolioReceiptServiceTest {
+    private final MeterRegistry meters = new SimpleMeterRegistry();
+    private final ObservationRegistry observations = observationRegistry(meters);
+
 
     private static final Instant NOW =
             Instant.parse("2026-07-27T08:00:00Z");
@@ -75,6 +82,42 @@ class PortfolioReceiptServiceTest {
                         PortfolioReceiptService.ReceiptResult.DUPLICATE);
         assertThat(store.recordedEventId).isNull();
         assertThat(store.applied).isNull();
+    }
+
+    /**
+     * REWORK_NOTE Phase 1_1: {@code emporia.portfolio.snapshot.apply}. The
+     * duplicate and rejected outcomes are asserted as well as the success one —
+     * an observation that only records the happy path hides the redelivery rate
+     * the idempotency contract exists to control.
+     */
+    @Test
+    void recordsTheSnapshotApplyObservationForEachOutcome() {
+        final byte[] payload = "{}".getBytes(StandardCharsets.UTF_8);
+
+        service(new RecordingPortfolioStore())
+                .apply(13, 101, "exchange-1:13:101", payload, snapshot());
+        assertThat(observationCount("success")).isEqualTo(1);
+
+        final RecordingPortfolioStore duplicateStore = new RecordingPortfolioStore();
+        duplicateStore.existing = new PortfolioReceipt(EMPTY_JSON_SHA256, payload);
+        service(duplicateStore).apply(13, 101, "exchange-1:13:101", payload, snapshot());
+        assertThat(observationCount("duplicate")).isEqualTo(1);
+
+        final RecordingPortfolioStore conflictStore = new RecordingPortfolioStore();
+        conflictStore.existing = new PortfolioReceipt(
+                EMPTY_JSON_SHA256, "{\"different\":true}".getBytes(StandardCharsets.UTF_8));
+        assertThatThrownBy(() -> service(conflictStore)
+                .apply(13, 101, "exchange-1:13:101", payload, snapshot()))
+                .isInstanceOf(PortfolioIdempotencyConflictException.class);
+        assertThat(observationCount("rejected")).isEqualTo(1);
+    }
+
+    private long observationCount(final String outcome) {
+        return meters.find("emporia.portfolio.snapshot.apply")
+                .tag("outcome", outcome).timer() == null
+                ? 0
+                : meters.find("emporia.portfolio.snapshot.apply")
+                        .tag("outcome", outcome).timer().count();
     }
 
     @Test
@@ -181,12 +224,23 @@ class PortfolioReceiptServiceTest {
         assertThat(service).isNotNull();
     }
 
+    /**
+     * Wiring a meter handler turns observations into timers, so they can be
+     * asserted the same way {@code OrderMetricsTest} asserts gauges.
+     */
+    private static ObservationRegistry observationRegistry(final MeterRegistry meters) {
+        final ObservationRegistry registry = ObservationRegistry.create();
+        registry.observationConfig().observationHandler(new DefaultMeterObservationHandler(meters));
+        return registry;
+    }
+
     private PortfolioReceiptService service(
             final RecordingPortfolioStore store) {
         return new PortfolioReceiptService(
                 store,
                 new PortfolioSnapshotValidator(),
-                Clock.fixed(NOW, ZoneOffset.UTC));
+                Clock.fixed(NOW, ZoneOffset.UTC),
+                observations);
     }
 
     private static Snapshot snapshot() {

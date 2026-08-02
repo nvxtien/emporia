@@ -14,6 +14,10 @@ import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.OrderEventRepository;
 import com.emporia.ordermanagement.repository.ProcessedCommandRepository;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.observation.DefaultMeterObservationHandler;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -42,8 +46,20 @@ class OrderCommandHandlerTest {
     private final TradingOrderRepository orders = mock(TradingOrderRepository.class);
     private final OrderEventRepository events = mock(OrderEventRepository.class);
     private final ProcessedCommandRepository processed = mock(ProcessedCommandRepository.class);
+    private final MeterRegistry meters = new SimpleMeterRegistry();
+    private final ObservationRegistry observations = observationRegistry(meters);
     private final OrderCommandHandler handler =
-            new OrderCommandHandler(orders, events, processed, new ObjectMapper());
+            new OrderCommandHandler(orders, events, processed, new ObjectMapper(), observations);
+
+    /**
+     * Wiring a meter handler turns observations into timers, so they can be
+     * asserted the same way {@code OrderMetricsTest} asserts gauges.
+     */
+    private static ObservationRegistry observationRegistry(MeterRegistry meters) {
+        ObservationRegistry registry = ObservationRegistry.create();
+        registry.observationConfig().observationHandler(new DefaultMeterObservationHandler(meters));
+        return registry;
+    }
 
     @BeforeEach
     void defaultNoCache() {

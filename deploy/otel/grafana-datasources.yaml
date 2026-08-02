@@ -1,0 +1,28 @@
+# Grafana datasource provisioning: Tempo for traces, Prometheus for metrics.
+apiVersion: 1
+
+datasources:
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    access: proxy
+    url: http://tempo:3200
+    isDefault: true
+    jsonData:
+      # Jump from a span to the metrics of the service that emitted it.
+      tracesToMetrics:
+        datasourceUid: prometheus
+      serviceMap:
+        datasourceUid: prometheus
+
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    jsonData:
+      # Exemplars link a latency-histogram bucket to an example trace, which is
+      # the "where did the time go" workflow Phase 1_1 exists to enable.
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo

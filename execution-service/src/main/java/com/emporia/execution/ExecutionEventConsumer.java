@@ -10,6 +10,8 @@ import com.emporia.events.TradingEvents.OrderView;
 import com.emporia.events.TradingEvents.StrategyStateView;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -27,11 +29,13 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 
 import static com.emporia.events.TradingEvents.CommandType.CREATE;
 import static com.emporia.events.TradingEvents.SCHEMA_VERSION;
@@ -55,16 +59,19 @@ class ExecutionEventConsumer {
     private final int defaultVwapBuckets;
     private final Counter routed;
     private final Counter rejected;
+    private final ObservationRegistry observations;
+    private final String venueMode;
     private final ConcurrentHashMap<UUID, List<ScheduledFuture<?>>> runtimes = new ConcurrentHashMap<>();
     private final AtomicBoolean recovered = new AtomicBoolean();
 
     ExecutionEventConsumer(ObjectMapper objectMapper, KafkaTemplate<String, Object> kafka,
                            TradingDataClient tradingData, TaskScheduler scheduler,
                            ExecutionVenueGateway executionVenue, ExecutionCommandPublisher executionCommands,
-                           MeterRegistry meters,
+                           MeterRegistry meters, ObservationRegistry observations,
                            @Value("${emporia.kafka.commands-topic}") String orderCommandsTopic,
                            @Value("${emporia.execution.strategy-time-compression}") int timeCompression,
-                           @Value("${emporia.execution.vwap-default-buckets}") int defaultVwapBuckets) {
+                           @Value("${emporia.execution.vwap-default-buckets}") int defaultVwapBuckets,
+                           @Value("${emporia.execution.venue-mode:simulated}") String venueMode) {
         this.objectMapper = objectMapper;
         this.kafka = kafka;
         this.tradingData = tradingData;
@@ -76,6 +83,66 @@ class ExecutionEventConsumer {
         this.defaultVwapBuckets = Math.max(1, defaultVwapBuckets);
         this.routed = meters.counter("emporia.execution.orders.routed");
         this.rejected = meters.counter("emporia.execution.orders.rejected");
+        this.observations = observations;
+        this.venueMode = venueMode.strip().toLowerCase(Locale.ROOT).replace('-', '_');
+    }
+
+    /**
+     * Records {@code emporia.strategy.decision} around one complete strategy
+     * tick. Downstream HTTP/Kafka observations become children, so a trace shows
+     * both the total decision latency and the compute/data-fetch split.
+     */
+    private void observeStrategyDecision(String strategy, Supplier<String> action) {
+        strategyDecision(strategy, () -> new StrategyResult<Void>(action.get(), null));
+    }
+
+    private <T> T strategyDecision(String strategy, Supplier<StrategyResult<T>> action) {
+        Observation observation = Observation.createNotStarted("emporia.strategy.decision", observations)
+                .lowCardinalityKeyValue("strategy", strategy)
+                .start();
+        String outcome = "success";
+        try {
+            try (Observation.Scope ignored = observation.openScope()) {
+                StrategyResult<T> result = action.get();
+                if (result == null) return null;
+                outcome = strategyOutcome(result.outcome());
+                return result.value();
+            }
+        } catch (RuntimeException exception) {
+            outcome = "smart".equals(strategy) && waitingForLiquidity(exception) ? "waiting" : "error";
+            if ("error".equals(outcome)) {
+                observation.error(exception);
+            }
+            throw exception;
+        } finally {
+            observation.lowCardinalityKeyValue("outcome", outcome).stop();
+        }
+    }
+
+    /**
+     * Records {@code emporia.execution.venue.operation}. Instrumented at the
+     * call site rather than by decorating {@link ExecutionVenueGateway}, because
+     * a decorator bean of the same type creates a self-injection ambiguity.
+     * Exchange-core performs a synchronous disk checkpoint per operation, so
+     * this observation is where that cost becomes visible.
+     */
+    private void venueOperation(String operation, Runnable action) {
+        Observation observation = Observation.createNotStarted("emporia.execution.venue.operation", observations)
+                .lowCardinalityKeyValue("venue_mode", venueMode)
+                .lowCardinalityKeyValue("operation", operation)
+                .start();
+        String outcome = "success";
+        try {
+            try (Observation.Scope ignored = observation.openScope()) {
+                action.run();
+            }
+        } catch (RuntimeException exception) {
+            outcome = "error";
+            observation.error(exception);
+            throw exception;
+        } finally {
+            observation.lowCardinalityKeyValue("outcome", outcome).stop();
+        }
     }
 
     @KafkaListener(
@@ -95,12 +162,12 @@ class ExecutionEventConsumer {
             return;
         }
         if ("MODIFIED".equals(event.eventType()) && "DMA".equalsIgnoreCase(order.destination())) {
-            executionVenue.modify(order);
+            venueOperation("modify", () -> executionVenue.modify(order));
             return;
         }
         if ("CANCEL_REQUESTED".equals(event.eventType())) {
             if ("DMA".equalsIgnoreCase(order.destination())) {
-                executionVenue.cancel(order);
+                venueOperation("cancel", () -> executionVenue.cancel(order));
             } else {
                 stopRuntime(order.id());
                 executionCommands.venueCancel(order.id(), order.deskId(),
@@ -114,7 +181,7 @@ class ExecutionEventConsumer {
 
     private void start(OrderView order, StrategyStateView state) {
         switch (order.destination().toUpperCase(java.util.Locale.ROOT)) {
-            case "DMA" -> executionVenue.submit(order);
+            case "DMA" -> venueOperation("submit", () -> executionVenue.submit(order));
             case "SMART" -> startSmart(state);
             case "VWAP" -> startVwap(state);
             default -> throw new IllegalArgumentException("Unsupported execution destination " + order.destination());
@@ -124,7 +191,7 @@ class ExecutionEventConsumer {
     private void startSmart(StrategyStateView initial) {
         stopRuntime(initial.parent().id());
         try {
-            tryAdvanceSmart(initial);
+            observeStrategyDecision("smart", () -> advanceSmartState(initial));
         } catch (RuntimeException unavailableLiquidity) {
             log.info("SMART strategy {} is waiting for executable liquidity: {}",
                     initial.parent().id(), unavailableLiquidity.getMessage());
@@ -137,23 +204,25 @@ class ExecutionEventConsumer {
 
     private void advanceSmart(UUID parentId) {
         try {
-            StrategyStateView state = tradingData.strategy(parentId);
-            if (!isExecutable(state)) {
-                stopRuntime(parentId);
-                return;
-            }
-            tryAdvanceSmart(state);
+            observeStrategyDecision("smart", () -> {
+                StrategyStateView state = tradingData.strategy(parentId);
+                if (!isExecutable(state)) {
+                    stopRuntime(parentId);
+                    return "noop";
+                }
+                return advanceSmartState(state);
+            });
         } catch (RuntimeException transientFailure) {
             log.warn("SMART strategy {} will retry after routing failure: {}",
                     parentId, transientFailure.getMessage());
         }
     }
 
-    private void tryAdvanceSmart(StrategyStateView state) {
+    private String advanceSmartState(StrategyStateView state) {
+        if (!isExecutable(state)) return "noop";
         OrderView parent = state.parent();
-        if (!isExecutable(state)) return;
         BigDecimal available = available(parent, state.children());
-        if (available.signum() <= 0) return;
+        if (available.signum() <= 0) return "noop";
 
         RouteData data = routeData(parent);
         List<BestVenueSelector.RouteSlice> plan = venues.plan(
@@ -165,12 +234,15 @@ class ExecutionEventConsumer {
             publishChild(parent, slice.listing(), slice.price(), slice.quantity(),
                     "SMART", firstIndex + index);
         }
+        return "success";
     }
 
     private void startVwap(StrategyStateView initial) {
-        VwapPlan plan = vwapPlan(initial.parent());
-        stopRuntime(initial.parent().id());
-        tryAdvanceVwap(initial, plan, Instant.now());
+        VwapPlan plan = strategyDecision("vwap", () -> {
+            VwapPlan computed = vwapPlan(initial.parent());
+            stopRuntime(initial.parent().id());
+            return new StrategyResult<>(advanceVwapState(initial, computed, Instant.now()), computed);
+        });
         Duration period = tickPeriod();
         Instant firstTick = Instant.now().plus(period);
         if (plan.start().isAfter(firstTick)) firstTick = plan.start();
@@ -181,25 +253,26 @@ class ExecutionEventConsumer {
 
     private void advanceVwap(UUID parentId) {
         try {
-            StrategyStateView state = tradingData.strategy(parentId);
-            if (!isExecutable(state)) {
-                stopRuntime(parentId);
-                return;
-            }
-            tryAdvanceVwap(state, vwapPlan(state.parent()), Instant.now());
+            observeStrategyDecision("vwap", () -> {
+                StrategyStateView state = tradingData.strategy(parentId);
+                if (!isExecutable(state)) {
+                    stopRuntime(parentId);
+                    return "noop";
+                }
+                return advanceVwapState(state, vwapPlan(state.parent()), Instant.now());
+            });
         } catch (RuntimeException transientFailure) {
             log.warn("VWAP strategy {} will retry after scheduling failure: {}",
                     parentId, transientFailure.getMessage());
         }
     }
 
-    private void tryAdvanceVwap(StrategyStateView state, VwapPlan plan, Instant now) {
-        if (!isExecutable(state)) return;
-        Duration elapsed = Duration.between(plan.start(), now);
-        BigDecimal target = vwapSchedule.cumulativeTarget(plan.slices(), elapsed);
+    private String advanceVwapState(StrategyStateView state, VwapPlan plan, Instant now) {
+        if (!isExecutable(state)) return "noop";
+        BigDecimal target = vwapSchedule.cumulativeTarget(plan.slices(), Duration.between(plan.start(), now));
         BigDecimal sent = state.parent().tradedQuantity().add(exposed(state.children()));
         BigDecimal due = target.subtract(sent);
-        if (due.signum() <= 0) return;
+        if (due.signum() <= 0) return "noop";
         if (due.compareTo(state.parent().remainingQuantity()) > 0) {
             due = state.parent().remainingQuantity();
         }
@@ -207,6 +280,7 @@ class ExecutionEventConsumer {
         BestVenueSelector.Selection selection = selectVenue(state.parent());
         publishChild(state.parent(), selection.listing(), selection.price(), due,
                 "VWAP", state.children().size());
+        return "success";
     }
 
     private VwapPlan vwapPlan(OrderView order) {
@@ -317,8 +391,11 @@ class ExecutionEventConsumer {
         try {
             ExecutionRecoveryView recovery = tradingData.recoverable();
             for (OrderView direct : recovery.directOrders()) {
-                if (direct.targetStatus() == OrderStatus.CANCELLED) executionVenue.cancel(direct);
-                else executionVenue.recover(direct);
+                if (direct.targetStatus() == OrderStatus.CANCELLED) {
+                    venueOperation("cancel", () -> executionVenue.cancel(direct));
+                } else {
+                    venueOperation("recover", () -> executionVenue.recover(direct));
+                }
             }
             for (StrategyStateView strategy : recovery.strategies()) {
                 if (strategy.parent().targetStatus() == OrderStatus.CANCELLED) {
@@ -418,10 +495,24 @@ class ExecutionEventConsumer {
         return ExecutionCommandPublisher.deterministic(value);
     }
 
+    private static boolean waitingForLiquidity(RuntimeException exception) {
+        return exception instanceof IllegalStateException
+                && exception.getMessage() != null
+                && exception.getMessage().startsWith("No executable venue");
+    }
+
+    private static String strategyOutcome(String outcome) {
+        if (outcome == null || outcome.isBlank()) return "success";
+        return outcome.strip().toLowerCase(Locale.ROOT).replace('-', '_');
+    }
+
     private record RouteData(List<ListingSnapshot> listings,
                              List<TradingDataClient.MarketQuote> quotes) {
     }
 
     private record VwapPlan(Instant start, Instant end, List<VwapSchedule.Slice> slices) {
+    }
+
+    private record StrategyResult<T>(String outcome, T value) {
     }
 }

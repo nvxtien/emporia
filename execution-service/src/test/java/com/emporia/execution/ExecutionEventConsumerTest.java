@@ -11,7 +11,10 @@ import com.emporia.events.TradingEvents.OrderView;
 import com.emporia.events.TradingEvents.StrategyStateView;
 import com.emporia.execution.TradingDataClient.DepthLevel;
 import com.emporia.execution.TradingDataClient.MarketQuote;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.observation.DefaultMeterObservationHandler;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -41,10 +44,22 @@ class ExecutionEventConsumerTest {
     private final ExecutionVenueGateway venue = mock(ExecutionVenueGateway.class);
     private final ExecutionCommandPublisher executionCommands = mock(ExecutionCommandPublisher.class);
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final MeterRegistry meters = new SimpleMeterRegistry();
+    private final ObservationRegistry observations = observationRegistry(meters);
     private final ExecutionEventConsumer consumer = new ExecutionEventConsumer(
             objectMapper, kafka, tradingData, scheduler, venue, executionCommands,
-            new SimpleMeterRegistry(), "orders.commands", 60, 5
+            meters, observations, "orders.commands", 60, 5, "simulated"
     );
+
+    /**
+     * Wiring a meter handler turns observations into timers, so they can be
+     * asserted the same way {@code OrderMetricsTest} asserts gauges.
+     */
+    private static ObservationRegistry observationRegistry(MeterRegistry meters) {
+        ObservationRegistry registry = ObservationRegistry.create();
+        registry.observationConfig().observationHandler(new DefaultMeterObservationHandler(meters));
+        return registry;
+    }
 
     @Test
     void sendsDmaOrdersToTheVenueGateway() throws Exception {
@@ -81,6 +96,8 @@ class ExecutionEventConsumerTest {
         assertThat(child.limitPrice()).isEqualByComparingTo("101.25");
         assertThat(child.quantity()).isEqualByComparingTo(parent.remainingQuantity());
         assertThat(child.destination()).isEqualTo("DMA");
+        assertThat(timerCount("emporia.strategy.decision", "strategy", "smart",
+                "outcome", "success")).isEqualTo(1);
     }
 
     @Test
@@ -125,6 +142,8 @@ class ExecutionEventConsumerTest {
         consumer.consume(event("CREATED", parent));
 
         verify(kafka).send(eq("orders.commands"), any(), any());
+        assertThat(timerCount("emporia.strategy.decision", "strategy", "vwap",
+                "outcome", "success")).isEqualTo(1);
     }
 
     @Test
@@ -161,6 +180,8 @@ class ExecutionEventConsumerTest {
 
         verify(kafka, never()).send(eq("orders.commands"), any(), any());
         verify(executionCommands, never()).reject(any(), any(), any(), any(), any());
+        assertThat(timerCount("emporia.strategy.decision", "strategy", "smart",
+                "outcome", "waiting")).isEqualTo(1);
     }
 
     @Test
@@ -321,6 +342,8 @@ class ExecutionEventConsumerTest {
         consumer.consume(event("CREATED", parent));
         // strategy() was called and found non-executable → no child orders sent
         verify(kafka, never()).send(eq("orders.commands"), any(), any());
+        assertThat(timerCount("emporia.strategy.decision", "strategy", "smart",
+                "outcome", "noop")).isEqualTo(1);
     }
 
     @Test
@@ -449,6 +472,11 @@ class ExecutionEventConsumerTest {
                 order.ownerSubject(), order.deskId(), type, order.version(), order.status(),
                 Instant.parse("2026-07-26T00:00:00Z"), objectMapper.writeValueAsString(order)
         );
+    }
+
+    private long timerCount(String name, String... tags) {
+        return meters.find(name).tags(tags).timer() == null
+                ? 0 : meters.find(name).tags(tags).timer().count();
     }
 
     private static OrderView order(String destination, UUID parentId, OrderStatus status) {

@@ -13,6 +13,8 @@ import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.OrderEventRepository;
 import com.emporia.ordermanagement.repository.ProcessedCommandRepository;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
@@ -20,6 +22,7 @@ import tools.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import static com.emporia.events.TradingEvents.SCHEMA_VERSION;
@@ -31,34 +34,61 @@ public class OrderCommandHandler {
     private final OrderEventRepository events;
     private final ProcessedCommandRepository processed;
     private final ObjectMapper objectMapper;
+    private final ObservationRegistry observations;
 
     public OrderCommandHandler(TradingOrderRepository orders, OrderEventRepository events,
-                        ProcessedCommandRepository processed, ObjectMapper objectMapper) {
+                        ProcessedCommandRepository processed, ObjectMapper objectMapper,
+                        ObservationRegistry observations) {
         this.orders = orders; this.events = events; this.processed = processed; this.objectMapper = objectMapper;
+        this.observations = observations;
     }
 
+    /**
+     * Records {@code emporia.oms.command.handle} over the whole transactional
+     * unit, deliberately including the idempotency lookup and the flush, since
+     * database time is one of the things Phase 1_1 must attribute.
+     */
     @Transactional
     public ProcessingOutcome handle(OrderCommand command) {
-        ProcessedCommand cached = processed.findById(command.commandId()).orElse(null);
-        if (cached != null) {
-            return new ProcessingOutcome(cached.result(), events.findByCommandIdOrderByOccurredAtAsc(command.commandId())
-                    .stream().map(OrderEvent::domainEvent).toList());
-        }
-
+        Observation observation = Observation.createNotStarted("emporia.oms.command.handle", observations)
+                .lowCardinalityKeyValue("command_type", commandTypeTag(command))
+                .start();
+        String outcome = "success";
         try {
-            require(command.schemaVersion() == SCHEMA_VERSION, 400, "Unsupported order command schema version");
-            return switch (command.commandType()) {
-                case CREATE -> create(command);
-                case MODIFY -> modify(command);
-                case CANCEL -> cancel(command);
-                case CANCEL_ALL -> cancelAll(command);
-            };
-        } catch (DomainProblem problem) {
-            OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), false,
-                    problem.status, problem.getMessage(), null);
-            processed.save(new ProcessedCommand(result));
-            return new ProcessingOutcome(result, List.of());
+            ProcessedCommand cached = processed.findById(command.commandId()).orElse(null);
+            if (cached != null) {
+                outcome = "duplicate";
+                return new ProcessingOutcome(cached.result(), events.findByCommandIdOrderByOccurredAtAsc(command.commandId())
+                        .stream().map(OrderEvent::domainEvent).toList());
+            }
+
+            try {
+                require(command.schemaVersion() == SCHEMA_VERSION, 400, "Unsupported order command schema version");
+                return switch (command.commandType()) {
+                    case CREATE -> create(command);
+                    case MODIFY -> modify(command);
+                    case CANCEL -> cancel(command);
+                    case CANCEL_ALL -> cancelAll(command);
+                };
+            } catch (DomainProblem problem) {
+                outcome = "rejected";
+                OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), false,
+                        problem.status, problem.getMessage(), null);
+                processed.save(new ProcessedCommand(result));
+                return new ProcessingOutcome(result, List.of());
+            }
+        } catch (RuntimeException exception) {
+            outcome = "error";
+            observation.error(exception);
+            throw exception;
+        } finally {
+            observation.lowCardinalityKeyValue("outcome", outcome).stop();
         }
+    }
+
+    private static String commandTypeTag(OrderCommand command) {
+        return command.commandType() == null ? "none"
+                : command.commandType().name().toLowerCase(Locale.ROOT);
     }
 
     private ProcessingOutcome create(OrderCommand command) {
@@ -66,8 +96,9 @@ public class OrderCommandHandler {
                 && command.orderType() != null, 400, "Create command is incomplete");
         require(!orders.existsById(command.orderId()), 409, "Order already exists");
         String deskId = desk(command);
-        validateQuantity(command.quantity(), command.listing().sizeIncrement(), BigDecimal.ZERO);
-        BigDecimal price = validatePrice(command.orderType(), command.limitPrice(), command.listing().tickSize());
+        BigDecimal price = checkOrderRisk(command.orderType(), command.quantity(),
+                command.listing().sizeIncrement(), BigDecimal.ZERO,
+                command.limitPrice(), command.listing().tickSize());
         TradingOrder parent = command.parentOrderId() == null ? null : findOnDesk(deskId, command.parentOrderId());
         if (parent != null) {
             requireCancellable(parent);
@@ -91,8 +122,9 @@ public class OrderCommandHandler {
                 "SMART and VWAP strategy orders do not support modification; cancel and replace the order");
         require(command.expectedVersion() != null && order.getVersion().equals(command.expectedVersion()), 409,
                 "Order changed since it was loaded; refresh before modifying it");
-        validateQuantity(command.quantity(), order.getListing().getSizeIncrement(), order.getTradedQuantity());
-        BigDecimal price = validatePrice(order.getType(), command.limitPrice(), order.getListing().getTickSize());
+        BigDecimal price = checkOrderRisk(order.getType(), command.quantity(),
+                order.getListing().getSizeIncrement(), order.getTradedQuantity(),
+                command.limitPrice(), order.getListing().getTickSize());
         order.modify(command.quantity(), price);
         orders.saveAndFlush(order);
         return success(command, order, "MODIFIED", "Quantity or price changed", 200);
@@ -169,6 +201,42 @@ public class OrderCommandHandler {
 
     private void requireCancellable(TradingOrder order) {
         require(CANCELLABLE.contains(order.getStatus()), 409, "Only live or partially filled orders can be changed");
+    }
+
+    /**
+     * The quantity/price half of {@code emporia.risk.check}; the permission half
+     * lives in order-command-service. There is no risk service yet, so this is
+     * the de-facto pre-trade gate and gives Phase 3 a baseline to compare against.
+     *
+     * <p>Phase 1_1 fixes the {@code reason} vocabulary, which has no "price"
+     * value, so a tick-size rejection is reported as {@code symbol} — it is an
+     * instrument-level rule.
+     */
+    private BigDecimal checkOrderRisk(OrderType type, BigDecimal quantity, BigDecimal increment,
+                                      BigDecimal traded, BigDecimal price, BigDecimal tickSize) {
+        Observation observation = Observation.createNotStarted("emporia.risk.check", observations).start();
+        String decision = "allow";
+        String reason = "ok";
+        try {
+            try {
+                validateQuantity(quantity, increment, traded);
+            } catch (DomainProblem problem) {
+                decision = "deny";
+                reason = "quantity";
+                throw problem;
+            }
+            try {
+                return validatePrice(type, price, tickSize);
+            } catch (DomainProblem problem) {
+                decision = "deny";
+                reason = "symbol";
+                throw problem;
+            }
+        } finally {
+            observation.lowCardinalityKeyValue("decision", decision)
+                    .lowCardinalityKeyValue("reason", reason)
+                    .stop();
+        }
     }
 
     private void validateQuantity(BigDecimal quantity, BigDecimal increment, BigDecimal traded) {

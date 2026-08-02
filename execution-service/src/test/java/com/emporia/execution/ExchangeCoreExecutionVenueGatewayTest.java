@@ -20,6 +20,7 @@ import exchange.core2.core.simulation.ProductionSimulationResult;
 import exchange.core2.core.simulation.SimulationOperation;
 import org.junit.jupiter.api.Test;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.observation.ObservationRegistry;
 
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -435,7 +436,7 @@ class ExchangeCoreExecutionVenueGatewayTest {
         private final ArrayDeque<Cancellation> cancellations = new ArrayDeque<>();
 
         private RecordingCommands() {
-            super(null, "executions", new SimpleMeterRegistry());
+            super(null, "executions", new SimpleMeterRegistry(), ObservationRegistry.NOOP);
         }
 
         @Override

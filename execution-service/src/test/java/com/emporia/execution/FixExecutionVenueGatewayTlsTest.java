@@ -6,6 +6,7 @@ import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.events.TradingEvents.OrderView;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -138,7 +139,7 @@ class FixExecutionVenueGatewayTlsTest {
 
     private static final class RecordingCommands extends ExecutionCommandPublisher {
         private RecordingCommands() {
-            super(null, "executions", new SimpleMeterRegistry());
+            super(null, "executions", new SimpleMeterRegistry(), ObservationRegistry.NOOP);
         }
     }
 }

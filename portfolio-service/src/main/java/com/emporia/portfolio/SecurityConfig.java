@@ -22,7 +22,8 @@ class SecurityConfig {
                         .permitAll()
                         .requestMatchers(
                                 "/actuator/health",
-                                "/actuator/health/**")
+                                "/actuator/health/**",
+                                "/actuator/prometheus")
                         .permitAll()
                         // Internal endpoints are called by exchange-core via the
                         // execution-service bearer token. Any authenticated caller

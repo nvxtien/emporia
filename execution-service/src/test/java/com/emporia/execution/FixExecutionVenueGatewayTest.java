@@ -6,6 +6,7 @@ import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.events.TradingEvents.OrderView;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -380,7 +381,7 @@ class FixExecutionVenueGatewayTest {
         private final Queue<UUID> cancellations = new ArrayDeque<>();
 
         private RecordingCommands() {
-            super(null, "executions", new SimpleMeterRegistry());
+            super(null, "executions", new SimpleMeterRegistry(), ObservationRegistry.NOOP);
         }
 
         @Override

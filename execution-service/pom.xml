@@ -9,6 +9,7 @@
     </parent>
     <artifactId>execution-service</artifactId>
     <dependencies>
+        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-opentelemetry</artifactId></dependency>
         <dependency><groupId>com.emporia</groupId><artifactId>trading-contracts</artifactId><version>${project.version}</version></dependency>
         <dependency>
             <groupId>exchange.core2</groupId>
@@ -26,6 +27,12 @@
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-kafka</artifactId></dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-actuator</artifactId></dependency>
         <dependency><groupId>io.micrometer</groupId><artifactId>micrometer-registry-prometheus</artifactId></dependency>
+        <!-- 2.x required: the 1.x line does not start on Spring Boot 4 -->
+        <dependency>
+            <groupId>net.ttddyy.observation</groupId>
+            <artifactId>datasource-micrometer-spring-boot</artifactId>
+            <version>${datasource-micrometer.version}</version>
+        </dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-jdbc</artifactId></dependency>
         <dependency>
             <groupId>org.postgresql</groupId>

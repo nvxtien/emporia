@@ -21,6 +21,14 @@
         <maven-pmd-plugin.version>3.28.0</maven-pmd-plugin.version>
         <pmd.version>7.26.0</pmd.version>
         <pmd.failOnViolation>true</pmd.failOnViolation>
+        <!--
+          JDBC observation instrumentation, not managed by the Spring Boot BOM.
+          Must stay on the 2.x line: 1.x fails to start on Spring Boot 4 with
+          NoClassDefFoundError on ObservationRegistryCustomizer, which Boot 4
+          repackaged. Note that the search.maven.org API reports a stale latest
+          version for this artifact; repo1 maven-metadata.xml is authoritative.
+        -->
+        <datasource-micrometer.version>2.2.1</datasource-micrometer.version>
     </properties>
 
     <modules>
@@ -98,7 +106,7 @@
                 <configuration>
                     <targetJdk>${java.version}</targetJdk>
                     <rulesets>
-                        <ruleset>static-analysis/ruleset.xml</ruleset>
+                        <ruleset>${project.parent.basedir}/static-analysis/ruleset.xml</ruleset>
                     </rulesets>
                     <includeTests>false</includeTests>
                     <linkXRef>false</linkXRef>

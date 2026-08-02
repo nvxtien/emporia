@@ -734,7 +734,8 @@ class TradingOrderPropertyTest {
                     }
             );
 
-            handler = new OrderCommandHandler(orders, events, processed, new ObjectMapper());
+            handler = new OrderCommandHandler(orders, events, processed, new ObjectMapper(),
+                    io.micrometer.observation.ObservationRegistry.NOOP);
         }
 
         private static <T> T repository(Class<T> repositoryType, RepositoryMethod method) {
