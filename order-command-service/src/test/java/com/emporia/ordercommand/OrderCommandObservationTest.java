@@ -56,7 +56,7 @@ class OrderCommandObservationTest {
         when(staticData.get(1L, "Bearer token")).thenReturn(listing);
         when(commands.send(any())).thenReturn(objectMapper.writeValueAsString(view(listing)));
 
-        controller.create(jwt(true), "Bearer token", request("SMART"));
+        controller.create(jwt(true), "Bearer token", "idem-key", request("SMART"));
 
         assertThat(timerCount("emporia.order.submit", "operation", "create", "destination", "smart",
                 "outcome", "success")).isEqualTo(1);
@@ -65,7 +65,7 @@ class OrderCommandObservationTest {
 
     @Test
     void recordsDeniedRiskCheckAndRejectedSubmitWhenPermissionIsMissing() {
-        assertThatThrownBy(() -> controller.create(jwt(false), "Bearer token", request("DMA")))
+        assertThatThrownBy(() -> controller.create(jwt(false), "Bearer token", "idem-key", request("DMA")))
                 .isInstanceOf(ResponseStatusException.class);
 
         assertThat(timerCount("emporia.risk.check", "decision", "deny", "reason", "permission")).isEqualTo(1);
@@ -79,7 +79,7 @@ class OrderCommandObservationTest {
         when(commands.send(any())).thenThrow(
                 new ResponseStatusException(HttpStatus.GATEWAY_TIMEOUT, "no answer"));
 
-        assertThatThrownBy(() -> controller.create(jwt(true), "Bearer token", request("DMA")))
+        assertThatThrownBy(() -> controller.create(jwt(true), "Bearer token", "idem-key", request("DMA")))
                 .isInstanceOf(ResponseStatusException.class);
 
         assertThat(timerCount("emporia.order.submit", "operation", "create", "destination", "dma",
@@ -90,7 +90,7 @@ class OrderCommandObservationTest {
     void tagsAnUnknownDestinationAsNoneRatherThanFailingToRecord() {
         when(staticData.get(1L, "Bearer token")).thenReturn(listing());
 
-        assertThatThrownBy(() -> controller.create(jwt(true), "Bearer token", request("ICEBERG")))
+        assertThatThrownBy(() -> controller.create(jwt(true), "Bearer token", "idem-key", request("ICEBERG")))
                 .isInstanceOf(IllegalArgumentException.class);
 
         assertThat(timerCount("emporia.order.submit", "operation", "create", "destination", "none",
@@ -101,7 +101,7 @@ class OrderCommandObservationTest {
     void tagsCancelAllWithoutADestination() throws Exception {
         when(commands.send(any())).thenReturn(objectMapper.writeValueAsString(new CancelAllView(0)));
 
-        controller.cancelAll(jwt(true));
+        controller.cancelAll(jwt(true), "idem-key");
 
         assertThat(timerCount("emporia.order.submit", "operation", "cancel_all", "destination", "none",
                 "outcome", "success")).isEqualTo(1);

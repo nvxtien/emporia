@@ -53,6 +53,7 @@ submitted_at=$(date +%s)
 order_response="$(curl -fsS -X POST "${GATEWAY_URL}/api/orders" \
     -H "Authorization: Bearer ${access_token}" \
     -H "Content-Type: application/json" \
+    -H "Idempotency-Key: trace-smoke-$(date +%s)-$$" \
     -d "{\"listingId\":${LISTING_ID},\"side\":\"BUY\",\"type\":\"LIMIT\",\"quantity\":10,\"limitPrice\":100.00,\"destination\":\"DMA\"}")" \
     || fail "order submission failed"
 

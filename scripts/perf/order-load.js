@@ -76,6 +76,15 @@ function submitOrder() {
             headers: {
                 Authorization: `Bearer ${TOKEN}`,
                 'Content-Type': 'application/json',
+                // Required by the API. Each submission is a distinct intent, so
+                // each gets its own key; reusing one would make every order
+                // after the first a deduplicated no-op and the load test would
+                // silently measure nothing.
+                //
+                // Deliberately not __VU/__ITER: those are undefined in setup(),
+                // where the warmup order is submitted, and referencing them
+                // there aborts the whole run.
+                'Idempotency-Key': `k6-${Date.now()}-${Math.random().toString(36).slice(2)}`,
             },
             tags: { name: 'POST /api/orders' },
             timeout: '30s',

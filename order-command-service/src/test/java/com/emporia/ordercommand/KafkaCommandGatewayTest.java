@@ -3,6 +3,7 @@ package com.emporia.ordercommand;
 import com.emporia.events.TradingEvents.CommandType;
 import com.emporia.events.TradingEvents.OrderCommand;
 import com.emporia.events.TradingEvents.OrderCommandResult;
+import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
@@ -11,6 +12,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -21,15 +23,21 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class KafkaCommandGatewayTest {
     private final KafkaTemplate<String, Object> kafka = mock(KafkaTemplate.class);
+    private final ReplyListenerReadiness readiness = new ReplyListenerReadiness();
     private KafkaCommandGateway gateway;
 
     @BeforeEach
     void setUp() {
-        gateway = new KafkaCommandGateway(kafka, "emporia.commands", Duration.ofMillis(200));
+        gateway = new KafkaCommandGateway(kafka, "emporia.commands", Duration.ofMillis(200), readiness);
+        // Every existing test assumes the reply path is usable; the readiness
+        // gate itself is exercised separately below.
+        readiness.markAssigned();
     }
 
     @Test
@@ -100,6 +108,42 @@ class KafkaCommandGatewayTest {
         assertThatThrownBy(() -> gateway.send(command))
                 .isInstanceOf(ResponseStatusException.class)
                 .hasMessageContaining("interrupted");
+    }
+
+    @Test
+    void refusesToSendBeforePartitionsAreAssigned() {
+        readiness.markRevoked();
+
+        assertThatThrownBy(() -> gateway.send(command()))
+                .isInstanceOf(ResponseStatusException.class)
+                .extracting(e -> ((ResponseStatusException) e).getStatusCode())
+                .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+
+        // The important half: publishing and *then* failing would create a real
+        // order whose reply can never be read, which is the 504 this gate
+        // exists to prevent.
+        verify(kafka, never()).send(anyString(), anyString(), any());
+    }
+
+    @Test
+    void partitionAssignmentOpensAndRevocationClosesTheGate() {
+        readiness.markRevoked();
+        assertThat(readiness.ready()).isFalse();
+
+        gateway.onPartitionsAssigned(Map.of(new TopicPartition("emporia.order.results.v1", 0), 0L), null);
+        assertThat(readiness.ready()).isTrue();
+
+        gateway.onPartitionsRevoked(List.of(new TopicPartition("emporia.order.results.v1", 0)));
+        assertThat(readiness.ready()).isFalse();
+    }
+
+    @Test
+    void emptyAssignmentDoesNotOpenTheGate() {
+        readiness.markRevoked();
+
+        gateway.onPartitionsAssigned(Map.of(), null);
+
+        assertThat(readiness.ready()).isFalse();
     }
 
     private static OrderCommand command() {

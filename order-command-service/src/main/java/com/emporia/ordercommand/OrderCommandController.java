@@ -29,6 +29,7 @@ import org.springframework.web.server.ResponseStatusException;
 import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Locale;
 import java.util.Map;
@@ -42,6 +43,13 @@ import static com.emporia.events.TradingEvents.SCHEMA_VERSION;
 @RequestMapping("/orders")
 class OrderCommandController {
     private static final Set<String> DESTINATIONS = Set.of("DMA", "SMART", "VWAP");
+    /**
+     * Required on every mutating endpoint. A submit can time out while the order
+     * is in fact created, so a caller must be able to retry without risking a
+     * duplicate; that is only possible if the retry is recognisable.
+     */
+    static final String IDEMPOTENCY_KEY = "Idempotency-Key";
+    private static final int MAX_IDEMPOTENCY_KEY_LENGTH = 200;
     private final StaticDataClient staticData;
     private final KafkaCommandGateway commands;
     private final ObjectMapper objectMapper;
@@ -59,13 +67,15 @@ class OrderCommandController {
     @ResponseStatus(HttpStatus.CREATED)
     OrderView create(@AuthenticationPrincipal Jwt jwt,
                      @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization,
+                     @RequestHeader(IDEMPOTENCY_KEY) String idempotencyKey,
                      @Valid @RequestBody CreateOrderRequest request) {
         UUID orderId = UUID.randomUUID();
+        UUID commandId = commandId(idempotencyKey, jwt);
         return submit("create", destinationTag(request.destination()), orderId, () -> {
             requireTrader(jwt);
             ListingSnapshot listing = staticData.get(request.listingId(), authorization);
             String destination = normalizeDestination(request.destination());
-            OrderCommand command = new OrderCommand(SCHEMA_VERSION, UUID.randomUUID(), CommandType.CREATE,
+            OrderCommand command = new OrderCommand(SCHEMA_VERSION, commandId, CommandType.CREATE,
                     jwt.getSubject(), desk(jwt), Instant.now(), orderId, null, listing, request.side(), request.type(),
                     request.quantity(), request.limitPrice(), destination,
                     request.originatorReference() == null || request.originatorReference().isBlank()
@@ -77,10 +87,12 @@ class OrderCommandController {
 
     @PutMapping("/{orderId}")
     OrderView modify(@AuthenticationPrincipal Jwt jwt, @PathVariable UUID orderId,
+                     @RequestHeader(IDEMPOTENCY_KEY) String idempotencyKey,
                      @Valid @RequestBody ModifyOrderRequest request) {
+        UUID commandId = commandId(idempotencyKey, jwt);
         return submit("modify", "none", orderId, () -> {
             requireTrader(jwt);
-            OrderCommand command = new OrderCommand(SCHEMA_VERSION, UUID.randomUUID(), CommandType.MODIFY,
+            OrderCommand command = new OrderCommand(SCHEMA_VERSION, commandId, CommandType.MODIFY,
                     jwt.getSubject(), desk(jwt), Instant.now(), orderId, request.expectedVersion(), null, null, null,
                     request.quantity(), request.limitPrice(), null, null, null, Map.of());
             return read(commands.send(command), OrderView.class);
@@ -88,10 +100,12 @@ class OrderCommandController {
     }
 
     @PostMapping("/{orderId}/cancel")
-    OrderView cancel(@AuthenticationPrincipal Jwt jwt, @PathVariable UUID orderId) {
+    OrderView cancel(@AuthenticationPrincipal Jwt jwt, @PathVariable UUID orderId,
+                     @RequestHeader(IDEMPOTENCY_KEY) String idempotencyKey) {
+        UUID commandId = commandId(idempotencyKey, jwt);
         return submit("cancel", "none", orderId, () -> {
             requireTrader(jwt);
-            OrderCommand command = new OrderCommand(SCHEMA_VERSION, UUID.randomUUID(), CommandType.CANCEL,
+            OrderCommand command = new OrderCommand(SCHEMA_VERSION, commandId, CommandType.CANCEL,
                     jwt.getSubject(), desk(jwt), Instant.now(), orderId, null, null, null, null,
                     null, null, null, null, null, Map.of());
             return read(commands.send(command), OrderView.class);
@@ -99,14 +113,48 @@ class OrderCommandController {
     }
 
     @PostMapping("/cancel-all")
-    CancelAllView cancelAll(@AuthenticationPrincipal Jwt jwt) {
+    CancelAllView cancelAll(@AuthenticationPrincipal Jwt jwt,
+                            @RequestHeader(IDEMPOTENCY_KEY) String idempotencyKey) {
+        UUID commandId = commandId(idempotencyKey, jwt);
         return submit("cancel_all", "none", null, () -> {
             requireTrader(jwt);
-            OrderCommand command = new OrderCommand(SCHEMA_VERSION, UUID.randomUUID(), CommandType.CANCEL_ALL,
+            OrderCommand command = new OrderCommand(SCHEMA_VERSION, commandId, CommandType.CANCEL_ALL,
                     jwt.getSubject(), desk(jwt), Instant.now(), null, null, null, null, null,
                     null, null, null, null, null, Map.of());
             return read(commands.send(command), CancelAllView.class);
         });
+    }
+
+    /**
+     * Derives the command id from the caller's idempotency key so that a retry
+     * is deduplicated instead of creating a second order.
+     *
+     * <p>order-management-service already returns the cached result for a
+     * {@code commandId} it has seen before. That protection was unreachable
+     * while this method generated a random id per HTTP request: a client that
+     * retried after a timeout presented a new id every time and got a duplicate
+     * order. Deriving the id from a caller-supplied key is what makes the
+     * existing deduplication actually apply.
+     *
+     * <p>Keys are scoped by subject so two users cannot collide, and prefixed so
+     * the derivation can be changed later without silently reusing old ids.
+     *
+     * <p>On a retry the handler returns before reaching {@code create()}, so the
+     * freshly generated {@code orderId} is discarded and the caller receives the
+     * original order.
+     */
+    private UUID commandId(String idempotencyKey, Jwt jwt) {
+        String key = idempotencyKey == null ? "" : idempotencyKey.strip();
+        if (key.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "The " + IDEMPOTENCY_KEY + " header is required so that a retry cannot create a duplicate order");
+        }
+        if (key.length() > MAX_IDEMPOTENCY_KEY_LENGTH) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    IDEMPOTENCY_KEY + " must be at most " + MAX_IDEMPOTENCY_KEY_LENGTH + " characters");
+        }
+        byte[] scoped = ("emporia-v1:" + jwt.getSubject() + ':' + key).getBytes(StandardCharsets.UTF_8);
+        return UUID.nameUUIDFromBytes(scoped);
     }
 
     /**

@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 
 const origin = process.env.EMPORIA_ORIGIN ?? 'http://localhost:3000'
 const username = process.env.EMPORIA_USERNAME
@@ -147,7 +147,7 @@ try {
 
   const placeOrder = (overrides = {}) => fetch(`${origin}/api/orders`, {
     method: 'POST',
-    headers: { ...apiHeaders, 'Content-Type': 'application/json' },
+    headers: { ...apiHeaders, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
     body: JSON.stringify({
       listingId: 1,
       side: 'BUY',
@@ -185,7 +185,7 @@ try {
 
   const cancelResponse = await fetch(`${origin}/api/orders/${createdOrder.id}/cancel`, {
     method: 'POST',
-    headers: apiHeaders,
+    headers: { ...apiHeaders, 'Idempotency-Key': randomUUID() },
   })
   if (!cancelResponse.ok) throw new Error(`Kafka order cancel returned HTTP ${cancelResponse.status}`)
   const pendingCancel = await cancelResponse.json()

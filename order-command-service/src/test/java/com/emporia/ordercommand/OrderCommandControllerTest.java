@@ -15,6 +15,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 import tools.jackson.databind.ObjectMapper;
 
@@ -50,6 +51,52 @@ class OrderCommandControllerTest {
     }
 
     @Test
+    void theSameIdempotencyKeyProducesTheSameCommandId() throws Exception {
+        Jwt jwt = jwt("trader-1", true, "DESK-A");
+        ListingSnapshot listing = listing();
+        when(staticData.get(1L, "Bearer token")).thenReturn(listing);
+        when(commands.send(any())).thenReturn(objectMapper.writeValueAsString(
+                sampleOrderView(UUID.randomUUID(), listing, OrderStatus.LIVE)));
+
+        controller.create(jwt, "Bearer token", "key-1", createRequest());
+        controller.create(jwt, "Bearer token", "key-1", createRequest());
+
+        ArgumentCaptor<OrderCommand> sent = ArgumentCaptor.forClass(OrderCommand.class);
+        verify(commands, org.mockito.Mockito.times(2)).send(sent.capture());
+        // Equal command ids are the whole point: order-management-service
+        // deduplicates on this, so a retry returns the original order instead
+        // of creating a second one.
+        assertThat(sent.getAllValues().get(0).commandId())
+                .isEqualTo(sent.getAllValues().get(1).commandId());
+    }
+
+    @Test
+    void differentUsersWithTheSameKeyDoNotCollide() throws Exception {
+        ListingSnapshot listing = listing();
+        when(staticData.get(1L, "Bearer token")).thenReturn(listing);
+        when(commands.send(any())).thenReturn(objectMapper.writeValueAsString(
+                sampleOrderView(UUID.randomUUID(), listing, OrderStatus.LIVE)));
+
+        controller.create(jwt("trader-1", true, "DESK-A"), "Bearer token", "key-1", createRequest());
+        controller.create(jwt("trader-2", true, "DESK-A"), "Bearer token", "key-1", createRequest());
+
+        ArgumentCaptor<OrderCommand> sent = ArgumentCaptor.forClass(OrderCommand.class);
+        verify(commands, org.mockito.Mockito.times(2)).send(sent.capture());
+        assertThat(sent.getAllValues().get(0).commandId())
+                .isNotEqualTo(sent.getAllValues().get(1).commandId());
+    }
+
+    @Test
+    void rejectsABlankIdempotencyKey() {
+        Jwt jwt = jwt("trader-1", true, "DESK-A");
+
+        assertThatThrownBy(() -> controller.create(jwt, "Bearer token", "   ", createRequest()))
+                .isInstanceOf(ResponseStatusException.class)
+                .extracting(e -> ((ResponseStatusException) e).getStatusCode())
+                .isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    @Test
     void createOrderSuccess() throws Exception {
         Jwt jwt = jwt("trader-1", true, "DESK-A");
         ListingSnapshot listing = listing();
@@ -63,7 +110,7 @@ class OrderCommandControllerTest {
                 1L, OrderSide.BUY, OrderType.LIMIT, new BigDecimal("100"), new BigDecimal("150.00"),
                 "DMA", "ref-123", null, Map.of());
 
-        OrderView result = controller.create(jwt, "Bearer token", request);
+        OrderView result = controller.create(jwt, "Bearer token", "idem-key", request);
         assertThat(result).isNotNull();
 
         ArgumentCaptor<OrderCommand> captor = ArgumentCaptor.forClass(OrderCommand.class);
@@ -88,7 +135,7 @@ class OrderCommandControllerTest {
                 1L, OrderSide.SELL, OrderType.MARKET, new BigDecimal("50"), null,
                 null, null, null, null);
 
-        OrderView result = controller.create(jwt, "Bearer token", request);
+        OrderView result = controller.create(jwt, "Bearer token", "idem-key", request);
         assertThat(result).isNotNull();
 
         ArgumentCaptor<OrderCommand> captor = ArgumentCaptor.forClass(OrderCommand.class);
@@ -106,7 +153,7 @@ class OrderCommandControllerTest {
                 1L, OrderSide.BUY, OrderType.LIMIT, new BigDecimal("10"), new BigDecimal("100"),
                 "DMA", "ref", null, null);
 
-        assertThatThrownBy(() -> controller.create(jwt, "Bearer token", request))
+        assertThatThrownBy(() -> controller.create(jwt, "Bearer token", "idem-key", request))
                 .isInstanceOf(ResponseStatusException.class)
                 .hasMessageContaining("Trading permission is required");
     }
@@ -120,7 +167,7 @@ class OrderCommandControllerTest {
                 1L, OrderSide.BUY, OrderType.LIMIT, new BigDecimal("10"), new BigDecimal("100"),
                 "INVALID_DEST", "ref", null, null);
 
-        assertThatThrownBy(() -> controller.create(jwt, "Bearer token", request))
+        assertThatThrownBy(() -> controller.create(jwt, "Bearer token", "idem-key", request))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Destination must be DMA, SMART, or VWAP");
     }
@@ -135,7 +182,7 @@ class OrderCommandControllerTest {
                 1L, OrderSide.BUY, OrderType.LIMIT, new BigDecimal("10"), new BigDecimal("100"),
                 "DMA", "ref", null, null);
 
-        assertThatThrownBy(() -> controller.create(jwt, "Bearer token", request))
+        assertThatThrownBy(() -> controller.create(jwt, "Bearer token", "idem-key", request))
                 .isInstanceOf(ResponseStatusException.class)
                 .hasMessageContaining("Order processor returned invalid JSON");
     }
@@ -150,7 +197,7 @@ class OrderCommandControllerTest {
         OrderCommandController.ModifyOrderRequest request = new OrderCommandController.ModifyOrderRequest(
                 1L, new BigDecimal("200"), new BigDecimal("155.00"));
 
-        OrderView result = controller.modify(jwt, orderId, request);
+        OrderView result = controller.modify(jwt, orderId, "idem-key", request);
         assertThat(result).isNotNull();
     }
 
@@ -161,7 +208,7 @@ class OrderCommandControllerTest {
         OrderView view = sampleOrderView(orderId, listing(), OrderStatus.CANCELLED);
         when(commands.send(any())).thenReturn(objectMapper.writeValueAsString(view));
 
-        OrderView result = controller.cancel(jwt, orderId);
+        OrderView result = controller.cancel(jwt, orderId, "idem-key");
         assertThat(result).isNotNull();
         assertThat(result.status()).isEqualTo(OrderStatus.CANCELLED);
     }
@@ -172,7 +219,7 @@ class OrderCommandControllerTest {
         CancelAllView view = new CancelAllView(2);
         when(commands.send(any())).thenReturn(objectMapper.writeValueAsString(view));
 
-        CancelAllView result = controller.cancelAll(jwt);
+        CancelAllView result = controller.cancelAll(jwt, "idem-key");
         assertThat(result).isNotNull();
         assertThat(result.cancelled()).isEqualTo(2);
     }
@@ -196,5 +243,11 @@ class OrderCommandControllerTest {
                 new BigDecimal("100"), new BigDecimal("150.00"), new BigDecimal("100"), BigDecimal.ZERO,
                 BigDecimal.ZERO, status, status, "DMA", "ref-1", null, id, null, null,
                 Instant.now(), Instant.now());
+    }
+
+    private static OrderCommandController.CreateOrderRequest createRequest() {
+        return new OrderCommandController.CreateOrderRequest(
+                1L, OrderSide.BUY, OrderType.LIMIT, new BigDecimal("100"), new BigDecimal("150.00"),
+                "DMA", "ref-123", null, Map.of());
     }
 }
