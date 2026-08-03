@@ -36,6 +36,7 @@ class AlpacaReferenceDataImporter implements ApplicationRunner {
 
     AlpacaReferenceDataImporter(
             JdbcTemplate jdbc,
+            RestClient.Builder builder,
             @Value("${emporia.static-data.alpaca-api-endpoint}") String endpoint,
             @Value("${emporia.static-data.alpaca-api-key-id}") String apiKey,
             @Value("${emporia.static-data.alpaca-api-secret-key}") String apiSecret,
@@ -46,7 +47,9 @@ class AlpacaReferenceDataImporter implements ApplicationRunner {
                     "Alpaca reference-data import requires APCA_API_KEY_ID and APCA_API_SECRET_KEY");
         }
         this.jdbc = jdbc;
-        this.alpaca = RestClient.builder()
+        // Injected, not RestClient.builder(): only the auto-configured builder carries
+        // ObservationRestClientCustomizer, so a static one emits no client metrics or spans.
+        this.alpaca = builder
                 .baseUrl(endpoint)
                 .defaultHeader("APCA-API-KEY-ID", apiKey)
                 .defaultHeader("APCA-API-SECRET-KEY", apiSecret)

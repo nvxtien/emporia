@@ -9,6 +9,7 @@ import java.util.Base64;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import org.springframework.web.client.RestClient;
 
 class ServiceAccessTokenProviderTest {
 
@@ -30,6 +31,7 @@ class ServiceAccessTokenProviderTest {
         server.start();
         try {
             ServiceAccessTokenProvider provider = new ServiceAccessTokenProvider(
+                    RestClient.builder(),
                     "http://localhost:" + server.getAddress().getPort() + "/oauth2/token",
                     "market-data", "secret");
 

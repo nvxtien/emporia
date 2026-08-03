@@ -8,7 +8,6 @@ import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
-import org.springframework.web.util.UriComponentsBuilder;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -43,10 +42,12 @@ class TradingDataClient {
     List<MarketQuote> quotes(List<Long> listingIds) {
         if (listingIds.isEmpty()) return List.of();
         String ids = listingIds.stream().map(String::valueOf).collect(java.util.stream.Collectors.joining(","));
-        String uri = UriComponentsBuilder.fromPath("/market-data/quotes")
-                .queryParam("listingIds", ids).build().toUriString();
+        // Passed as a template with a variable, not a pre-built string. The
+        // client observation records the `uri` tag from the template, so
+        // building the full URL here would tag every distinct listing-id
+        // combination separately - unbounded metric cardinality on a hot path.
         List<MarketQuote> result = marketData.get()
-                .uri(uri)
+                .uri("/market-data/quotes?listingIds={listingIds}", ids)
                 .header(HttpHeaders.AUTHORIZATION, tokens.authorization())
                 .retrieve()
                 .body(new ParameterizedTypeReference<>() { });

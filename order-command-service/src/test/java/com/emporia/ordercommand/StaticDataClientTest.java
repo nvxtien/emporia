@@ -51,7 +51,11 @@ class StaticDataClientTest {
 
     @Test
     void baseUrlConstructorInstantiation() {
-        StaticDataClient directClient = new StaticDataClient("http://localhost:8081");
+        // Takes the injected builder now: a statically created one skips
+        // ObservationRestClientCustomizer, so the client emits no
+        // http_client_requests metrics and no client spans.
+        StaticDataClient directClient =
+                new StaticDataClient(RestClient.builder(), "http://localhost:8081");
         assertThat(directClient).isNotNull();
     }
 }

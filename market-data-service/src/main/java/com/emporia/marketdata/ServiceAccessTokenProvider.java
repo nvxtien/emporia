@@ -21,11 +21,14 @@ final class ServiceAccessTokenProvider {
     private final AtomicReference<CachedToken> cached = new AtomicReference<>();
 
     ServiceAccessTokenProvider(
+            RestClient.Builder builder,
             @Value("${emporia.market-data.service-auth.token-url}") String tokenUrl,
             @Value("${emporia.market-data.service-auth.client-id}") String clientId,
             @Value("${emporia.market-data.service-auth.client-secret}") String clientSecret
     ) {
-        this.tokenClient = RestClient.builder().baseUrl(tokenUrl).build();
+        // Injected, not RestClient.builder(): only the auto-configured builder carries
+        // ObservationRestClientCustomizer, so a static one emits no client metrics or spans.
+        this.tokenClient = builder.baseUrl(tokenUrl).build();
         this.clientId = clientId;
         this.clientSecret = clientSecret;
     }
