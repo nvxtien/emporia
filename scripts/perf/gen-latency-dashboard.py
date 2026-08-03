@@ -158,7 +158,8 @@ panels.append(timeseries(
          "not to downstream processing."))
 panels.append(timeseries(
     "Risk check latency by service", 15, 12, 12,
-    pct_targets("emporia_risk_check", ["service", "decision"], "{{service}} {{decision}}"),
+    pct_targets("emporia_risk_check", ["service", "decision", "reason"],
+                "{{service}} {{decision}}/{{reason}}"),
     desc="Grouped by service deliberately: emporia.risk.check is emitted by BOTH order-command-service "
          "(reason=permission) and order-management-service (reason=quantity|symbol). Without the service "
          "label two unrelated checks average into one line."))

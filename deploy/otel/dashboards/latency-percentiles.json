@@ -600,8 +600,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.5, sum by (le, service, decision) (rate(emporia_risk_check_seconds_bucket{deployment=~\"$deployment\", service=~\"$service\"}[$__rate_interval])))",
-          "legendFormat": "p50 {{service}} {{decision}}",
+          "expr": "histogram_quantile(0.5, sum by (le, service, decision, reason) (rate(emporia_risk_check_seconds_bucket{deployment=~\"$deployment\", service=~\"$service\"}[$__rate_interval])))",
+          "legendFormat": "p50 {{service}} {{decision}}/{{reason}}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -610,8 +610,8 @@
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le, service, decision) (rate(emporia_risk_check_seconds_bucket{deployment=~\"$deployment\", service=~\"$service\"}[$__rate_interval])))",
-          "legendFormat": "p95 {{service}} {{decision}}",
+          "expr": "histogram_quantile(0.95, sum by (le, service, decision, reason) (rate(emporia_risk_check_seconds_bucket{deployment=~\"$deployment\", service=~\"$service\"}[$__rate_interval])))",
+          "legendFormat": "p95 {{service}} {{decision}}/{{reason}}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -620,8 +620,8 @@
         },
         {
           "refId": "C",
-          "expr": "histogram_quantile(0.99, sum by (le, service, decision) (rate(emporia_risk_check_seconds_bucket{deployment=~\"$deployment\", service=~\"$service\"}[$__rate_interval])))",
-          "legendFormat": "p99 {{service}} {{decision}}",
+          "expr": "histogram_quantile(0.99, sum by (le, service, decision, reason) (rate(emporia_risk_check_seconds_bucket{deployment=~\"$deployment\", service=~\"$service\"}[$__rate_interval])))",
+          "legendFormat": "p99 {{service}} {{decision}}/{{reason}}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
