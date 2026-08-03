@@ -53,7 +53,22 @@
     </properties>
     <build>
         <plugins>
-            <plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <!-- The same flags surefire already uses via argLine. exchange-core matches
+                         orders through Chronicle Bytes, which reaches into sun.nio.ch.DirectBuffer
+                         and jdk.internal.misc.VM; on a modern JDK those are closed by default.
+                         They were declared for tests but never applied to the running
+                         application, so the engine passed its tests and then threw
+                         IllegalAccessError inside the matching engine at runtime. The order
+                         still returns 201 and rests as LIVE, so nothing surfaces through the
+                         API - it shows up only as fills that never happen and a portfolio path
+                         that never receives a snapshot. -->
+                    <jvmArguments>${exchange-core.jvm.args}</jvmArguments>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
 </project>

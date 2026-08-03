@@ -11,4 +11,9 @@ WORKDIR /app
 COPY --from=build --chown=app:app /workspace/target/emporia-gateway-*.jar application.jar
 USER app
 EXPOSE 8080
-ENTRYPOINT ["java", "-jar", "/app/application.jar"]
+# JAVA_OPTS lets a service pass JVM flags it cannot do without. execution-service
+# needs the Chronicle module-access flags (see its pom.xml): without them
+# exchange-core's matching engine throws IllegalAccessError and orders never
+# fill, while still returning 201 and resting as LIVE.
+ENV JAVA_OPTS=""
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/application.jar"]

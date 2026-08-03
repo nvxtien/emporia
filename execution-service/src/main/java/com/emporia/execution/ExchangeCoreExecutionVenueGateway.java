@@ -39,6 +39,7 @@ import java.math.RoundingMode;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -142,6 +143,16 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     private static ExchangeCoreVenue buildVenue(
             String exchangeId, Path storage, int partitions,
             ProductionSimulationAccounting accounting) throws IOException {
+        // exchange-core writes its snapshots straight into this directory and does
+        // not create it. Only ExchangeCoreCheckpointStore.save did, and that runs
+        // after the snapshot write has already failed.
+        //
+        // The failure mode is quiet and expensive: the directory lives under
+        // target/, so any mvn clean removes it, after which every order reaches
+        // the venue, fails to checkpoint, and comes back REJECTED. The service
+        // starts normally and the submit still returns 201, so it looks like a
+        // trading rejection rather than missing scratch space.
+        Files.createDirectories(storage);
         return new ProductionSimulationVenue(exchangeId, storage, partitions, accounting);
     }
 
