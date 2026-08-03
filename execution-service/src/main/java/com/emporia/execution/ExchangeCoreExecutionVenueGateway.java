@@ -66,6 +66,18 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     private final AtomicBoolean running = new AtomicBoolean();
     private final Set<Integer> symbols = ConcurrentHashMap.newKeySet();
     private final Map<Long, Correlation> correlations = new ConcurrentHashMap<>();
+    /**
+     * Onboarding future per client, so a client is imported exactly once.
+     *
+     * <p>Deliberately a map of futures rather than a {@code Set} guard: two
+     * orders from the same user can arrive concurrently, and a check-then-act
+     * guard would let the second proceed while the first is still importing —
+     * reaching the risk engine before the profile exists, which is the very
+     * failure this prevents. Both callers here await the same future.
+     */
+    private final Map<Long, CompletableFuture<Void>> onboarded = new ConcurrentHashMap<>();
+    /** Onboarding only applies under full-equity-risk; matching-only has no risk profiles. */
+    private final boolean fullEquityRisk;
 
     @Autowired
     public ExchangeCoreExecutionVenueGateway(
@@ -80,7 +92,8 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             @Value("${emporia.execution.exchange-core.portfolio-request-timeout:3s}") Duration portfolioTimeout)
             throws IOException {
         this(commands, buildVenue(exchangeId, storage, partitions,
-                buildAccounting(accountingMode, exchangeId, portfolioUrl, portfolioTimeout, tokenProvider, dataSource.orElse(null))));
+                buildAccounting(accountingMode, exchangeId, portfolioUrl, portfolioTimeout, tokenProvider, dataSource.orElse(null))),
+                ACCOUNTING_FULL_EQUITY.equalsIgnoreCase(accountingMode));
         log.info("Exchange-core venue started with accounting-mode={}", accountingMode);
     }
 
@@ -156,10 +169,72 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         return new ProductionSimulationVenue(exchangeId, storage, partitions, accounting);
     }
 
+    /** Matching-only wiring; no client onboarding, since there are no risk profiles. */
     public ExchangeCoreExecutionVenueGateway(ExecutionCommandPublisher commands, ExchangeCoreVenue venue) {
+        this(commands, venue, false);
+    }
+
+    public ExchangeCoreExecutionVenueGateway(ExecutionCommandPublisher commands, ExchangeCoreVenue venue,
+                                             boolean fullEquityRisk) {
         this.commands = Objects.requireNonNull(commands, "commands");
         this.venue = Objects.requireNonNull(venue, "venue");
+        this.fullEquityRisk = fullEquityRisk;
         this.symbols.addAll(venue.restoredSymbols());
+    }
+
+    /**
+     * Imports a client into the risk engine before their first order, exactly once.
+     *
+     * <p>Mirrors {@link #ensureSymbol}, with one difference that matters: this
+     * blocks on the import. The risk engine must hold the profile before the
+     * order reaches it, so completing asynchronously would only move the race
+     * rather than remove it.
+     *
+     * <p>Failures are raised rather than swallowed. A client that cannot be
+     * onboarded produces the same bare REJECTED as a genuine risk rejection,
+     * and telling those two apart is what made this failure take three separate
+     * investigations to find.
+     */
+    private void ensureClient(long clientId) {
+        if (!fullEquityRisk) return;
+        try {
+            onboarded.computeIfAbsent(clientId, venue::onboardPortfolio).join();
+        } catch (RuntimeException failure) {
+            // A client the risk engine already knows is the state we want, so this
+            // is success, not an error. It happens whenever the venue restored its
+            // state from a snapshot: exchange-core still holds the profile while
+            // this map starts empty, and importPortfolio then fails on ApiAddUser
+            // with USER_MGMT_USER_ALREADY_EXISTS rather than double-funding.
+            if (alreadyOnboarded(failure)) {
+                onboarded.put(clientId, CompletableFuture.completedFuture(null));
+                return;
+            }
+            // Do not cache a genuine failure: the next order should retry rather
+            // than inherit a permanently poisoned future.
+            onboarded.remove(clientId);
+            throw new IllegalStateException(
+                    "Could not onboard client " + clientId + " into the exchange-core risk engine; "
+                            + "orders cannot be risk-checked until portfolio-service supplies a seed", failure);
+        }
+    }
+
+    /**
+     * Matches on the {@code CommandResultCode} name because that is the only
+     * signal that survives the venue boundary: onboarding returns
+     * {@code CompletableFuture<Void>}, and exchange-core reports the code inside
+     * an {@link IllegalStateException} message.
+     */
+    private static boolean alreadyOnboarded(Throwable failure) {
+        Throwable cause = failure;
+        // Bounded rather than walking to null: a self-referencing cause would
+        // otherwise loop forever, and no real chain here is this deep.
+        for (int depth = 0; cause != null && depth < 8; depth++, cause = cause.getCause()) {
+            String message = cause.getMessage();
+            if (message != null && message.contains(CommandResultCode.USER_MGMT_USER_ALREADY_EXISTS.name())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
@@ -167,6 +242,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         try {
             remember(order);
             ensureSymbol(order.listing());
+            ensureClient(clientId(order));
             if (order.type() == OrderType.MARKET) {
                 DmaProtectedMarketOrder request = new DmaProtectedMarketOrder(
                         deliveryId(order, "submit-protected"),
@@ -449,6 +525,15 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     interface ExchangeCoreVenue extends AutoCloseable {
         void addSymbols(Collection<CoreSymbolSpecification> symbols);
 
+        /**
+         * Imports a client's balances from portfolio-service into the risk
+         * engine. Required before that client's first order under
+         * full-equity-risk: the risk engine rejects commands for a uid it has
+         * never seen ("User profile {} not found"), which surfaces to the caller
+         * as an ordinary order rejection.
+         */
+        CompletableFuture<Void> onboardPortfolio(long clientId);
+
         CompletableFuture<ProductionSimulationResult> submit(DmaLimitOrder order);
 
         CompletableFuture<ProductionSimulationResult> submitProtected(DmaProtectedMarketOrder order);
@@ -500,6 +585,11 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             simulation.addSymbols(symbols);
             symbols.stream().map(symbol -> symbol.symbolId).forEach(knownSymbols::add);
             checkpoint();
+        }
+
+        @Override
+        public CompletableFuture<Void> onboardPortfolio(long clientId) {
+            return simulation.onboardPortfolio(clientId).thenApply(snapshot -> null);
         }
 
         @Override

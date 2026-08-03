@@ -47,6 +47,85 @@ class ExchangeCoreExecutionVenueGatewayTest {
             new ExchangeCoreExecutionVenueGateway(commands, venue);
 
     @Test
+    void onboardsEachClientExactlyOnceUnderFullEquityRisk() {
+        ExchangeCoreExecutionVenueGateway riskGateway =
+                new ExchangeCoreExecutionVenueGateway(commands, venue, true);
+        for (int i = 0; i < 2; i++) {
+            venue.submitResponses.add(request -> successful(
+                    SimulationOperation.SUBMIT_LIMIT, request.deliveryId(),
+                    new DmaOrderResult(request.orderId(), CommandResultCode.SUCCESS, List.of(), 0, 0),
+                    DmaOrderState.initial(request)));
+        }
+
+        riskGateway.submit(order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25"));
+        riskGateway.submit(order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25"));
+
+        // Both orders belong to the same owner, so the client is imported once
+        // and the second submit reuses it.
+        assertThat(venue.onboarded).hasSize(1);
+        assertThat(venue.submits).hasSize(2);
+        assertThat(commands.rejections).isEmpty();
+    }
+
+    @Test
+    void doesNotOnboardWhenAccountingIsMatchingOnly() {
+        venue.submitResponses.add(request -> successful(
+                SimulationOperation.SUBMIT_LIMIT, request.deliveryId(),
+                new DmaOrderResult(request.orderId(), CommandResultCode.SUCCESS, List.of(), 0, 0),
+                DmaOrderState.initial(request)));
+
+        gateway.submit(order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25"));
+
+        // matching-only has no risk profiles, so onboarding must not be attempted.
+        assertThat(venue.onboarded).isEmpty();
+        assertThat(venue.submits).hasSize(1);
+    }
+
+    @Test
+    void treatsAnAlreadyKnownClientAsOnboarded() {
+        venue.onboardFailure = new IllegalStateException(
+                "create portfolio client failed: " + CommandResultCode.USER_MGMT_USER_ALREADY_EXISTS);
+        ExchangeCoreExecutionVenueGateway riskGateway =
+                new ExchangeCoreExecutionVenueGateway(commands, venue, true);
+        venue.submitResponses.add(request -> successful(
+                SimulationOperation.SUBMIT_LIMIT, request.deliveryId(),
+                new DmaOrderResult(request.orderId(), CommandResultCode.SUCCESS, List.of(), 0, 0),
+                DmaOrderState.initial(request)));
+
+        riskGateway.submit(order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25"));
+
+        // This is the restored-snapshot case: exchange-core still holds the
+        // profile, so the order must go through rather than be rejected.
+        assertThat(venue.submits).hasSize(1);
+        assertThat(commands.rejections).isEmpty();
+    }
+
+    @Test
+    void rejectsAndRetriesWhenOnboardingGenuinelyFails() {
+        venue.onboardFailure = new IllegalStateException("portfolio-service unavailable");
+        ExchangeCoreExecutionVenueGateway riskGateway =
+                new ExchangeCoreExecutionVenueGateway(commands, venue, true);
+
+        riskGateway.submit(order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25"));
+
+        assertThat(venue.submits).isEmpty();
+        assertThat(commands.rejections).hasSize(1);
+
+        // The failure must not be cached: a later order retries onboarding
+        // rather than inheriting a poisoned future.
+        venue.onboardFailure = null;
+        venue.submitResponses.add(request -> successful(
+                SimulationOperation.SUBMIT_LIMIT, request.deliveryId(),
+                new DmaOrderResult(request.orderId(), CommandResultCode.SUCCESS, List.of(), 0, 0),
+                DmaOrderState.initial(request)));
+
+        riskGateway.submit(order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25"));
+
+        assertThat(venue.onboarded).hasSize(2);
+        assertThat(venue.submits).hasSize(1);
+    }
+
+    @Test
     void submitsLimitOrdersWithExactExchangeCoreTicksAndSteps() {
         OrderView order = order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25");
         venue.submitResponses.add(request -> successful(
@@ -383,6 +462,18 @@ class ExchangeCoreExecutionVenueGatewayTest {
         @Override
         public void addSymbols(Collection<CoreSymbolSpecification> symbols) {
             this.symbols.add(symbols);
+        }
+
+        private final ArrayDeque<Long> onboarded = new ArrayDeque<>();
+        private RuntimeException onboardFailure;
+
+        @Override
+        public CompletableFuture<Void> onboardPortfolio(long clientId) {
+            onboarded.add(clientId);
+            if (onboardFailure != null) {
+                return CompletableFuture.failedFuture(onboardFailure);
+            }
+            return CompletableFuture.completedFuture(null);
         }
 
         @Override
