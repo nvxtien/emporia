@@ -401,6 +401,10 @@ services:
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=24h
+      # See docker-compose.yml: without this Prometheus discards the trace_id
+      # exemplars the services already emit, breaking the jump from a latency
+      # spike to an example trace.
+      - --enable-feature=exemplar-storage
     volumes:
       - ./deploy/otel/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - emporia-prometheus-data:/prometheus
