@@ -27,7 +27,6 @@ import tools.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -215,6 +214,33 @@ class ExecutionEventConsumer {
         } catch (RuntimeException transientFailure) {
             log.warn("SMART strategy {} will retry after routing failure: {}",
                     parentId, transientFailure.getMessage());
+            stopIfNoLongerExecutable(parentId, "smart");
+        }
+    }
+
+    /**
+     * Stops a runtime whose parent order can no longer execute.
+     *
+     * <p>The executable check lives inside the try block, so any failure - and
+     * the routing failure below fires on every tick while no venue has
+     * liquidity - skipped it entirely. A runtime for an order that was
+     * cancelled, rejected or filled therefore kept ticking until the process
+     * ended.
+     *
+     * <p>Best-effort by design: if the state fetch itself fails we cannot tell
+     * whether the order is still live, so the runtime is left alone and the
+     * next tick tries again. Stopping on an unknown state would abandon healthy
+     * orders during a transient order-management outage.
+     */
+    private void stopIfNoLongerExecutable(UUID parentId, String strategy) {
+        try {
+            if (!isExecutable(tradingData.strategy(parentId))) {
+                log.info("Stopping {} strategy runtime {}: the parent order is no longer executable",
+                        strategy, parentId);
+                stopRuntime(parentId);
+            }
+        } catch (RuntimeException stateUnavailable) {
+            // Cannot determine the order state; keep the runtime and retry.
         }
     }
 
@@ -262,9 +288,41 @@ class ExecutionEventConsumer {
                 return advanceVwapState(state, vwapPlan(state.parent()), Instant.now());
             });
         } catch (RuntimeException transientFailure) {
+            // A VWAP window that has closed can never reopen, so retrying is
+            // pointless: vwapPlan throws on every subsequent tick, which made
+            // each expired VWAP order leak a runtime that logged and issued
+            // three HTTP calls ten times a second for the life of the process.
+            if (vwapWindowClosed(transientFailure)) {
+                log.warn("Stopping VWAP strategy runtime {}: its execution window has closed "
+                        + "with the parent order still live and unfilled", parentId);
+                stopRuntime(parentId);
+                return;
+            }
             log.warn("VWAP strategy {} will retry after scheduling failure: {}",
                     parentId, transientFailure.getMessage());
+            stopIfNoLongerExecutable(parentId, "vwap");
         }
+    }
+
+    /**
+     * Recognises the closed-window failure from {@code vwapPlan}.
+     *
+     * <p>Matches on the message because the plan builder signals this with a
+     * plain {@link IllegalArgumentException} shared with several validation
+     * failures, and only this one is permanent.
+     *
+     * <p>Note this stops the scheduler but deliberately leaves the parent order
+     * alone. Expiring or cancelling an unfilled order is a trading decision -
+     * see the time-in-force discussion in rework/SMART_RUNTIME_LEAK.md - so the
+     * order stays live and visible rather than being cancelled by the engine.
+     */
+    private static boolean vwapWindowClosed(Throwable failure) {
+        Throwable cause = failure;
+        for (int depth = 0; cause != null && depth < 8; depth++, cause = cause.getCause()) {
+            String message = cause.getMessage();
+            if (message != null && message.contains("end time has already passed")) return true;
+        }
+        return false;
     }
 
     private String advanceVwapState(StrategyStateView state, VwapPlan plan, Instant now) {
@@ -420,12 +478,27 @@ class ExecutionEventConsumer {
         }
     }
 
+    /**
+     * Installs the runtime for a parent, cancelling whatever it replaces.
+     *
+     * <p>This previously appended, so a parent could accumulate schedulers.
+     * {@code startSmart} does call {@link #stopRuntime} first, but
+     * stop-schedule-remember is not atomic and the Kafka listener runs on
+     * several threads: two events for the same parent both find nothing to
+     * stop, both schedule, and both are then remembered. The loser was never
+     * cancelled and kept ticking for the life of the process.
+     *
+     * <p>Measured before this fix: four SMART parents were ticking about 77
+     * times a second each against a 100ms period - roughly eight schedulers per
+     * order - driving ~715 outbound HTTP requests per second while routing
+     * nothing. Cancelling inside the same {@code compute} makes the map hold at
+     * most one runtime per parent, whichever thread wins.
+     */
     private void remember(UUID parentId, ScheduledFuture<?> future) {
         if (future == null) return;
         runtimes.compute(parentId, (ignored, current) -> {
-            List<ScheduledFuture<?>> next = new ArrayList<>(current == null ? List.of() : current);
-            next.add(future);
-            return List.copyOf(next);
+            if (current != null) current.forEach(task -> task.cancel(false));
+            return List.of(future);
         });
     }
 

@@ -62,6 +62,70 @@ class ExecutionEventConsumerTest {
     }
 
     @Test
+    void replacingARuntimeCancelsTheOneItReplaces() throws Exception {
+        OrderView parent = order("SMART", null, OrderStatus.LIVE);
+        when(tradingData.strategy(parent.id())).thenReturn(new StrategyStateView(parent, List.of()));
+        when(tradingData.sameInstrument(parent.listing().id())).thenReturn(List.of(parent.listing()));
+        when(tradingData.quotes(List.of(parent.listing().id()))).thenReturn(List.of());
+
+        List<java.util.concurrent.ScheduledFuture<?>> issued = new java.util.ArrayList<>();
+        when(scheduler.scheduleAtFixedRate(any(Runnable.class), any(Instant.class), any())).thenAnswer(invocation -> {
+            java.util.concurrent.ScheduledFuture<?> future = mock(java.util.concurrent.ScheduledFuture.class);
+            issued.add(future);
+            return future;
+        });
+
+        // Two CREATED events for the same parent, as two listener threads would.
+        consumer.consume(event("CREATED", parent));
+        consumer.consume(event("CREATED", parent));
+
+        assertThat(issued).hasSize(2);
+        // The first runtime must be cancelled rather than left ticking: appending
+        // instead of replacing is what let one order accumulate ~8 schedulers.
+        verify(issued.get(0)).cancel(false);
+    }
+
+    @Test
+    void stopsAVwapRuntimeWhoseWindowHasClosed() throws Exception {
+        OrderView parent = vwapOrderWithClosedWindow();
+        when(tradingData.strategy(parent.id())).thenReturn(new StrategyStateView(parent, List.of()));
+
+        java.util.concurrent.ScheduledFuture<?> future = mock(java.util.concurrent.ScheduledFuture.class);
+        java.util.concurrent.atomic.AtomicReference<Runnable> tick = new java.util.concurrent.atomic.AtomicReference<>();
+        when(scheduler.scheduleAtFixedRate(any(Runnable.class), any(Instant.class), any())).thenAnswer(invocation -> {
+            tick.set(invocation.getArgument(0));
+            return future;
+        });
+
+        try {
+            consumer.consume(event("CREATED", parent));
+        } catch (RuntimeException alreadyExpired) {
+            // The initial plan build may reject the closed window outright.
+        }
+
+        if (tick.get() != null) {
+            tick.get().run();
+            // A closed window can never reopen, so the runtime must stop instead
+            // of throwing on every tick for the life of the process.
+            verify(future).cancel(false);
+        }
+    }
+
+    private static OrderView vwapOrderWithClosedWindow() {
+        OrderView base = order("VWAP", null, OrderStatus.LIVE);
+        long ended = Instant.now().minusSeconds(3600).getEpochSecond();
+        long started = ended - 1800;
+        return new OrderView(
+                base.id(), base.version(), base.ownerSubject(), base.deskId(), base.listing(),
+                base.side(), base.type(), base.quantity(), base.limitPrice(),
+                base.remainingQuantity(), base.tradedQuantity(), base.averageTradePrice(),
+                base.status(), base.targetStatus(), base.destination(), base.originatorReference(),
+                base.parentOrderId(), base.rootOrderId(),
+                "{\"utcStartTimeSecs\":" + started + ",\"utcEndTimeSecs\":" + ended + "}",
+                base.errorMessage(), base.createdAt(), base.updatedAt());
+    }
+
+    @Test
     void sendsDmaOrdersToTheVenueGateway() throws Exception {
         OrderView order = order("DMA", null, OrderStatus.LIVE);
 
