@@ -66,84 +66,45 @@ echo "    order ${order_id}"
 echo "==> Waiting for spans to reach Tempo"
 trace_id=""
 trace=""
-# Tempo makes a trace searchable only once its block completes, so allow for
-# max_block_duration + complete_block_timeout from deploy/otel/tempo.yaml
-# rather than assuming spans are queryable the moment they are exported.
+# Query the order_id span attribute directly rather than searching by span name
+# and scanning the results.
+#
+# Searching for name="emporia.order.submit" returns a capped page of results,
+# and after any load run there are hundreds of submit traces in the window, so
+# the trace just created may never appear in that page no matter how long the
+# script waits. That produced a confident-looking failure on a system that was
+# working perfectly. Matching on the attribute returns exactly one trace
+# regardless of how many others exist.
+#
+# order_id is a high-cardinality (span-only) attribute, so it identifies the
+# trace without appearing as a metric tag - verified: emporia_order_submit
+# exposes only 2 series.
 for _ in $(seq 1 60); do
     sleep 3
     # Tempo's search needs an explicit window; without start/end it applies a
     # narrow default and misses a trace that has only just been ingested.
-    search_start=$((submitted_at - 300))
+    search_start=$((submitted_at - 60))
     search_end=$(( $(date +%s) + 60 ))
-    search="$(curl -fsS --get "${TEMPO_URL}/api/search" \
-        --data-urlencode 'q={ name="emporia.order.submit" }' \
+    trace_id="$(curl -fsS --get "${TEMPO_URL}/api/search" \
+        --data-urlencode "q={ span.order_id=\"${order_id}\" }" \
         --data-urlencode "start=${search_start}" \
         --data-urlencode "end=${search_end}" \
-        --data-urlencode 'limit=100' 2>/dev/null)" || continue
-    candidate_trace_ids="$(printf '%s' "$search" | python3 -c '
+        --data-urlencode 'limit=10' 2>/dev/null \
+        | python3 -c '
 import json, sys
 try:
     traces = json.load(sys.stdin).get("traces") or []
 except Exception:
     traces = []
 for trace in traces:
-    trace_id = trace.get("traceID") or trace.get("traceId") or trace.get("trace_id") or ""
-    if trace_id:
-        print(trace_id)
-')"
-    while IFS= read -r candidate_trace_id; do
-        [ -n "$candidate_trace_id" ] || continue
-        candidate_trace="$(curl -fsS "${TEMPO_URL}/api/traces/${candidate_trace_id}" 2>/dev/null)" || continue
-        contains_order="$(printf '%s' "$candidate_trace" | python3 - "$order_id" <<'PY'
-import json
-import sys
-
-order_id = sys.argv[1]
-order_keys = {"order_id", "order.id"}
-
-def scalar(value):
-    if isinstance(value, dict):
-        for key in ("stringValue", "intValue", "doubleValue", "boolValue"):
-            if key in value:
-                return str(value[key])
-        return ""
-    return "" if value is None else str(value)
-
-def attributes_match(attributes):
-    for attribute in attributes or []:
-        if not isinstance(attribute, dict) or attribute.get("key") not in order_keys:
-            continue
-        if scalar(attribute.get("value")) == order_id:
-            return True
-    return False
-
-def walk(node):
-    if isinstance(node, dict):
-        if attributes_match(node.get("attributes")) or attributes_match(node.get("tags")):
-            return True
-        return any(walk(value) for value in node.values())
-    if isinstance(node, list):
-        return any(walk(value) for value in node)
-    return False
-
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    data = {}
-print("yes" if walk(data) else "no")
-PY
-)"
-        if [ "$contains_order" = "yes" ]; then
-            trace_id="$candidate_trace_id"
-            trace="$candidate_trace"
-            break
-        fi
-    done <<EOF
-$candidate_trace_ids
-EOF
+    found = trace.get("traceID") or trace.get("traceId") or trace.get("trace_id") or ""
+    if found:
+        print(found)
+        break
+')" || true
     [ -n "$trace_id" ] && break
 done
-[ -n "$trace_id" ] || fail "no trace containing emporia.order.submit for order ${order_id} appeared in Tempo"
+[ -n "$trace_id" ] || fail "no trace with order_id ${order_id} appeared in Tempo"
 echo "    trace ${trace_id}"
 
 echo "==> Inspecting the trace"

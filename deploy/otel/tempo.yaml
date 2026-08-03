@@ -21,8 +21,25 @@ ingester:
   # actually working. These values trade block efficiency, which does not
   # matter locally, for a trace that is searchable within seconds.
   trace_idle_period: 5s
-  max_block_duration: 30s
-  complete_block_timeout: 1m
+  # Was 30s, which cut a new block every half minute and left 223 tiny blocks
+  # on disk after a few hours. Search has to scan the blocklist, so block
+  # sprawl degrades it: a trace that GET /api/traces/{id} returns in full was
+  # not returned by TraceQL search at all. Fast searchability now comes from
+  # the ingester retaining completed blocks (below) rather than from cutting
+  # blocks aggressively.
+  max_block_duration: 5m
+  # MUST stay comfortably larger than storage.trace.blocklist_poll below.
+  # A trace is searchable from the ingester until this timeout, and searchable
+  # from the backend only once the blocklist poll has discovered its block. If
+  # this is shorter than the poll interval, every trace falls into a hole
+  # between the two and search returns nothing for minutes.
+  #
+  # That is exactly what caused the "intermittent span export" symptom: with
+  # this at 1m against the default 5m poll, a trace was findable for about a
+  # minute, invisible for the next four, then findable again. Nothing was ever
+  # actually dropped - Tempo reported zero discarded spans throughout - and the
+  # metrics always incremented, so it looked like flaky exporting.
+  complete_block_timeout: 15m
 
 compactor:
   compaction:
@@ -31,6 +48,10 @@ compactor:
 storage:
   trace:
     backend: local
+    # Default is 5m. The querier only learns about newly flushed blocks when
+    # this poll runs, so it bounds how long a just-flushed trace can be
+    # invisible. Lowered to overlap with complete_block_timeout above.
+    blocklist_poll: 30s
     wal:
       path: /var/tempo/wal
     local:
