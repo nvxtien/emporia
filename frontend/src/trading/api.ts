@@ -15,6 +15,19 @@ interface ApiProblem {
   title?: string
 }
 
+/**
+ * Every mutating order endpoint requires an Idempotency-Key.
+ *
+ * A submit can time out while the order is in fact created, so the caller must
+ * be able to retry without risking a duplicate. That only works if the retry
+ * carries the *same* key, which is why the key is generated once per user
+ * action and passed in, rather than generated inside the request helper where
+ * each attempt would get a fresh one and the protection would be lost.
+ */
+export function newIdempotencyKey(): string {
+  return crypto.randomUUID()
+}
+
 async function request<T>(accessToken: string, path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, {
     ...init,
@@ -128,17 +141,35 @@ export const tradingApi = {
   depth: (token: string, listingId: number) =>
     request<Quote>(token, `/market-data/${listingId}/depth`),
   orders: (token: string) => request<TradingOrder[]>(token, '/orders'),
-  createOrder: (token: string, order: CreateOrder) =>
-    request<TradingOrder>(token, '/orders', { method: 'POST', body: JSON.stringify(order) }),
-  modifyOrder: (token: string, orderId: string, expectedVersion: number, quantity: number, limitPrice: number | null) =>
+  createOrder: (token: string, order: CreateOrder, idempotencyKey: string = newIdempotencyKey()) =>
+    request<TradingOrder>(token, '/orders', {
+      method: 'POST',
+      body: JSON.stringify(order),
+      headers: { 'Idempotency-Key': idempotencyKey },
+    }),
+  modifyOrder: (
+    token: string,
+    orderId: string,
+    expectedVersion: number,
+    quantity: number,
+    limitPrice: number | null,
+    idempotencyKey: string = newIdempotencyKey(),
+  ) =>
     request<TradingOrder>(token, `/orders/${orderId}`, {
       method: 'PUT',
       body: JSON.stringify({ expectedVersion, quantity, limitPrice }),
+      headers: { 'Idempotency-Key': idempotencyKey },
     }),
-  cancelOrder: (token: string, orderId: string) =>
-    request<TradingOrder>(token, `/orders/${orderId}/cancel`, { method: 'POST' }),
-  cancelAll: (token: string) =>
-    request<{ cancelled: number }>(token, '/orders/cancel-all', { method: 'POST' }),
+  cancelOrder: (token: string, orderId: string, idempotencyKey: string = newIdempotencyKey()) =>
+    request<TradingOrder>(token, `/orders/${orderId}/cancel`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey },
+    }),
+  cancelAll: (token: string, idempotencyKey: string = newIdempotencyKey()) =>
+    request<{ cancelled: number }>(token, '/orders/cancel-all', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey },
+    }),
   orderHistory: (token: string, orderId: string) =>
     request<OrderEvent[]>(token, `/orders/${orderId}/history`),
   executions: (token: string, orderId: string) =>

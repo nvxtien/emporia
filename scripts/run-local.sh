@@ -87,7 +87,7 @@ start_service gateway gateway mvn spring-boot:run
 wait_http_health static-data-service http://localhost:8081/actuator/health
 wait_http_health user-preferences-service http://localhost:8083/actuator/health
 wait_http_health market-data-service http://localhost:8084/actuator/health
-wait_http_health order-command-service http://localhost:8085/actuator/health
+wait_http_health order-command-service http://localhost:8085/actuator/health/readiness
 wait_http_health order-management-service http://localhost:8086/actuator/health
 wait_http_health execution-service http://localhost:8087/actuator/health
 wait_http_health gateway http://localhost:8082/actuator/health
