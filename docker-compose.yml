@@ -159,6 +159,12 @@ services:
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=24h
+      # Exemplar storage is off by default, and without it Prometheus silently
+      # discards the trace_id attached to each histogram bucket. The services
+      # emit them correctly, so the only visible symptom is that jumping from a
+      # latency spike to an example trace never works — which is the whole
+      # reason Phase 1_1 chose Tempo + Grafana over a standalone Jaeger.
+      - --enable-feature=exemplar-storage
     volumes:
       - ./deploy/otel/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - emporia-prometheus-data:/prometheus

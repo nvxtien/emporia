@@ -16,6 +16,8 @@
 #   SOAK_RATE=<auto>       steady-state rate; defaults to 60% of the knee
 #   SOAK_DURATION=7m       must stay under the 10m access-token lifetime
 #   STALL_SECONDS=30       how long to freeze the consumer in the stall stage
+#   TRACE_RATE=48          above-knee rate for the trace-correlation stage
+#   TRACE_DURATION=90s     duration of the trace-correlation stage
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -299,6 +301,73 @@ EOF
     check_disk
 }
 
+# Stage D: prove a lag spike can be correlated with traces, which is Phase 1_2's
+# last outstanding success criterion.
+#
+# The spike is produced by running *above* capacity rather than by stalling a
+# consumer. Stalling order-management-service does not build a backlog: order
+# submission is synchronously coupled to it, so freezing it blocks the front
+# door instead and the system fails closed (see PHASE_1_2_BASELINE.md finding 3).
+# Running past the ~40/s knee produces genuine sustained lag.
+stage_trace() {
+    local rate="${TRACE_RATE:-48}"
+    local duration="${TRACE_DURATION:-90s}"
+
+    echo "==> Stage D: trace correlation at ${rate}/s for ${duration} (above the ~40/s knee)"
+    check_disk
+    wait_for_drain >/dev/null || true
+
+    local token; token="$(mint_token)"
+    local start; start=$(date +%s)
+    run_k6 "trace" "$rate" "$duration" "$token" || echo "     k6 aborted (threshold breach)"
+    local end; end=$(date +%s)
+
+    local peak_lag; peak_lag="$(total_lag)"
+    snapshot_range "trace" "$start" "$((end + 30))"
+
+    echo "  -- correlating"
+    # Slow submits during the spike window. If lag and traces are correlated,
+    # this window should contain traces far slower than the ~30ms seen below
+    # the knee.
+    local slow_count slow_ids
+    slow_ids="$(curl -fsS --get "${TEMPO_URL:-http://localhost:3200}/api/search" \
+        --data-urlencode 'q={ name="emporia.order.submit" && duration > 1s }' \
+        --data-urlencode "start=${start}" \
+        --data-urlencode "end=$((end + 60))" \
+        --data-urlencode 'limit=50' 2>/dev/null \
+        | python3 -c '
+import json, sys
+try:
+    traces = json.load(sys.stdin).get("traces") or []
+except Exception:
+    traces = []
+for t in traces:
+    print("%s %sms" % (t.get("traceID",""), t.get("durationMs","?")))
+')"
+    slow_count="$(printf '%s\n' "$slow_ids" | grep -c . || true)"
+
+    {
+        echo "offered_rate=${rate}"
+        echo "peak_lag=${peak_lag}"
+        echo "slow_traces_over_1s=${slow_count}"
+        echo "window_start=${start}"
+        echo "window_end=$((end + 60))"
+    } >"${out_dir}/trace-correlation.txt"
+
+    echo "    peak lag during window : ${peak_lag}"
+    echo "    submit traces > 1s     : ${slow_count}"
+    if [ "$slow_count" -gt 0 ]; then
+        echo "    examples (traceID duration):"
+        printf '%s\n' "$slow_ids" | head -5 | sed 's/^/      /'
+        echo
+        echo "    Inspect in Grafana:  http://localhost:3300/explore  (Tempo datasource)"
+        echo "    Or directly:         ${TEMPO_URL:-http://localhost:3200}/api/traces/<traceID>"
+    else
+        echo "    WARNING: no slow submit traces found; correlation not demonstrated"
+    fi
+    check_disk
+}
+
 derive_thresholds() {
     local summary="${out_dir}/stall-summary.txt"
     [ -f "$summary" ] || { echo "  (no stall data; thresholds cannot be derived)"; return; }
@@ -354,8 +423,9 @@ case "$STAGE" in
     probe) stage_probe ;;
     soak)  stage_soak ;;
     stall) stage_stall; derive_thresholds ;;
-    all)   stage_probe; echo; stage_soak; echo; stage_stall; derive_thresholds ;;
-    *)     fail "unknown stage '${STAGE}' (expected probe, soak, stall, or all)" ;;
+    trace) stage_trace ;;
+    all)   stage_probe; echo; stage_soak; echo; stage_stall; derive_thresholds; echo; stage_trace ;;
+    *)     fail "unknown stage '${STAGE}' (expected probe, soak, stall, trace, or all)" ;;
 esac
 
 echo
