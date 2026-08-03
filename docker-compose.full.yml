@@ -271,6 +271,9 @@ services:
     ports:
       - "8087:8087"
     environment:
+      # Chronicle module-access flags; without them exchange-core's matching
+      # engine throws IllegalAccessError and orders never fill (see execution-service/pom.xml).
+      JAVA_OPTS: "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED --add-exports=java.base/jdk.internal.ref=ALL-UNNAMED --add-exports=java.base/jdk.internal.util=ALL-UNNAMED --add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-exports=jdk.unsupported/sun.misc=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED"
       <<: *otel-env
       DB_URL: jdbc:postgresql://execution-postgres:5432/emporia_execution
       DB_USERNAME: postgres
