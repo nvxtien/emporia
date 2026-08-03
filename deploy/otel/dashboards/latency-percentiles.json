@@ -139,18 +139,18 @@
               },
               {
                 "color": "yellow",
-                "value": 0.1
+                "value": 0.5
               },
               {
                 "color": "red",
-                "value": 1
+                "value": 2
               }
             ]
           }
         },
         "overrides": []
       },
-      "description": "Thresholds from the Phase 1_2 baseline: at or below the ~40 orders/sec knee p99 stayed under ~100ms. Laptop-derived context, not a production SLO."
+      "description": "Re-derived from rework/PHASE_1_2_BASELINE_RUN2.md: healthy p99 is 273-298ms at or below the ~8 orders/sec knee, degraded is ~2060ms at 12/s. The previous 0.1s warning predated full-equity-risk working and would now fire during normal operation. Laptop-derived context, not a production SLO."
     },
     {
       "id": 2,
@@ -327,7 +327,7 @@
               },
               {
                 "color": "red",
-                "value": 500
+                "value": 200
               }
             ]
           }
@@ -2103,11 +2103,11 @@
               },
               {
                 "color": "yellow",
-                "value": 0.1
+                "value": 0.5
               },
               {
                 "color": "red",
-                "value": 1
+                "value": 2
               }
             ]
           }
