@@ -13,20 +13,27 @@
 #   KAFKA_BOOTSTRAP_SERVERS     broker address as seen from wherever the CLI
 #                               runs (default kafka:9092 inside the container)
 #   KAFKA_LAG_WARN_THRESHOLD    per-group total lag that prints a warning (50)
-#   KAFKA_LAG_FAIL_THRESHOLD    per-group total lag that fails the check (500)
+#   KAFKA_LAG_FAIL_THRESHOLD    per-group total lag that fails the check (200)
 #   KAFKA_LAG_INCLUDE_EPHEMERAL show the random-uuid groups too (false)
 #
 # Exit codes: 0 healthy (warnings allowed), 1 unhealthy.
 set -euo pipefail
 
 BOOTSTRAP="${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}"
-# Measured, not guessed — see rework/PHASE_1_2_BASELINE.md. At or below the
-# sustainable rate (~40 orders/sec on the baseline machine) lag is 0-1, while
-# past-capacity operation sits at 123-199, so sustained lag above 50 already
-# means the system is behind. 500 is above every value observed in any stage,
-# including the 314 peak during a deliberate consumer stall.
+# Measured, not guessed — re-derived from rework/PHASE_1_2_BASELINE_RUN2.md
+# after full-equity-risk started actually working, which cut sustainable
+# throughput from ~40 to ~8 orders/sec. Observed peak lag by state:
+#
+#   healthy    (2-8/s)   0-1
+#   degraded   (12/s)    116     p50 already 297ms
+#   saturated  (16/s)    240     p99 on the 8s reply timeout, 1.34% failures
+#
+# So warn at 50 (well clear of healthy, half the degraded observation) and fail
+# at 200 (between degraded and saturated). The previous fail value of 500 was
+# derived from the old baseline and sat above every value the system produces
+# even at saturation — it could never have fired.
 WARN_THRESHOLD="${KAFKA_LAG_WARN_THRESHOLD:-50}"
-FAIL_THRESHOLD="${KAFKA_LAG_FAIL_THRESHOLD:-500}"
+FAIL_THRESHOLD="${KAFKA_LAG_FAIL_THRESHOLD:-200}"
 INCLUDE_EPHEMERAL="${KAFKA_LAG_INCLUDE_EPHEMERAL:-false}"
 KAFKA_CONTAINER="${KAFKA_CONTAINER:-emporia-kafka}"
 

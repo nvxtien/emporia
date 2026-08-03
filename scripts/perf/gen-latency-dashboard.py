@@ -115,9 +115,11 @@ row("System overview", 0)
 panels.append(stat(
     "Order submit p99", 1, 0, 6,
     f'histogram_quantile(0.99, sum by (le) (rate(emporia_order_submit_seconds_bucket{sel()}[$__rate_interval])))',
-    "s", [{"color": "green", "value": None}, {"color": "yellow", "value": 0.1}, {"color": "red", "value": 1}],
-    desc="Thresholds from the Phase 1_2 baseline: at or below the ~40 orders/sec knee p99 stayed under ~100ms. "
-         "Laptop-derived context, not a production SLO."))
+    "s", [{"color": "green", "value": None}, {"color": "yellow", "value": 0.5}, {"color": "red", "value": 2}],
+    desc="Re-derived from rework/PHASE_1_2_BASELINE_RUN2.md: healthy p99 is 273-298ms at or below the "
+         "~8 orders/sec knee, degraded is ~2060ms at 12/s. The previous 0.1s warning predated "
+         "full-equity-risk working and would now fire during normal operation. Laptop-derived "
+         "context, not a production SLO."))
 panels.append(stat(
     "Order submit rate", 1, 6, 6,
     f'sum(rate(emporia_order_submit_seconds_count{sel()}[$__rate_interval]))',
@@ -135,7 +137,7 @@ panels.append(stat(
 panels.append(stat(
     "Kafka lag (stable groups)", 1, 18, 6,
     'sum(clamp_min(kafka_consumergroup_lag{consumergroup=~"order-data-service-v1|emporia-execution-service-v1|order-management-executions-v1"}, 0))',
-    "short", [{"color": "green", "value": None}, {"color": "yellow", "value": 50}, {"color": "red", "value": 500}],
+    "short", [{"color": "green", "value": None}, {"color": "yellow", "value": 50}, {"color": "red", "value": 200}],
     desc="Broker-side exporter lag, clamped: the exporter reports -1 for partitions with no committed offset. "
          "Full detail on the Kafka Consumer Lag dashboard."))
 
@@ -267,7 +269,7 @@ panels.append(timeseries(
     "Order submit p99 against the measured knee", 92, 0, 12,
     [target(f'histogram_quantile(0.99, sum by (le) (rate(emporia_order_submit_seconds_bucket{sel()}[$__rate_interval])))',
             "p99", exemplar=True)],
-    thresholds=[{"color": "green", "value": None}, {"color": "yellow", "value": 0.1}, {"color": "red", "value": 1}],
+    thresholds=[{"color": "green", "value": None}, {"color": "yellow", "value": 0.5}, {"color": "red", "value": 2}],
     desc="Phase 1_2 measured: <=40 orders/sec p99 under ~100ms with lag ~0; 48/sec p50 3137ms with sustained "
          "lag 123-199; 80/sec 7.7% infra failures. These are one laptop's numbers and warning-only context."))
 panels.append(timeseries(

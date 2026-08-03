@@ -80,13 +80,13 @@
             "steps": [
               { "color": "green", "value": null },
               { "color": "yellow", "value": 50 },
-              { "color": "red", "value": 500 }
+              { "color": "red", "value": 200 }
             ]
           }
         },
         "overrides": []
       },
-      "description": "Thresholds match KAFKA_LAG_WARN_THRESHOLD (50) and KAFKA_LAG_FAIL_THRESHOLD (500) in scripts/perf/kafka-lag-check.sh, measured in rework/PHASE_1_2_BASELINE.md. Healthy operation shows lag 0-1; past-capacity operation sits at 123-199."
+      "description": "Thresholds match KAFKA_LAG_WARN_THRESHOLD (50) and KAFKA_LAG_FAIL_THRESHOLD (200) in scripts/perf/kafka-lag-check.sh, measured in rework/PHASE_1_2_BASELINE_RUN2.md. Healthy shows lag 0-1; degraded (12/s) 116; saturated (16/s) 240."
     },
     {
       "id": 2,
@@ -115,7 +115,7 @@
             "steps": [
               { "color": "green", "value": null },
               { "color": "yellow", "value": 50 },
-              { "color": "red", "value": 500 }
+              { "color": "red", "value": 200 }
             ]
           }
         },
@@ -260,7 +260,7 @@
               { "id": "custom.cellOptions", "value": { "type": "color-background" } },
               {
                 "id": "thresholds",
-                "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 50 }, { "color": "red", "value": 500 }] }
+                "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 50 }, { "color": "red", "value": 200 }] }
               }
             ]
           }

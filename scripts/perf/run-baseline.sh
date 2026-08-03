@@ -33,6 +33,10 @@ PROBE_STEP="${PROBE_STEP:-60s}"
 SOAK_DURATION="${SOAK_DURATION:-7m}"
 STALL_SECONDS="${STALL_SECONDS:-30}"
 STALL_TARGET="${STALL_TARGET:-order-management-service}"
+# Knee detection factors, relative to the healthiest step observed. Latency is
+# the primary signal because lag and error rate both trail it badly.
+KNEE_P50_FACTOR="${KNEE_P50_FACTOR:-2}"
+KNEE_P99_FACTOR="${KNEE_P99_FACTOR:-3}"
 
 STABLE_GROUPS='order-data-service-v1|emporia-execution-service-v1|order-management-executions-v1'
 
@@ -107,6 +111,18 @@ except Exception:
 '
 }
 
+# Reads one field from a stage's k6 summary JSON.
+k6_metric() {
+    local name="$1" field="$2"
+    python3 -c "
+import json, sys
+try:
+    print(json.load(open('${out_dir}/${name}.k6.json')).get('${field}', 0))
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0
+}
+
 total_lag() { promq "sum(clamp_min(kafka_consumergroup_lag{consumergroup=~\"$STABLE_GROUPS\"}, 0))"; }
 
 consume_rate() {
@@ -162,7 +178,8 @@ run_k6() {
 stage_probe() {
     echo "==> Stage A: capacity probe (${PROBE_RATES} orders/sec, ${PROBE_STEP} each)"
     check_disk
-    local knee=""
+    local knee="" last_healthy="" first_degraded=""
+    local best_p50="" best_p99=""
     local token; token="$(mint_token)"
 
     IFS=',' read -ra rates <<<"$PROBE_RATES"
@@ -179,21 +196,54 @@ stage_probe() {
         snapshot_range "probe-${rate}" "$start" "$((end + 30))"
 
         local residual; residual="$(total_lag)"
-        echo "     lag immediately after step: ${residual}"
-        # The knee is where lag stops returning to zero between steps: the
-        # consumers can no longer keep up with the offered rate.
-        if awk -v l="$residual" 'BEGIN { exit !(l > 50) }'; then
-            if ! wait_for_drain; then
-                echo "     lag did not drain — knee at ${rate}/s"
-                knee="${knee:-$rate}"
-                break
-            fi
+
+        # Knee detection reads the latency curve, not the post-step lag.
+        #
+        # Lag was the original signal and it missed the knee in both baseline
+        # runs: at 40/s in run 1 and at 16/s in run 2, where p50 was 2574 ms and
+        # p99 sat on the reply timeout, the residual lag still drained and
+        # nothing was flagged. Lag only appears once consumers fall behind,
+        # which happens well after the submit path has degraded - and through
+        # 12/s the system reported zero failures while badly degraded, so error
+        # rate is no better.
+        #
+        # Latency inflects first and is what users feel, so the rule is relative
+        # to the best step seen: a rate is degraded once its p50 or p99 blows
+        # past the healthiest measurement by these factors.
+        local p50 p99
+        p50="$(k6_metric "probe-${rate}" submit_latency_p50)"
+        p99="$(k6_metric "probe-${rate}" submit_latency_p99)"
+        best_p50="$(awk -v a="$best_p50" -v b="$p50" 'BEGIN { print (a == "" || (b > 0 && b < a)) ? b : a }')"
+        best_p99="$(awk -v a="$best_p99" -v b="$p99" 'BEGIN { print (a == "" || (b > 0 && b < a)) ? b : a }')"
+
+        printf '     p50 %.0f ms, p99 %.0f ms, lag after step %s\n' "$p50" "$p99" "$residual"
+
+        if awk -v p50="$p50" -v bp50="$best_p50" -v p99="$p99" -v bp99="$best_p99" \
+               -v f50="$KNEE_P50_FACTOR" -v f99="$KNEE_P99_FACTOR" \
+               'BEGIN { exit !(bp50 > 0 && bp99 > 0 && (p50 > bp50 * f50 || p99 > bp99 * f99)) }'; then
+            echo "     degraded at ${rate}/s (p50 ${p50%.*}ms vs best ${best_p50%.*}ms, p99 ${p99%.*}ms vs best ${best_p99%.*}ms)"
+            echo "     knee is the previous step: ${last_healthy:-none}/s"
+            knee="${last_healthy}"
+            first_degraded="$rate"
+            break
         fi
+        last_healthy="$rate"
         check_disk
     done
 
-    echo "${knee:-none}" >"${out_dir}/knee.txt"
-    echo "  knee: ${knee:-not reached within ${PROBE_RATES}}"
+    {
+        echo "knee_sustainable_rate=${knee:-none}"
+        echo "first_degraded_rate=${first_degraded:-none}"
+        echo "best_p50_ms=${best_p50:-0}"
+        echo "best_p99_ms=${best_p99:-0}"
+        echo "p50_factor=${KNEE_P50_FACTOR}"
+        echo "p99_factor=${KNEE_P99_FACTOR}"
+    } >"${out_dir}/knee.txt"
+    if [ -n "$knee" ]; then
+        echo "  knee: ${knee}/s sustainable; degradation begins at ${first_degraded}/s"
+    else
+        echo "  knee: not reached within ${PROBE_RATES} (all steps stayed within the latency factors)"
+    fi
 }
 
 stage_soak() {
