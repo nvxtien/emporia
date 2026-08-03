@@ -44,6 +44,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -60,6 +61,22 @@ import java.util.concurrent.atomic.AtomicLong;
 public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(ExchangeCoreExecutionVenueGateway.class);
     private static final String ACCOUNTING_FULL_EQUITY = "full-equity-risk";
+    /**
+     * ISO 4217 numeric codes, the identity portfolio-service stores balances
+     * under. Kept minimal on purpose — an entry is only correct if
+     * portfolio-service can actually seed that currency.
+     */
+    private static final Map<String, Integer> ISO_4217 = Map.of(
+            "USD", 840,
+            "EUR", 978,
+            "GBP", 826,
+            "JPY", 392,
+            "CHF", 756,
+            "CAD", 124,
+            "AUD", 36,
+            "HKD", 344,
+            "SGD", 702,
+            "VND", 704);
 
     private final ExecutionCommandPublisher commands;
     private final ExchangeCoreVenue venue;
@@ -427,7 +444,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
                     .symbolId(symbol)
                     .type(SymbolType.EQUITY)
                     .baseCurrency(stableInt("asset:" + listing.marketSymbol()))
-                    .quoteCurrency(stableInt("currency:" + listing.currency()))
+                    .quoteCurrency(isoCurrencyCode(listing.currency()))
                     .baseScaleK(1)
                     .quoteScaleK(1)
                     .takerFee(0)
@@ -505,6 +522,38 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         buffer.flip();
         long value = buffer.getLong() & Long.MAX_VALUE;
         return value == 0 ? 1 : value;
+    }
+
+    /**
+     * Maps a currency to its ISO 4217 numeric code, which is the identity
+     * portfolio-service uses for balances.
+     *
+     * <p>The venue previously derived this with {@code stableInt("currency:USD")},
+     * producing 1535516392, while every seeded balance lands under 840. The risk
+     * engine then held {@code accounts:{840=<funded>, 1535516392=0}} and rejected
+     * every buy with RISK_NSF regardless of how large the seed was, because the
+     * quote currency the symbol asked for was always empty.
+     *
+     * <p>Deliberately throws on an unmapped currency rather than falling back to
+     * a hash. A silent fallback is exactly what produced the original bug: the
+     * venue and portfolio-service disagreed and nothing said so.
+     *
+     * <p>This table is the smaller half of the fix. The currency's ISO code
+     * properly belongs on the listing in static-data-service; until it is
+     * modelled there, this keeps the two subsystems consistent.
+     */
+    private static int isoCurrencyCode(String currency) {
+        if (currency == null || currency.isBlank()) {
+            throw new IllegalArgumentException("listing currency is required to build an exchange-core symbol");
+        }
+        Integer code = ISO_4217.get(currency.strip().toUpperCase(Locale.ROOT));
+        if (code == null) {
+            throw new IllegalArgumentException(
+                    "No ISO 4217 numeric code mapped for currency '" + currency + "'. Add it to ISO_4217, or the "
+                            + "venue and portfolio-service will disagree on currency identity and every order "
+                            + "will be rejected with RISK_NSF.");
+        }
+        return code;
     }
 
     private static int stableInt(String value) {

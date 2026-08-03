@@ -47,6 +47,38 @@ class ExchangeCoreExecutionVenueGatewayTest {
             new ExchangeCoreExecutionVenueGateway(commands, venue);
 
     @Test
+    void usesTheIsoCurrencyCodeSoTheVenueAndPortfolioAgree() {
+        venue.submitResponses.add(request -> successful(
+                SimulationOperation.SUBMIT_LIMIT, request.deliveryId(),
+                new DmaOrderResult(request.orderId(), CommandResultCode.SUCCESS, List.of(), 0, 0),
+                DmaOrderState.initial(request)));
+
+        gateway.submit(order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25"));
+
+        // 840 is ISO 4217 for USD, which is the id portfolio-service seeds
+        // balances under. Hashing the currency string instead produced
+        // 1535516392, leaving the quote-currency account permanently empty and
+        // every buy rejected with RISK_NSF.
+        CoreSymbolSpecification specification = venue.symbols.getFirst().iterator().next();
+        assertThat(specification.quoteCurrency).isEqualTo(840);
+    }
+
+    @Test
+    void refusesAnUnmappedCurrencyRatherThanHashingIt() {
+        ListingSnapshot unmapped = new ListingSnapshot(
+                7, 1, "AAPL", "Apple Inc.", "AAPL", "XNAS", "Nasdaq",
+                "US", "XYZ", new BigDecimal("0.01"), BigDecimal.ONE,
+                new BigDecimal("101"), new BigDecimal("100"));
+
+        gateway.submit(withListing(order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25"), unmapped));
+
+        // Failing loudly is the point: a silent hash fallback is what made the
+        // venue and portfolio-service disagree without anything reporting it.
+        assertThat(venue.submits).isEmpty();
+        assertThat(commands.rejections).hasSize(1);
+    }
+
+    @Test
     void onboardsEachClientExactlyOnceUnderFullEquityRisk() {
         ExchangeCoreExecutionVenueGateway riskGateway =
                 new ExchangeCoreExecutionVenueGateway(commands, venue, true);
