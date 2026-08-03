@@ -11,9 +11,19 @@ import org.springframework.web.client.RestClient;
 class StaticDataClient {
     private final RestClient client;
 
+    /**
+     * Takes the auto-configured builder rather than calling
+     * {@code RestClient.builder()}.
+     *
+     * <p>HTTP client observation is applied by {@code ObservationRestClientCustomizer},
+     * which Spring Boot passes to builders through {@code RestClientBuilderConfigurer} —
+     * and that only runs for the auto-configured {@code RestClient.Builder} bean.
+     * A statically created builder bypasses it entirely, so the client produces
+     * no {@code http_client_requests} metrics and no client spans, silently.
+     */
     @Autowired
-    StaticDataClient(@Value("${emporia.static-data.url}") String baseUrl) {
-        this(RestClient.builder().baseUrl(baseUrl).build());
+    StaticDataClient(RestClient.Builder builder, @Value("${emporia.static-data.url}") String baseUrl) {
+        this(builder.baseUrl(baseUrl).build());
     }
 
     StaticDataClient(RestClient client) {

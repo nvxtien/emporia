@@ -16,8 +16,10 @@ public class StaticDataClient {
     private static final ParameterizedTypeReference<List<ListingSnapshot>> LISTINGS = new ParameterizedTypeReference<>() { };
     private final RestClient client;
 
-    StaticDataClient(@Value("${emporia.static-data.url}") String baseUrl) {
-        this.client = RestClient.builder().baseUrl(baseUrl).build();
+    StaticDataClient(RestClient.Builder builder, @Value("${emporia.static-data.url}") String baseUrl) {
+        // Injected, not RestClient.builder(): only the auto-configured builder carries
+        // ObservationRestClientCustomizer, so a static one emits no client metrics or spans.
+        this.client = builder.baseUrl(baseUrl).build();
     }
 
     ListingSnapshot get(long id, String authorization) {

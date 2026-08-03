@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import org.springframework.web.client.RestClient;
 
 class StaticDataClientTest {
     private final List<String> requestUris = new CopyOnWriteArrayList<>();
@@ -26,7 +27,7 @@ class StaticDataClientTest {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/instruments", this::handleRequest);
         server.start();
-        client = new StaticDataClient("http://127.0.0.1:" + server.getAddress().getPort());
+        client = new StaticDataClient(RestClient.builder(), "http://127.0.0.1:" + server.getAddress().getPort());
     }
 
     @AfterEach

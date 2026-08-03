@@ -16,18 +16,18 @@ class AlpacaReferenceDataImporterTest {
 
     @Test
     void rejectsMissingApiCredentials() {
-        assertThatThrownBy(() -> new AlpacaReferenceDataImporter(jdbc, "http://localhost", "", "secret", "schema", BigDecimal.TEN))
+        assertThatThrownBy(() -> new AlpacaReferenceDataImporter(jdbc, RestClient.builder(), "http://localhost", "", "secret", "schema", BigDecimal.TEN))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Alpaca reference-data import requires APCA_API_KEY_ID");
 
-        assertThatThrownBy(() -> new AlpacaReferenceDataImporter(jdbc, "http://localhost", "key", null, "schema", BigDecimal.TEN))
+        assertThatThrownBy(() -> new AlpacaReferenceDataImporter(jdbc, RestClient.builder(), "http://localhost", "key", null, "schema", BigDecimal.TEN))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Alpaca reference-data import requires APCA_API_KEY_ID");
     }
 
     @Test
     void rejectsInvalidSchemaIdentifier() {
-        assertThatThrownBy(() -> new AlpacaReferenceDataImporter(jdbc, "http://localhost", "key", "secret", "invalid schema!", BigDecimal.TEN))
+        assertThatThrownBy(() -> new AlpacaReferenceDataImporter(jdbc, RestClient.builder(), "http://localhost", "key", "secret", "invalid schema!", BigDecimal.TEN))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Database schema must be a simple SQL identifier");
     }

@@ -18,8 +18,10 @@ class StaticDataClient {
     private final RestClient client;
 
     @Autowired
-    StaticDataClient(@Value("${emporia.static-data.url}") String baseUrl) {
-        this(RestClient.builder().baseUrl(baseUrl).build());
+    StaticDataClient(RestClient.Builder builder, @Value("${emporia.static-data.url}") String baseUrl) {
+        // Injected, not RestClient.builder(): only the auto-configured builder carries
+        // ObservationRestClientCustomizer, so a static one emits no client metrics or spans.
+        this(builder.baseUrl(baseUrl).build());
     }
 
     StaticDataClient(RestClient client) {
