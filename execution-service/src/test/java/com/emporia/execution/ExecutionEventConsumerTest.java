@@ -17,6 +17,8 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+
+import java.time.Duration;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.TaskScheduler;
 import tools.jackson.databind.ObjectMapper;
@@ -48,7 +50,7 @@ class ExecutionEventConsumerTest {
     private final ObservationRegistry observations = observationRegistry(meters);
     private final ExecutionEventConsumer consumer = new ExecutionEventConsumer(
             objectMapper, kafka, tradingData, scheduler, venue, executionCommands,
-            meters, observations, "orders.commands", 60, 5, "simulated"
+            meters, observations, "orders.commands", 60, 5, "simulated", 3
     );
 
     /**
@@ -246,6 +248,59 @@ class ExecutionEventConsumerTest {
         verify(executionCommands, never()).reject(any(), any(), any(), any(), any());
         assertThat(timerCount("emporia.strategy.decision", "strategy", "smart",
                 "outcome", "waiting")).isEqualTo(1);
+    }
+
+    @Test
+    void smartRoutingGivesUpAndResolvesTheParentAfterTheRetryCeiling() throws Exception {
+        OrderView parent = order("SMART", null, OrderStatus.LIVE);
+        when(tradingData.sameInstrument(parent.listing().id())).thenReturn(List.of(parent.listing()));
+        when(tradingData.quotes(List.of(parent.listing().id()))).thenReturn(List.of());
+        when(tradingData.strategy(parent.id())).thenReturn(new StrategyStateView(parent, List.of()));
+
+        consumer.consume(event("CREATED", parent));
+
+        // Drive the scheduled ticks by hand; every one fails to route because
+        // there is no liquidity.
+        ArgumentCaptor<Runnable> tick = ArgumentCaptor.forClass(Runnable.class);
+        verify(scheduler).scheduleAtFixedRate(tick.capture(), any(Instant.class), any(Duration.class));
+        for (int attempt = 0; attempt < 3; attempt++) {
+            tick.getValue().run();
+        }
+
+        // Before this there was no ceiling: an unroutable parent retried at the
+        // full tick rate for the life of the process, and the order sat LIVE
+        // with nothing working on it.
+        verify(executionCommands).venueCancel(eq(parent.id()), eq(parent.deskId()), any(),
+                eq(parent.listing().exchangeMic()),
+                eq("SMART routing retries exhausted after 3 attempts"));
+        assertThat(timerCount("emporia.strategy.decision", "strategy", "smart",
+                "outcome", "exhausted")).isEqualTo(1);
+    }
+
+    @Test
+    void smartRoutingRetryCounterResetsAfterASuccessfulSweep() throws Exception {
+        OrderView parent = order("SMART", null, OrderStatus.LIVE);
+        when(tradingData.strategy(parent.id())).thenReturn(new StrategyStateView(parent, List.of()));
+        when(tradingData.sameInstrument(parent.listing().id())).thenReturn(List.of(parent.listing()));
+        when(tradingData.quotes(List.of(parent.listing().id()))).thenReturn(List.of());
+
+        consumer.consume(event("CREATED", parent));
+        ArgumentCaptor<Runnable> tick = ArgumentCaptor.forClass(Runnable.class);
+        verify(scheduler).scheduleAtFixedRate(tick.capture(), any(Instant.class), any(Duration.class));
+        tick.getValue().run();
+        tick.getValue().run();
+
+        // A sweep succeeds, so the count starts again rather than carrying two
+        // old failures toward the ceiling.
+        when(tradingData.quotes(List.of(parent.listing().id())))
+                .thenReturn(List.of(quote(parent.listing().id(), "100.00")));
+        tick.getValue().run();
+
+        when(tradingData.quotes(List.of(parent.listing().id()))).thenReturn(List.of());
+        tick.getValue().run();
+        tick.getValue().run();
+
+        verify(executionCommands, never()).venueCancel(any(), any(), any(), any(), any());
     }
 
     @Test

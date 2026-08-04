@@ -59,6 +59,13 @@ emporia:
     fill-delay: ${EXECUTION_FILL_DELAY:100ms}
     strategy-time-compression: ${STRATEGY_TIME_COMPRESSION:60}
     vwap-default-buckets: ${VWAP_DEFAULT_BUCKETS:10}
+    sor:
+      # A routed child sweeps within this budget and cancels its remainder
+      # rather than resting on the book.
+      slippage-bps: ${EMPORIA_SOR_SLIPPAGE_BPS:10}
+      # Consecutive failed sweeps before the strategy gives up and resolves the
+      # parent order, instead of retrying at tick rate forever.
+      max-retries: ${EMPORIA_SOR_MAX_RETRIES:3}
     exchange-core:
       exchange-id: ${EXCHANGE_CORE_EXCHANGE_ID:emporia-simulation}
       storage-directory: ${EXCHANGE_CORE_STORAGE_DIRECTORY:target/exchange-core-simulation}

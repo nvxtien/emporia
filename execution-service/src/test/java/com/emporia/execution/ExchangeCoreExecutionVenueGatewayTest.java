@@ -180,7 +180,7 @@ class ExchangeCoreExecutionVenueGatewayTest {
     }
 
     @Test
-    void submitsMarketOrdersAsProtectedIocUsingTheListingReferencePrice() {
+    void capsAProtectedIocAtTheReferencePriceWidenedByTheSlippageBudget() {
         OrderView order = order(OrderSide.BUY, OrderType.MARKET, "10", null);
         venue.protectedResponses.add(request -> successful(
                 SimulationOperation.SUBMIT_PROTECTED,
@@ -195,8 +195,84 @@ class ExchangeCoreExecutionVenueGatewayTest {
         DmaProtectedMarketOrder request = venue.protectedSubmits.getFirst();
         assertThat(request.symbol()).isEqualTo(7);
         assertThat(request.side()).isEqualTo(OrderAction.BID);
-        assertThat(request.protectionPrice()).isEqualTo(10_100);
+        // Reference 101.00 widened by 10 bps is 101.101, rounded up a tick to
+        // 101.11. It was previously the bare reference, 101.00, which for a buy
+        // is a cap the order cannot cross - any upward move left it reporting
+        // "no executable liquidity" when the real problem was the cap.
+        assertThat(request.protectionPrice()).isEqualTo(10_111);
         assertThat(request.quantity()).isEqualTo(10);
+        assertThat(commands.rejections).isEmpty();
+    }
+
+    @Test
+    void widensASellProtectionDownwardsSoTheBudgetIsNeverTightenedByRounding() {
+        OrderView order = order(OrderSide.SELL, OrderType.MARKET, "10", null);
+        venue.protectedResponses.add(request -> successful(
+                SimulationOperation.SUBMIT_PROTECTED, request.deliveryId(),
+                new DmaOrderResult(request.orderId(), CommandResultCode.SUCCESS, List.of(), 0, 0),
+                DmaOrderState.initial(request)));
+
+        gateway.submit(order);
+
+        // A seller's budget runs the other way: 101.00 less 10 bps is 100.899,
+        // rounded down a tick to 100.89. Rounding always moves away from the
+        // anchor, so tick alignment can only widen the budget, never quietly
+        // tighten it below what was asked for.
+        assertThat(venue.protectedSubmits.getFirst().protectionPrice()).isEqualTo(10_089);
+    }
+
+    @Test
+    void sweepsRoutedChildrenInsteadOfRestingThem() {
+        OrderView child = withParameters(
+                order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25"),
+                "{\"strategy\":\"SMART\",\"slice\":0,\"tif\":\"IOC\"}");
+        venue.protectedResponses.add(request -> successful(
+                SimulationOperation.SUBMIT_PROTECTED, request.deliveryId(),
+                new DmaOrderResult(request.orderId(), CommandResultCode.SUCCESS, List.of(), 0, 0),
+                DmaOrderState.initial(request)));
+
+        gateway.submit(child);
+
+        // A resting child is how thousands of orders accumulated, and the
+        // venue's checkpoint cost grows with the book.
+        assertThat(venue.submits).isEmpty();
+        assertThat(venue.protectedSubmits).hasSize(1);
+        // Capped against its own limit price, not the listing reference, so the
+        // budget is relative to the price the router actually chose:
+        // 102.25 + 10 bps = 102.352, rounded up to 102.36.
+        assertThat(venue.protectedSubmits.getFirst().protectionPrice()).isEqualTo(10_236);
+    }
+
+    @Test
+    void restsAnOrdinaryLimitOrderThatCarriesNoTif() {
+        OrderView plain = withParameters(
+                order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25"), "{\"strategy\":\"SMART\"}");
+        venue.submitResponses.add(request -> successful(
+                SimulationOperation.SUBMIT_LIMIT, request.deliveryId(),
+                new DmaOrderResult(request.orderId(), CommandResultCode.SUCCESS, List.of(), 0, 0),
+                DmaOrderState.initial(request)));
+
+        gateway.submit(plain);
+
+        assertThat(venue.protectedSubmits).isEmpty();
+        assertThat(venue.submits).hasSize(1);
+    }
+
+    @Test
+    void restsRatherThanRejectsWhenExecutionParametersCannotBeRead() {
+        OrderView broken = withParameters(
+                order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25"), "{not json");
+        venue.submitResponses.add(request -> successful(
+                SimulationOperation.SUBMIT_LIMIT, request.deliveryId(),
+                new DmaOrderResult(request.orderId(), CommandResultCode.SUCCESS, List.of(), 0, 0),
+                DmaOrderState.initial(request)));
+
+        gateway.submit(broken);
+
+        // Execution parameters are free-form and may carry anything a client
+        // sent. Refusing the order because a field this path does not need
+        // failed to parse would turn a cosmetic problem into a rejection.
+        assertThat(venue.submits).hasSize(1);
         assertThat(commands.rejections).isEmpty();
     }
 
@@ -210,7 +286,7 @@ class ExchangeCoreExecutionVenueGatewayTest {
         assertThat(venue.protectedSubmits).isEmpty();
         assertThat(commands.rejections).containsExactly(new Rejection(
                 order.id(), order.deskId(), order.listing().exchangeMic(),
-                "Exchange-core submit failed: reference price and increment must be positive"));
+                "Exchange-core submit failed: protection price anchor must be positive"));
     }
 
     @Test
@@ -394,7 +470,7 @@ class ExchangeCoreExecutionVenueGatewayTest {
     void rejectsFullEquityRiskAccountingWithoutPortfolioUrl() {
         assertThatThrownBy(() -> new ExchangeCoreExecutionVenueGateway(
                 commands, null, Optional.empty(), null, "ex-1", java.nio.file.Path.of("/tmp"), 1,
-                "full-equity-risk", "", Duration.ofSeconds(3), true))
+                "full-equity-risk", "", Duration.ofSeconds(3), true, new BigDecimal("10")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("EXCHANGE_CORE_PORTFOLIO_URL is required");
     }
@@ -404,7 +480,7 @@ class ExchangeCoreExecutionVenueGatewayTest {
     void initializesWithRealProductionSimulationVenue(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tempDir) throws Exception {
         ExchangeCoreExecutionVenueGateway realGateway = new ExchangeCoreExecutionVenueGateway(
                 commands, null, Optional.empty(), null, "ex-1", tempDir, 1,
-                "matching-only", null, Duration.ofSeconds(3), true);
+                "matching-only", null, Duration.ofSeconds(3), true, new BigDecimal("10"));
 
         assertThat(realGateway).isNotNull();
         realGateway.start();
@@ -544,6 +620,16 @@ class ExchangeCoreExecutionVenueGatewayTest {
                 order.remainingQuantity(), order.tradedQuantity(), order.averageTradePrice(),
                 order.status(), order.targetStatus(), order.destination(), order.originatorReference(),
                 order.parentOrderId(), order.rootOrderId(), order.executionParameters(),
+                order.errorMessage(), order.createdAt(), order.updatedAt());
+    }
+
+    private static OrderView withParameters(OrderView order, String executionParameters) {
+        return new OrderView(
+                order.id(), order.version(), order.ownerSubject(), order.deskId(), order.listing(),
+                order.side(), order.type(), order.quantity(), order.limitPrice(),
+                order.remainingQuantity(), order.tradedQuantity(), order.averageTradePrice(),
+                order.status(), order.targetStatus(), order.destination(), order.originatorReference(),
+                order.parentOrderId(), order.rootOrderId(), executionParameters,
                 order.errorMessage(), order.createdAt(), order.updatedAt());
     }
 

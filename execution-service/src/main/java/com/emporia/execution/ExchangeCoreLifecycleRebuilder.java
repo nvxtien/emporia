@@ -41,6 +41,13 @@ import java.util.Map;
 final class ExchangeCoreLifecycleRebuilder {
     private static final Logger log = LoggerFactory.getLogger(ExchangeCoreLifecycleRebuilder.class);
 
+    /** Must match the gateway's, or a rebuilt sweep carries a different cap. */
+    private final BigDecimal slippageBps;
+
+    ExchangeCoreLifecycleRebuilder(BigDecimal slippageBps) {
+        this.slippageBps = slippageBps;
+    }
+
     /**
      * Rebuilds a lifecycle projection covering every order still capable of
      * further execution.
@@ -88,16 +95,16 @@ final class ExchangeCoreLifecycleRebuilder {
      * Rebuilds the venue request exactly as the submit path would have sent it,
      * including the operation name, which is part of the delivery id.
      */
-    private static DmaNewOrder request(OrderView order) {
+    private DmaNewOrder request(OrderView order) {
         long quantity = ExchangeCoreExecutionVenueGateway.quantitySteps(order.quantity(), order.listing());
-        if (order.type() == OrderType.MARKET) {
+        if (order.type() == OrderType.MARKET || ExchangeCoreExecutionVenueGateway.sweeps(order)) {
             return new DmaProtectedMarketOrder(
                     ExchangeCoreExecutionVenueGateway.deliveryId(order, "submit-protected"),
                     ExchangeCoreExecutionVenueGateway.coreOrderId(order),
                     ExchangeCoreExecutionVenueGateway.clientId(order),
                     ExchangeCoreExecutionVenueGateway.symbolId(order.listing()),
                     ExchangeCoreExecutionVenueGateway.side(order.side()),
-                    ExchangeCoreExecutionVenueGateway.protectionPriceTicks(order),
+                    ExchangeCoreExecutionVenueGateway.protectionPriceTicks(order, slippageBps),
                     quantity);
         }
         return new DmaLimitOrder(

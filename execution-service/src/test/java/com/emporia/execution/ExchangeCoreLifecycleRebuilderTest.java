@@ -20,7 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class ExchangeCoreLifecycleRebuilderTest {
 
-    private final ExchangeCoreLifecycleRebuilder rebuilder = new ExchangeCoreLifecycleRebuilder();
+    private final ExchangeCoreLifecycleRebuilder rebuilder = new ExchangeCoreLifecycleRebuilder(new BigDecimal("10"));
 
     @Test
     void rebuildsALiveOrderWithTheIdentitiesTheSubmitPathWouldHaveUsed() {
