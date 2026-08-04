@@ -8,6 +8,7 @@ import exchange.core2.core.common.CoreSymbolSpecification;
 import exchange.core2.core.common.OrderAction;
 import exchange.core2.core.common.SymbolType;
 import exchange.core2.core.common.api.dma.DmaCancelOrder;
+import exchange.core2.core.common.api.dma.DmaLifecycleSnapshot;
 import exchange.core2.core.common.api.dma.DmaFill;
 import exchange.core2.core.common.api.dma.DmaLimitOrder;
 import exchange.core2.core.common.api.dma.DmaOrderResult;
@@ -96,12 +97,16 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     private final Map<Long, CompletableFuture<Void>> onboarded = new ConcurrentHashMap<>();
     /** Onboarding only applies under full-equity-risk; matching-only has no risk profiles. */
     private final boolean fullEquityRisk;
+    /** Order-management, the source of truth the lifecycle projection is rebuilt from. */
+    private final TradingDataClient recoverySource;
+    private final ExchangeCoreLifecycleRebuilder lifecycleRebuilder = new ExchangeCoreLifecycleRebuilder();
 
     @Autowired
     public ExchangeCoreExecutionVenueGateway(
             ExecutionCommandPublisher commands,
             ServiceAccessTokenProvider tokenProvider,
             Optional<DataSource> dataSource,
+            TradingDataClient recoverySource,
             @Value("${emporia.execution.exchange-core.exchange-id}") String exchangeId,
             @Value("${emporia.execution.exchange-core.storage-directory}") Path storage,
             @Value("${emporia.execution.exchange-core.symbol-partitions}") int partitions,
@@ -116,7 +121,8 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         this(commands, buildVenue(exchangeId, storage, partitions,
                 buildAccounting(accountingMode, exchangeId, portfolioUrl, portfolioTimeout, tokenProvider, dataSource.orElse(null)),
                 journaling),
-                ACCOUNTING_FULL_EQUITY.equalsIgnoreCase(accountingMode));
+                ACCOUNTING_FULL_EQUITY.equalsIgnoreCase(accountingMode),
+                recoverySource);
         log.info("Exchange-core venue started with accounting-mode={} journaling={}",
                 accountingMode, journaling);
     }
@@ -200,9 +206,21 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
 
     public ExchangeCoreExecutionVenueGateway(ExecutionCommandPublisher commands, ExchangeCoreVenue venue,
                                              boolean fullEquityRisk) {
+        this(commands, venue, fullEquityRisk, null);
+    }
+
+    /**
+     * @param recoverySource order-management, from which the venue's lifecycle
+     *                       projection is rebuilt at startup. {@code null}
+     *                       skips the rebuild, which is only appropriate for
+     *                       tests that construct the venue directly.
+     */
+    public ExchangeCoreExecutionVenueGateway(ExecutionCommandPublisher commands, ExchangeCoreVenue venue,
+                                             boolean fullEquityRisk, TradingDataClient recoverySource) {
         this.commands = Objects.requireNonNull(commands, "commands");
         this.venue = Objects.requireNonNull(venue, "venue");
         this.fullEquityRisk = fullEquityRisk;
+        this.recoverySource = recoverySource;
         this.symbols.addAll(venue.restoredSymbols());
     }
 
@@ -339,9 +357,41 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         ensureSymbol(order.listing());
     }
 
+    /**
+     * Rebuilds the venue's lifecycle projection, then opens for trading.
+     *
+     * <p>The rebuild must happen here rather than in
+     * {@code ExecutionEventConsumer.recover()}, which runs a second after the
+     * application is ready: by then the Kafka listeners are consuming, and
+     * applying a rebuilt projection <em>replaces</em> whatever the lifecycle
+     * holds, so any order accepted in that window would be silently erased.
+     *
+     * <p>Fails closed. If order-management cannot be reached there is no way to
+     * tell which orders the venue is already responsible for, and opening with
+     * an empty projection would accept redelivered commands as new ones and
+     * execute them twice. Refusing to start is the safe direction, and matches
+     * how full-equity-risk already refuses to start without a portfolio URL.
+     */
     @Override
     public void start() {
+        if (recoverySource != null) {
+            venue.recoverLifecycle(
+                    lifecycleRebuilder.rebuild(recoverySource.recoverable().directOrders()));
+        }
         running.set(true);
+    }
+
+    /**
+     * Starts before the Kafka listener containers, so the lifecycle projection
+     * is in place before the first command is consumed.
+     *
+     * <p>Stated explicitly because both this bean and the listener containers
+     * would otherwise sit at the default phase, where the ordering that makes
+     * recovery correct is incidental rather than guaranteed.
+     */
+    @Override
+    public int getPhase() {
+        return Integer.MAX_VALUE - 1024;
     }
 
     @Override
@@ -504,15 +554,15 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         }
     }
 
-    private static long priceTicks(OrderView order) {
+    static long priceTicks(OrderView order) {
         return exactUnits(order.limitPrice(), order.listing().tickSize(), "limit price");
     }
 
-    private static long protectionPriceTicks(OrderView order) {
+    static long protectionPriceTicks(OrderView order) {
         return exactUnits(order.listing().referencePrice(), order.listing().tickSize(), "reference price");
     }
 
-    private static long quantitySteps(BigDecimal quantity, ListingSnapshot listing) {
+    static long quantitySteps(BigDecimal quantity, ListingSnapshot listing) {
         return exactUnits(quantity, listing.sizeIncrement(), "quantity");
     }
 
@@ -531,24 +581,24 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         return listing.sizeIncrement().multiply(BigDecimal.valueOf(steps));
     }
 
-    private static OrderAction side(OrderSide side) {
+    static OrderAction side(OrderSide side) {
         return side == OrderSide.BUY ? OrderAction.BID : OrderAction.ASK;
     }
 
-    private static int symbolId(ListingSnapshot listing) {
+    static int symbolId(ListingSnapshot listing) {
         return Math.toIntExact(listing.id());
     }
 
-    private static long coreOrderId(OrderView order) {
+    static long coreOrderId(OrderView order) {
         return positiveLong(order.id());
     }
 
-    private static long clientId(OrderView order) {
+    static long clientId(OrderView order) {
         return positiveLong(UUID.nameUUIDFromBytes(
                 order.ownerSubject().getBytes(StandardCharsets.UTF_8)));
     }
 
-    private static long deliveryId(OrderView order, String operation) {
+    static long deliveryId(OrderView order, String operation) {
         return positiveLong(ExecutionCommandPublisher.deterministic(
                 order.id() + ":" + order.version() + ":" + operation));
     }
@@ -613,6 +663,14 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         void addSymbols(Collection<CoreSymbolSpecification> symbols);
 
         /**
+         * Replaces the venue's lifecycle projection with one rebuilt elsewhere.
+         *
+         * <p>Replaces rather than merges, so it must be applied before any
+         * command is accepted.
+         */
+        void recoverLifecycle(DmaLifecycleSnapshot lifecycle);
+
+        /**
          * Imports a client's balances from portfolio-service into the risk
          * engine. Required before that client's first order under
          * full-equity-risk: the risk engine rejects commands for a uid it has
@@ -674,6 +732,11 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             simulation.addSymbols(symbols);
             symbols.stream().map(symbol -> symbol.symbolId).forEach(knownSymbols::add);
             checkpoint();
+        }
+
+        @Override
+        public void recoverLifecycle(DmaLifecycleSnapshot lifecycle) {
+            simulation.recoverLifecycle(lifecycle);
         }
 
         @Override
