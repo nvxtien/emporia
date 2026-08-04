@@ -61,6 +61,9 @@ class ExecutionEventConsumer {
     private final ObservationRegistry observations;
     private final String venueMode;
     private final ConcurrentHashMap<UUID, List<ScheduledFuture<?>>> runtimes = new ConcurrentHashMap<>();
+    /** Consecutive failed sweeps per parent; cleared as soon as one succeeds. */
+    private final ConcurrentHashMap<UUID, Integer> sweepFailures = new ConcurrentHashMap<>();
+    private final int maxSweepRetries;
     private final AtomicBoolean recovered = new AtomicBoolean();
 
     ExecutionEventConsumer(ObjectMapper objectMapper, KafkaTemplate<String, Object> kafka,
@@ -70,7 +73,8 @@ class ExecutionEventConsumer {
                            @Value("${emporia.kafka.commands-topic}") String orderCommandsTopic,
                            @Value("${emporia.execution.strategy-time-compression}") int timeCompression,
                            @Value("${emporia.execution.vwap-default-buckets}") int defaultVwapBuckets,
-                           @Value("${emporia.execution.venue-mode:simulated}") String venueMode) {
+                           @Value("${emporia.execution.venue-mode:simulated}") String venueMode,
+                           @Value("${emporia.execution.sor.max-retries:3}") int maxSweepRetries) {
         this.objectMapper = objectMapper;
         this.kafka = kafka;
         this.tradingData = tradingData;
@@ -84,6 +88,7 @@ class ExecutionEventConsumer {
         this.rejected = meters.counter("emporia.execution.orders.rejected");
         this.observations = observations;
         this.venueMode = venueMode.strip().toLowerCase(Locale.ROOT).replace('-', '_');
+        this.maxSweepRetries = Math.max(1, maxSweepRetries);
     }
 
     /**
@@ -209,12 +214,59 @@ class ExecutionEventConsumer {
                     stopRuntime(parentId);
                     return "noop";
                 }
-                return advanceSmartState(state);
+                String outcome = advanceSmartState(state);
+                sweepFailures.remove(parentId);
+                return outcome;
             });
         } catch (RuntimeException transientFailure) {
+            if (retriesExhausted(parentId)) {
+                giveUp(parentId, "smart",
+                        "SMART routing retries exhausted after " + maxSweepRetries + " attempts");
+                return;
+            }
             log.warn("SMART strategy {} will retry after routing failure: {}",
                     parentId, transientFailure.getMessage());
             stopIfNoLongerExecutable(parentId, "smart");
+        }
+    }
+
+    /**
+     * Counts consecutive failed sweeps and reports when the ceiling is reached.
+     *
+     * <p>Before this there was no ceiling at all: a parent with no routable
+     * liquidity retried at the full tick rate for the life of the process. The
+     * runtime-leak fix reduced the cost of that but did not stop it.
+     */
+    private boolean retriesExhausted(UUID parentId) {
+        return sweepFailures.merge(parentId, 1, Integer::sum) >= maxSweepRetries;
+    }
+
+    /**
+     * Stops a strategy runtime and resolves its parent order.
+     *
+     * <p>A stopped runtime must not leave the parent sitting LIVE with nothing
+     * working on it. The remainder action decides what happens: {@code CANCEL}
+     * by default, so the order reaches a terminal state with the reason
+     * recorded rather than becoming a ghost nobody is executing.
+     */
+    private void giveUp(UUID parentId, String strategy, String reason) {
+        stopRuntime(parentId);
+        sweepFailures.remove(parentId);
+        strategyDecision(strategy, () -> new StrategyResult<Void>("exhausted", null));
+        try {
+            OrderView parent = tradingData.strategy(parentId).parent();
+            if (!isTerminal(parent.status())) {
+                executionCommands.venueCancel(parent.id(), parent.deskId(),
+                        "STRATEGY-EXHAUSTED-" + parent.id() + ":" + parent.version(),
+                        parent.listing().exchangeMic(), reason);
+            }
+            log.warn("Stopping {} strategy runtime {}: {}", strategy, parentId, reason);
+        } catch (RuntimeException stateUnavailable) {
+            // The runtime is already stopped, which is the important half. The
+            // parent is left alone rather than cancelled on a guess, and
+            // recovery reattaches to it after a restart.
+            log.warn("Stopped {} strategy runtime {} ({}), but could not resolve the parent order: {}",
+                    strategy, parentId, reason, stateUnavailable.getMessage());
         }
     }
 
@@ -293,9 +345,7 @@ class ExecutionEventConsumer {
             // each expired VWAP order leak a runtime that logged and issued
             // three HTTP calls ten times a second for the life of the process.
             if (vwapWindowClosed(transientFailure)) {
-                log.warn("Stopping VWAP strategy runtime {}: its execution window has closed "
-                        + "with the parent order still live and unfilled", parentId);
-                stopRuntime(parentId);
+                giveUp(parentId, "vwap", "VWAP execution window expired");
                 return;
             }
             log.warn("VWAP strategy {} will retry after scheduling failure: {}",
@@ -434,7 +484,12 @@ class ExecutionEventConsumer {
                 "DMA",
                 parent.id().toString(),
                 parent.id(),
-                Map.of("strategy", strategy, "slice", index)
+                // IOC: a routed child takes what liquidity is available within
+                // its slippage budget and cancels the rest, rather than resting
+                // on the book. Resting children are why thousands of orders
+                // accumulated, and the venue's checkpoint cost grows with the
+                // book, so a child that does not fill must not linger.
+                Map.of("strategy", strategy, "slice", index, "tif", "IOC")
         );
         kafka.send(orderCommandsTopic, childId.toString(), child);
     }

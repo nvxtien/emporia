@@ -1,5 +1,8 @@
 package com.emporia.execution;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.emporia.events.TradingEvents.ListingSnapshot;
 import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderType;
@@ -63,6 +66,9 @@ import java.util.concurrent.atomic.AtomicLong;
 public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(ExchangeCoreExecutionVenueGateway.class);
     private static final String ACCOUNTING_FULL_EQUITY = "full-equity-risk";
+    /** 10 bps: wide enough to cross a tick or two, tight enough to bound a bad print. */
+    static final BigDecimal DEFAULT_SLIPPAGE_BPS = BigDecimal.TEN;
+    private static final ObjectMapper PARAMETERS = new ObjectMapper();
     /**
      * ISO 4217 numeric codes, the identity portfolio-service stores balances
      * under. Kept minimal on purpose — an entry is only correct if
@@ -99,7 +105,9 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     private final boolean fullEquityRisk;
     /** Order-management, the source of truth the lifecycle projection is rebuilt from. */
     private final TradingDataClient recoverySource;
-    private final ExchangeCoreLifecycleRebuilder lifecycleRebuilder = new ExchangeCoreLifecycleRebuilder();
+    private final ExchangeCoreLifecycleRebuilder lifecycleRebuilder;
+    /** How far past its own price a sweep may execute, in basis points. */
+    private final BigDecimal slippageBps;
 
     @Autowired
     public ExchangeCoreExecutionVenueGateway(
@@ -116,15 +124,17 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             // Defaults off: the journal does not restore the DMA order
             // lifecycle, so enabling it would recover a book holding orders the
             // lifecycle layer cannot resolve. See rework/WAL_LIFECYCLE_GAP.md.
-            @Value("${emporia.execution.exchange-core.journaling:false}") boolean journaling)
+            @Value("${emporia.execution.exchange-core.journaling:false}") boolean journaling,
+            @Value("${emporia.execution.sor.slippage-bps:10}") BigDecimal slippageBps)
             throws IOException {
         this(commands, buildVenue(exchangeId, storage, partitions,
                 buildAccounting(accountingMode, exchangeId, portfolioUrl, portfolioTimeout, tokenProvider, dataSource.orElse(null)),
                 journaling),
                 ACCOUNTING_FULL_EQUITY.equalsIgnoreCase(accountingMode),
-                recoverySource);
-        log.info("Exchange-core venue started with accounting-mode={} journaling={}",
-                accountingMode, journaling);
+                recoverySource,
+                slippageBps);
+        log.info("Exchange-core venue started with accounting-mode={} journaling={} slippage-bps={}",
+                accountingMode, journaling, slippageBps);
     }
 
     private static ProductionSimulationAccounting buildAccounting(
@@ -217,10 +227,23 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
      */
     public ExchangeCoreExecutionVenueGateway(ExecutionCommandPublisher commands, ExchangeCoreVenue venue,
                                              boolean fullEquityRisk, TradingDataClient recoverySource) {
+        this(commands, venue, fullEquityRisk, recoverySource, DEFAULT_SLIPPAGE_BPS);
+    }
+
+    public ExchangeCoreExecutionVenueGateway(ExecutionCommandPublisher commands, ExchangeCoreVenue venue,
+                                             boolean fullEquityRisk, TradingDataClient recoverySource,
+                                             BigDecimal slippageBps) {
         this.commands = Objects.requireNonNull(commands, "commands");
         this.venue = Objects.requireNonNull(venue, "venue");
         this.fullEquityRisk = fullEquityRisk;
         this.recoverySource = recoverySource;
+        this.slippageBps = Objects.requireNonNull(slippageBps, "slippageBps");
+        if (slippageBps.signum() < 0) {
+            throw new IllegalArgumentException("slippage budget must not be negative");
+        }
+        // Shares the gateway's budget so a rebuilt projection carries the same
+        // protection price the submit path would have sent.
+        this.lifecycleRebuilder = new ExchangeCoreLifecycleRebuilder(slippageBps);
         this.symbols.addAll(venue.restoredSymbols());
     }
 
@@ -285,14 +308,19 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             remember(order);
             ensureSymbol(order.listing());
             ensureClient(clientId(order));
-            if (order.type() == OrderType.MARKET) {
+            // A routed child sweeps rather than rests: it takes what liquidity
+            // is there within its slippage budget and cancels the remainder,
+            // instead of joining the book and waiting. Resting children are how
+            // the book grew to thousands of orders, and the checkpoint cost
+            // grows with it.
+            if (order.type() == OrderType.MARKET || sweeps(order)) {
                 DmaProtectedMarketOrder request = new DmaProtectedMarketOrder(
                         deliveryId(order, "submit-protected"),
                         coreOrderId(order),
                         clientId(order),
                         symbolId(order.listing()),
                         side(order.side()),
-                        protectionPriceTicks(order),
+                        protectionPriceTicks(order, slippageBps),
                         quantitySteps(order.quantity(), order.listing()));
                 handleProtected(order, venue.submitProtected(request).join());
             } else {
@@ -515,6 +543,29 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
                 detail);
     }
 
+    /**
+     * Whether this order sweeps and cancels its remainder rather than resting.
+     *
+     * <p>Signalled by {@code "tif":"IOC"} in the order's execution parameters,
+     * which is how a strategy marks the children it routes.
+     *
+     * <p>Unreadable parameters mean "rests", not an error. They are free-form
+     * and may carry anything a client sent; refusing the order because a field
+     * this method does not need failed to parse would turn a cosmetic problem
+     * into a rejection.
+     */
+    static boolean sweeps(OrderView order) {
+        String parameters = order.executionParameters();
+        if (parameters == null || parameters.isBlank()) return false;
+        try {
+            JsonNode tif = PARAMETERS.readTree(parameters).get("tif");
+            return tif != null && "IOC".equalsIgnoreCase(tif.asText());
+        } catch (JsonProcessingException unreadable) {
+            log.debug("Ignoring unreadable execution parameters on order {}", order.id());
+            return false;
+        }
+    }
+
     private boolean checkpointFailed(OrderView order, String operation, RuntimeException failure) {
         Throwable cause = unwrap(failure);
         if (cause instanceof ExchangeCoreCheckpointException) {
@@ -558,8 +609,44 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         return exactUnits(order.limitPrice(), order.listing().tickSize(), "limit price");
     }
 
-    static long protectionPriceTicks(OrderView order) {
-        return exactUnits(order.listing().referencePrice(), order.listing().tickSize(), "reference price");
+    /**
+     * The worst price a protected IOC may execute at: the order's own price
+     * widened by the slippage budget, in the direction that lets it cross.
+     *
+     * <p>This previously returned the listing's bare reference price, with no
+     * tolerance and no regard for side. For a buy that put the cap exactly at
+     * reference, so any upward move left the order unable to cross and it came
+     * back "found no executable liquidity" - a rejection that looks like absent
+     * liquidity but is really a cap set too tight to trade against.
+     *
+     * <p>The anchor is the order's limit price where it has one, so a routed
+     * child is capped relative to the price the router chose rather than to a
+     * reference that may be stale. Market orders have no limit and fall back to
+     * the reference price.
+     *
+     * <p>Rounded away from the anchor - up for a buy, down for a sell - so tick
+     * rounding can only widen the budget, never quietly tighten it below what
+     * was asked for.
+     */
+    static long protectionPriceTicks(OrderView order, BigDecimal slippageBps) {
+        ListingSnapshot listing = order.listing();
+        BigDecimal anchor = order.limitPrice() != null ? order.limitPrice() : listing.referencePrice();
+        if (anchor == null || anchor.signum() <= 0) {
+            throw new IllegalArgumentException("protection price anchor must be positive");
+        }
+        BigDecimal tolerance = anchor.multiply(slippageBps)
+                .divide(BigDecimal.valueOf(10_000), 10, RoundingMode.HALF_UP);
+        boolean buying = order.side() == OrderSide.BUY;
+        BigDecimal cap = buying ? anchor.add(tolerance) : anchor.subtract(tolerance);
+        if (cap.signum() <= 0) {
+            throw new IllegalArgumentException("protection price must remain positive");
+        }
+        BigDecimal tickSize = listing.tickSize();
+        if (tickSize == null || tickSize.signum() <= 0) {
+            throw new IllegalArgumentException("tick size must be positive");
+        }
+        return cap.divide(tickSize, 0, buying ? RoundingMode.CEILING : RoundingMode.FLOOR)
+                .longValueExact();
     }
 
     static long quantitySteps(BigDecimal quantity, ListingSnapshot listing) {

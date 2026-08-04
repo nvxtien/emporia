@@ -49,7 +49,7 @@ class ExecutionObservationTest {
     void setUp() {
         observations.observationConfig().observationHandler(new DefaultMeterObservationHandler(meters));
         consumer = new ExecutionEventConsumer(objectMapper, kafka, tradingData, scheduler, venue,
-                executionCommands, meters, observations, "orders.commands", 60, 5, "exchange-core");
+                executionCommands, meters, observations, "orders.commands", 60, 5, "exchange-core", 3);
     }
 
     @Test
