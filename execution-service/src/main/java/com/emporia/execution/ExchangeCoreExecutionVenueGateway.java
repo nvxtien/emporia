@@ -30,6 +30,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.SmartLifecycle;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.sql.DataSource;
@@ -106,12 +107,18 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             @Value("${emporia.execution.exchange-core.symbol-partitions}") int partitions,
             @Value("${emporia.execution.exchange-core.accounting-mode:matching-only}") String accountingMode,
             @Value("${emporia.execution.exchange-core.portfolio-url:}") String portfolioUrl,
-            @Value("${emporia.execution.exchange-core.portfolio-request-timeout:3s}") Duration portfolioTimeout)
+            @Value("${emporia.execution.exchange-core.portfolio-request-timeout:3s}") Duration portfolioTimeout,
+            // Defaults off: the journal does not restore the DMA order
+            // lifecycle, so enabling it would recover a book holding orders the
+            // lifecycle layer cannot resolve. See rework/WAL_LIFECYCLE_GAP.md.
+            @Value("${emporia.execution.exchange-core.journaling:false}") boolean journaling)
             throws IOException {
         this(commands, buildVenue(exchangeId, storage, partitions,
-                buildAccounting(accountingMode, exchangeId, portfolioUrl, portfolioTimeout, tokenProvider, dataSource.orElse(null))),
+                buildAccounting(accountingMode, exchangeId, portfolioUrl, portfolioTimeout, tokenProvider, dataSource.orElse(null)),
+                journaling),
                 ACCOUNTING_FULL_EQUITY.equalsIgnoreCase(accountingMode));
-        log.info("Exchange-core venue started with accounting-mode={}", accountingMode);
+        log.info("Exchange-core venue started with accounting-mode={} journaling={}",
+                accountingMode, journaling);
     }
 
     private static ProductionSimulationAccounting buildAccounting(
@@ -172,7 +179,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
 
     private static ExchangeCoreVenue buildVenue(
             String exchangeId, Path storage, int partitions,
-            ProductionSimulationAccounting accounting) throws IOException {
+            ProductionSimulationAccounting accounting, boolean journaling) throws IOException {
         // exchange-core writes its snapshots straight into this directory and does
         // not create it. Only ExchangeCoreCheckpointStore.save did, and that runs
         // after the snapshot write has already failed.
@@ -183,7 +190,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         // starts normally and the submit still returns 201, so it looks like a
         // trading rejection rather than missing scratch space.
         Files.createDirectories(storage);
-        return new ProductionSimulationVenue(exchangeId, storage, partitions, accounting);
+        return new ProductionSimulationVenue(exchangeId, storage, partitions, accounting, journaling);
     }
 
     /** Matching-only wiring; no client onboarding, since there are no risk profiles. */
@@ -354,6 +361,37 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     @Override
     public boolean isRunning() {
         return running.get();
+    }
+
+    /**
+     * Snapshots engine state on a timer rather than per order.
+     *
+     * <p>The journal alone is enough to recover, but replay time grows without
+     * bound, so a periodic snapshot bounds it: recovery loads the newest
+     * snapshot and replays only the commands journalled after it.
+     *
+     * <p>A failure here is a background problem, not an order rejection - which
+     * is the meaning change from the per-order checkpoint, where a snapshot
+     * failure rejected the order that triggered it. Nothing is lost when this
+     * fails: the journal still holds every command since the last successful
+     * snapshot, so recovery stays correct and only takes longer.
+     *
+     * <p>{@code checkpoint()} takes the engine's write lock, so this briefly
+     * blocks order submission. That is the cost of snapshotting at all, now paid
+     * once a minute instead of once an order.
+     */
+    @Scheduled(
+            initialDelayString = "${emporia.execution.exchange-core.snapshot-interval:60s}",
+            fixedDelayString = "${emporia.execution.exchange-core.snapshot-interval:60s}")
+    void snapshotPeriodically() {
+        if (!running.get()) return;
+        try {
+            venue.checkpoint();
+        } catch (RuntimeException snapshotFailure) {
+            log.error("Periodic exchange-core snapshot failed. Recovery is still correct - "
+                    + "the journal holds every command since the last successful snapshot - "
+                    + "but replay will take longer until one succeeds", snapshotFailure);
+        }
     }
 
     private void handle(OrderView order, String operation, ProductionSimulationResult result) {
@@ -608,12 +646,14 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         private final Set<Integer> restoredSymbols;
         private final Set<Integer> knownSymbols = ConcurrentHashMap.newKeySet();
         private final AtomicLong checkpointSequence;
+        private final boolean journaling;
 
         private ProductionSimulationVenue(
                 String exchangeId, Path storage, int partitions,
-                ProductionSimulationAccounting accounting) throws IOException {
+                ProductionSimulationAccounting accounting, boolean journaling) throws IOException {
+            this.journaling = journaling;
             ProductionSimulationConfiguration configuration =
-                    ProductionSimulationConfiguration.create(exchangeId, storage, partitions);
+                    ProductionSimulationConfiguration.create(exchangeId, storage, partitions, journaling);
             checkpointStore = new ExchangeCoreCheckpointStore(configuration.storageDirectory());
             ExchangeCoreCheckpointStore.LatestCheckpoint latest =
                     checkpointStore.load().orElse(null);
@@ -641,24 +681,44 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             return simulation.onboardPortfolio(clientId).thenApply(snapshot -> null);
         }
 
+        // Where durability comes from, and why the two are one switch.
+        //
+        // journaling=false: snapshot after every command, as before. The
+        // snapshot is the only durability mechanism, so it cannot leave the
+        // command path without losing data.
+        //
+        // journaling=true: the journal is a Disruptor stage running in parallel
+        // with risk and matching, so a result waits on max(matching, journal)
+        // rather than matching followed by a full-state serialisation, and
+        // snapshots drop to a 60s timer.
+        //
+        // Removing the per-command snapshot without the journal would leave
+        // nothing durable between timed snapshots, which is why one flag
+        // controls both rather than two independent settings.
+        //
+        // NOT YET SAFE TO ENABLE - see rework/WAL_LIFECYCLE_GAP.md. The journal
+        // restores the matching engine but not the DMA order lifecycle, which
+        // is snapshot-only, so recovery would leave the book holding orders the
+        // lifecycle layer cannot resolve. Default stays false until that is
+        // resolved.
         @Override
         public CompletableFuture<ProductionSimulationResult> submit(DmaLimitOrder order) {
-            return checkpointAfter(simulation.submit(order));
+            return checkpointUnlessJournalled(simulation.submit(order));
         }
 
         @Override
         public CompletableFuture<ProductionSimulationResult> submitProtected(DmaProtectedMarketOrder order) {
-            return checkpointAfter(simulation.submitProtected(order));
+            return checkpointUnlessJournalled(simulation.submitProtected(order));
         }
 
         @Override
         public CompletableFuture<ProductionSimulationResult> replace(DmaReplaceOrder replacement) {
-            return checkpointAfter(simulation.replace(replacement));
+            return checkpointUnlessJournalled(simulation.replace(replacement));
         }
 
         @Override
         public CompletableFuture<ProductionSimulationResult> cancel(DmaCancelOrder cancellation) {
-            return checkpointAfter(simulation.cancel(cancellation));
+            return checkpointUnlessJournalled(simulation.cancel(cancellation));
         }
 
         @Override
@@ -682,8 +742,11 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             simulation.close();
         }
 
-        private CompletableFuture<ProductionSimulationResult> checkpointAfter(
+        private CompletableFuture<ProductionSimulationResult> checkpointUnlessJournalled(
                 CompletableFuture<ProductionSimulationResult> operation) {
+            if (journaling) {
+                return operation;
+            }
             return operation.thenApply(result -> {
                 checkpoint();
                 return result;

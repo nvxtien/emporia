@@ -393,7 +393,7 @@ class ExchangeCoreExecutionVenueGatewayTest {
     void rejectsFullEquityRiskAccountingWithoutPortfolioUrl() {
         assertThatThrownBy(() -> new ExchangeCoreExecutionVenueGateway(
                 commands, null, Optional.empty(), "ex-1", java.nio.file.Path.of("/tmp"), 1,
-                "full-equity-risk", "", Duration.ofSeconds(3)))
+                "full-equity-risk", "", Duration.ofSeconds(3), true))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("EXCHANGE_CORE_PORTFOLIO_URL is required");
     }
@@ -403,7 +403,7 @@ class ExchangeCoreExecutionVenueGatewayTest {
     void initializesWithRealProductionSimulationVenue(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tempDir) throws Exception {
         ExchangeCoreExecutionVenueGateway realGateway = new ExchangeCoreExecutionVenueGateway(
                 commands, null, Optional.empty(), "ex-1", tempDir, 1,
-                "matching-only", null, Duration.ofSeconds(3));
+                "matching-only", null, Duration.ofSeconds(3), true);
 
         assertThat(realGateway).isNotNull();
         realGateway.start();
@@ -414,6 +414,40 @@ class ExchangeCoreExecutionVenueGatewayTest {
 
         realGateway.stop();
         assertThat(realGateway.isRunning()).isFalse();
+    }
+
+    // Note: the per-order checkpoint policy lives inside ProductionSimulationVenue,
+    // which FakeVenue replaces wholesale, so it cannot be asserted from here.
+    // Its coverage is ProductionSimulationTest in exchange-core, which runs a
+    // real engine.
+
+    @Test
+    void snapshotsPeriodicallyOnlyWhileRunning() {
+        gateway.snapshotPeriodically();
+        assertThat(venue.checkpoints).as("must not snapshot before start").isZero();
+
+        gateway.start();
+        gateway.snapshotPeriodically();
+        gateway.snapshotPeriodically();
+
+        assertThat(venue.checkpoints).isEqualTo(2);
+    }
+
+    @Test
+    void periodicSnapshotFailureDoesNotPropagate() {
+        FakeVenue failing = new FakeVenue();
+        failing.checkpointFailure = new IllegalStateException("disk full");
+        ExchangeCoreExecutionVenueGateway failingGateway =
+                new ExchangeCoreExecutionVenueGateway(commands, failing);
+        failingGateway.start();
+
+        // A failed snapshot is a background problem, not an order rejection:
+        // the journal still holds every command since the last good snapshot,
+        // so recovery stays correct and only replay time grows. Throwing here
+        // would kill the scheduler and stop all future snapshots.
+        failingGateway.snapshotPeriodically();
+
+        assertThat(failing.checkpoints).isZero();
     }
 
     @Test
@@ -482,6 +516,7 @@ class ExchangeCoreExecutionVenueGatewayTest {
         private final Set<Integer> restoredSymbols;
         private int checkpoints;
         private boolean closed;
+        private RuntimeException checkpointFailure;
 
         private FakeVenue() {
             this(Set.of());
@@ -544,6 +579,9 @@ class ExchangeCoreExecutionVenueGatewayTest {
 
         @Override
         public void checkpoint() {
+            if (checkpointFailure != null) {
+                throw checkpointFailure;
+            }
             checkpoints++;
         }
 
