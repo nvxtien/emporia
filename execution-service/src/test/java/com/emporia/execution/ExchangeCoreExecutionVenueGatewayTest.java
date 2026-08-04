@@ -1,5 +1,6 @@
 package com.emporia.execution;
 
+import com.emporia.events.TradingEvents.ExecutionRecoveryView;
 import com.emporia.events.TradingEvents.ListingSnapshot;
 import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderStatus;
@@ -392,7 +393,7 @@ class ExchangeCoreExecutionVenueGatewayTest {
     @Test
     void rejectsFullEquityRiskAccountingWithoutPortfolioUrl() {
         assertThatThrownBy(() -> new ExchangeCoreExecutionVenueGateway(
-                commands, null, Optional.empty(), "ex-1", java.nio.file.Path.of("/tmp"), 1,
+                commands, null, Optional.empty(), null, "ex-1", java.nio.file.Path.of("/tmp"), 1,
                 "full-equity-risk", "", Duration.ofSeconds(3), true))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("EXCHANGE_CORE_PORTFOLIO_URL is required");
@@ -402,7 +403,7 @@ class ExchangeCoreExecutionVenueGatewayTest {
     @Test
     void initializesWithRealProductionSimulationVenue(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tempDir) throws Exception {
         ExchangeCoreExecutionVenueGateway realGateway = new ExchangeCoreExecutionVenueGateway(
-                commands, null, Optional.empty(), "ex-1", tempDir, 1,
+                commands, null, Optional.empty(), null, "ex-1", tempDir, 1,
                 "matching-only", null, Duration.ofSeconds(3), true);
 
         assertThat(realGateway).isNotNull();
@@ -420,6 +421,46 @@ class ExchangeCoreExecutionVenueGatewayTest {
     // which FakeVenue replaces wholesale, so it cannot be asserted from here.
     // Its coverage is ProductionSimulationTest in exchange-core, which runs a
     // real engine.
+
+    @Test
+    void rebuildsTheVenueLifecycleFromOrderManagementBeforeOpening() {
+        OrderView live = order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25");
+        TradingDataClient recoverySource = org.mockito.Mockito.mock(TradingDataClient.class);
+        when(recoverySource.recoverable())
+                .thenReturn(new ExecutionRecoveryView(List.of(live), List.of()));
+        ExchangeCoreExecutionVenueGateway recovering =
+                new ExchangeCoreExecutionVenueGateway(commands, venue, false, recoverySource);
+
+        recovering.start();
+
+        // Must be applied before the venue opens: recoverLifecycle replaces the
+        // projection, so an order accepted first would be erased by it.
+        assertThat(venue.recoveredLifecycles).hasSize(1);
+        assertThat(venue.recoveredLifecycles.getFirst().orders())
+                .containsKey(ExchangeCoreExecutionVenueGateway.coreOrderId(live));
+        assertThat(recovering.isRunning()).isTrue();
+    }
+
+    @Test
+    void refusesToOpenWhenOrderManagementIsUnreachable() {
+        TradingDataClient unreachable = org.mockito.Mockito.mock(TradingDataClient.class);
+        when(unreachable.recoverable()).thenThrow(new IllegalStateException("connection refused"));
+        ExchangeCoreExecutionVenueGateway recovering =
+                new ExchangeCoreExecutionVenueGateway(commands, venue, false, unreachable);
+
+        // Fail closed. Opening with an empty projection would treat redelivered
+        // commands as new ones and execute them twice.
+        assertThatThrownBy(recovering::start).isInstanceOf(IllegalStateException.class);
+        assertThat(recovering.isRunning()).isFalse();
+    }
+
+    @Test
+    void startsBeforeTheKafkaListenersSoRecoveryPrecedesTheFirstCommand() {
+        // Lower phase starts first. Asserted against the real constant so this
+        // fails if Spring Kafka's default moves under us.
+        assertThat(gateway.getPhase())
+                .isLessThan(org.springframework.kafka.listener.AbstractMessageListenerContainer.DEFAULT_PHASE);
+    }
 
     @Test
     void snapshotsPeriodicallyOnlyWhileRunning() {
@@ -529,6 +570,14 @@ class ExchangeCoreExecutionVenueGatewayTest {
         @Override
         public void addSymbols(Collection<CoreSymbolSpecification> symbols) {
             this.symbols.add(symbols);
+        }
+
+        private final ArrayDeque<exchange.core2.core.common.api.dma.DmaLifecycleSnapshot> recoveredLifecycles =
+                new ArrayDeque<>();
+
+        @Override
+        public void recoverLifecycle(exchange.core2.core.common.api.dma.DmaLifecycleSnapshot lifecycle) {
+            recoveredLifecycles.add(lifecycle);
         }
 
         private final ArrayDeque<Long> onboarded = new ArrayDeque<>();
