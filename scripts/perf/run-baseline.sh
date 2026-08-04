@@ -37,6 +37,12 @@ STALL_TARGET="${STALL_TARGET:-order-management-service}"
 # the primary signal because lag and error rate both trail it badly.
 KNEE_P50_FACTOR="${KNEE_P50_FACTOR:-2}"
 KNEE_P99_FACTOR="${KNEE_P99_FACTOR:-3}"
+# Warm-up before measuring. Without it the first probe steps absorb JIT
+# compilation and class loading, so the earliest rates look unfairly slow and
+# the curve is distorted at exactly the rates being characterised. Results are
+# discarded.
+WARMUP_RATE="${WARMUP_RATE:-3}"
+WARMUP_DURATION="${WARMUP_DURATION:-60s}"
 
 STABLE_GROUPS='order-data-service-v1|emporia-execution-service-v1|order-management-executions-v1'
 
@@ -53,12 +59,24 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # stage rather than only at startup, because the whole point is that the run
 # itself consumes space.
 #
-# Two separate volumes matter and they are not the same one. The repo (and so
-# exchange-core snapshots, logs, k6 output) is on /Volumes/Work, while Docker's
-# volumes — Postgres, Kafka, Tempo, Prometheus, which is where the bulk of the
-# growth lands — are backed by the system volume that $HOME lives on. Checking
-# only the repo path would let the container volumes fill the machine while
-# this guard reported plenty of space.
+# Two paths matter: the repo (exchange-core snapshots, logs, k6 output) and
+# Docker's data store (Postgres, Kafka, Tempo, Prometheus — where the bulk of
+# the growth lands). They may or may not be the same volume, so resolve the
+# Docker store rather than assuming it sits under $HOME: OrbStack can be
+# relocated, and on this machine it is — data_dir is /Volumes/Work/orbstack,
+# the *same* volume as the repo. Assuming $HOME reported 10 GiB free from the
+# system volume while the volume Docker was actually filling had 5 GiB.
+docker_data_dir() {
+    local dir
+    dir="$(sed -n 's/.*"data_dir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+            "$HOME/.orbstack/vmconfig.json" 2>/dev/null | head -1)"
+    [ -n "$dir" ] && [ -d "$dir" ] && { echo "$dir"; return; }
+    # Docker Desktop keeps its disk image here; $HOME is the last resort.
+    dir="$HOME/Library/Containers/com.docker.docker/Data"
+    [ -d "$dir" ] && { echo "$dir"; return; }
+    echo "$HOME"
+}
+
 free_gib() {
     df -k "$1" | awk 'NR==2 {printf "%d", $4 / 1024 / 1024}'
 }
@@ -66,7 +84,7 @@ free_gib() {
 check_disk() {
     local repo_free docker_free
     repo_free="$(free_gib "$repo_root")"
-    docker_free="$(free_gib "$HOME")"
+    docker_free="$(free_gib "$(docker_data_dir)")"
     echo "    free disk: ${repo_free} GiB (repo), ${docker_free} GiB (docker volumes)"
 
     local volume
@@ -175,12 +193,28 @@ run_k6() {
 
 # --- stages ---------------------------------------------------------------
 
+# Runs load whose results are thrown away, purely to get the JVMs compiled.
+warm_up() {
+    local token="$1"
+    [ "$WARMUP_DURATION" = "0" ] && { echo "  -- warm-up skipped"; return 0; }
+    echo "  -- warming up at ${WARMUP_RATE}/s for ${WARMUP_DURATION} (results discarded)"
+    run_k6 "warmup" "$WARMUP_RATE" "$WARMUP_DURATION" "$token" >/dev/null 2>&1 || true
+    wait_for_drain >/dev/null || true
+}
+
 stage_probe() {
     echo "==> Stage A: capacity probe (${PROBE_RATES} orders/sec, ${PROBE_STEP} each)"
     check_disk
+    local resting_at_start
+    resting_at_start="$(docker exec "${PG_CONTAINER:-emporia-order-management-postgres}" psql -U postgres \
+        -d emporia_order_management -tAc \
+        "select count(*) from emporia_order_data.trading_order where order_status in ('LIVE','PARTIALLY_FILLED');" \
+        2>/dev/null | tr -d ' ' || echo unknown)"
+    echo "    resting orders at start: ${resting_at_start:-unknown}"
     local knee="" last_healthy="" first_degraded=""
     local best_p50="" best_p99=""
     local token; token="$(mint_token)"
+    warm_up "$token"
 
     IFS=',' read -ra rates <<<"$PROBE_RATES"
     for rate in "${rates[@]}"; do
@@ -238,6 +272,11 @@ stage_probe() {
         echo "best_p99_ms=${best_p99:-0}"
         echo "p50_factor=${KNEE_P50_FACTOR}"
         echo "p99_factor=${KNEE_P99_FACTOR}"
+        echo "warmup_rate=${WARMUP_RATE}"
+        echo "warmup_duration=${WARMUP_DURATION}"
+        # Venue latency decays as the resting book grows, so a knee is only
+        # comparable against another run with a similar starting book size.
+        echo "resting_orders_at_start=${resting_at_start:-unknown}"
     } >"${out_dir}/knee.txt"
     if [ -n "$knee" ]; then
         echo "  knee: ${knee}/s sustainable; degradation begins at ${first_degraded}/s"
