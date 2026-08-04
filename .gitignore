@@ -13,3 +13,5 @@ order-command-service/bin/
 order-management-service/bin/
 static-data-service/bin/
 trading-contracts/bin/
+ref/
+
