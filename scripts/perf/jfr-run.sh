@@ -49,7 +49,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-"$script_dir/jfr-start.sh" "${service_list[@]}"
+# Abort if no recording started. This script exists to profile a load window, so
+# running the load unprofiled wastes the window and produces a run that looks
+# like it succeeded. `set -e` is deliberately not used here (the exit trap needs
+# to observe failures), so the status must be checked explicitly.
+if ! "$script_dir/jfr-start.sh" "${service_list[@]}"; then
+    jfr_fail "no recordings started, so the load was not run. Fix the cause above and retry."
+fi
 started_ok=1
 
 echo
