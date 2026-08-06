@@ -38,6 +38,36 @@ psql_q() { docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc "$1" 
 curl -fsS "${OMS_URL}/actuator/health/liveness" >/dev/null 2>&1 \
     || fail "order-management is not up at ${OMS_URL}"
 
+# Widened well past HTTP round-trip time for one curl process, so the burst
+# below is guaranteed to still be queued when the kill lands rather than racing
+# a 10ms flush no single-threaded submitter can outrun.
+FLUSH_DELAY_MS="${WAL_FLUSH_DELAY_MS:-30000}"
+echo "==> Restarting with the flush delay widened to ${FLUSH_DELAY_MS}ms, to force a real backlog"
+restart_oms() {
+    local flush_delay="$1"
+    local launcher child
+    launcher="$(cat "$pid_file" 2>/dev/null || true)"
+    child="$(lsof -ti :8086 2>/dev/null | head -1)"
+    if [ -n "$child" ]; then kill -9 "$child" 2>/dev/null || true; fi
+    if [ -n "$launcher" ]; then kill -9 "$launcher" 2>/dev/null || true; fi
+    while [ -n "$child" ] && kill -0 "$child" 2>/dev/null; do sleep 1; done
+    ( cd "$repo_root/order-management-service" && exec env \
+        DB_URL="${DB_URL:-jdbc:postgresql://localhost:5436/emporia_order_management}" \
+        DB_PASSWORD="${DB_PASSWORD:-admin123}" \
+        EMPORIA_ASYNC_DB_WRITER_FLUSH_DELAY_MS="$flush_delay" \
+        mvn spring-boot:run ) > "$log_file" 2>&1 &
+    echo "$!" > "$pid_file"
+    printf "    waiting"
+    for _ in $(seq 1 80); do
+        curl -fsS "${OMS_URL}/actuator/health/liveness" >/dev/null 2>&1 && break
+        printf '.'; sleep 3
+    done
+    echo
+    curl -fsS "${OMS_URL}/actuator/health/liveness" >/dev/null 2>&1 \
+        || fail "order-management did not come back with flush-delay=${flush_delay}ms; see ${log_file}"
+}
+restart_oms "$FLUSH_DELAY_MS"
+
 token="$(EMPORIA_ORIGIN="$ORIGIN" EMPORIA_USERNAME="${EMPORIA_USERNAME:-admin}" \
     EMPORIA_PASSWORD="${EMPORIA_PASSWORD:-admin123}" \
     node "$repo_root/scripts/perf/get-access-token.mjs" 2>/dev/null)" \
@@ -65,10 +95,13 @@ for worker in $(seq 1 "${WAL_WORKERS:-12}"); do submit_stream "$worker" & done
 sleep "${WAL_KILL_AFTER:-3}"
 
 # Kill without warning, with the queues still holding recent orders.
-launcher="$(cat "$pid_file" 2>/dev/null)" || fail "no order-management pid file"
-child="$(pgrep -P "$launcher" 2>/dev/null | head -1)"
-[ -n "$child" ] || fail "could not find the application JVM under launcher ${launcher}"
-kill -9 "$child" "$launcher" 2>/dev/null || true
+# Located by the port it serves, not by parent pid: the mvn launcher can exit
+# and leave the application JVM running, in which case pgrep -P finds nothing.
+launcher="$(cat "$pid_file" 2>/dev/null || true)"
+child="$(lsof -ti :8086 2>/dev/null | head -1)"
+[ -n "$child" ] || fail "could not find the JVM serving port 8086"
+kill -9 "$child" 2>/dev/null || true
+[ -n "$launcher" ] && kill -9 "$launcher" 2>/dev/null || true
 while kill -0 "$child" 2>/dev/null; do sleep 1; done
 echo "    killed jvm ${child}"
 wait 2>/dev/null || true
@@ -80,21 +113,8 @@ missing_before="$(psql_q "select count(*) from (select unnest(string_to_array('$
     where not exists (select 1 from emporia_order_data.trading_order t where t.id = a.id);")"
 echo "    orders not yet in the database at the moment of the kill: ${missing_before:-0}"
 
-echo "==> Restarting"
-( cd "$repo_root/order-management-service" && exec env \
-    DB_URL="${DB_URL:-jdbc:postgresql://localhost:5436/emporia_order_management}" \
-    DB_PASSWORD="${DB_PASSWORD:-admin123}" \
-    mvn spring-boot:run ) > "$log_file" 2>&1 &
-echo "$!" > "$pid_file"
-
-printf "    waiting"
-for _ in $(seq 1 80); do
-    curl -fsS "${OMS_URL}/actuator/health/liveness" >/dev/null 2>&1 && break
-    printf '.'; sleep 3
-done
-echo
-curl -fsS "${OMS_URL}/actuator/health/liveness" >/dev/null 2>&1 \
-    || fail "order-management did not come back; see ${log_file}"
+echo "==> Restarting with the normal flush delay"
+restart_oms 10
 
 echo "==> Verifying recovery"
 replayed="$(grep -oE "Replaying [0-9]+ order command" "$log_file" | grep -oE "[0-9]+" | tail -1 || true)"
