@@ -34,6 +34,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.springframework.boot.health.contributor.Health;
+import org.springframework.boot.health.contributor.HealthIndicator;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -63,7 +67,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 @ConditionalOnProperty(name = "emporia.execution.venue-mode", havingValue = "exchange-core")
-public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle {
+public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle, HealthIndicator {
     private static final Logger log = LoggerFactory.getLogger(ExchangeCoreExecutionVenueGateway.class);
     private static final String ACCOUNTING_FULL_EQUITY = "full-equity-risk";
     /** 10 bps: wide enough to cross a tick or two, tight enough to bound a bad print. */
@@ -108,6 +112,11 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     private final ExchangeCoreLifecycleRebuilder lifecycleRebuilder;
     /** How far past its own price a sweep may execute, in basis points. */
     private final BigDecimal slippageBps;
+    private final MeterRegistry meters;
+    /** Checkpoint failures since the last successful snapshot; 0 means healthy. */
+    private final AtomicLong checkpointFailures = new AtomicLong();
+    private volatile Instant lastCheckpointFailure;
+    private volatile String lastCheckpointFailureDetail;
 
     @Autowired
     public ExchangeCoreExecutionVenueGateway(
@@ -125,14 +134,16 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             // lifecycle, so enabling it would recover a book holding orders the
             // lifecycle layer cannot resolve. See rework/WAL_LIFECYCLE_GAP.md.
             @Value("${emporia.execution.exchange-core.journaling:false}") boolean journaling,
-            @Value("${emporia.execution.sor.slippage-bps:10}") BigDecimal slippageBps)
+            @Value("${emporia.execution.sor.slippage-bps:10}") BigDecimal slippageBps,
+            MeterRegistry meters)
             throws IOException {
         this(commands, buildVenue(exchangeId, storage, partitions,
                 buildAccounting(accountingMode, exchangeId, portfolioUrl, portfolioTimeout, tokenProvider, dataSource.orElse(null)),
                 journaling),
                 ACCOUNTING_FULL_EQUITY.equalsIgnoreCase(accountingMode),
                 recoverySource,
-                slippageBps);
+                slippageBps,
+                meters);
         log.info("Exchange-core venue started with accounting-mode={} journaling={} slippage-bps={}",
                 accountingMode, journaling, slippageBps);
     }
@@ -200,11 +211,12 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         // not create it. Only ExchangeCoreCheckpointStore.save did, and that runs
         // after the snapshot write has already failed.
         //
-        // The failure mode is quiet and expensive: the directory lives under
-        // target/, so any mvn clean removes it, after which every order reaches
-        // the venue, fails to checkpoint, and comes back REJECTED. The service
-        // starts normally and the submit still returns 201, so it looks like a
-        // trading rejection rather than missing scratch space.
+        // The failure mode is quiet and expensive: without the directory every
+        // order reaches the venue and then fails to checkpoint, while the submit
+        // still returns 201 because the order genuinely arrived. The default
+        // storage location now lives under .local-run rather than target/ so a
+        // build can no longer delete it mid-run, and a checkpoint that fails
+        // anyway is counted and turns the venue's health DOWN.
         Files.createDirectories(storage);
         return new ProductionSimulationVenue(exchangeId, storage, partitions, accounting, journaling);
     }
@@ -233,11 +245,20 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     public ExchangeCoreExecutionVenueGateway(ExecutionCommandPublisher commands, ExchangeCoreVenue venue,
                                              boolean fullEquityRisk, TradingDataClient recoverySource,
                                              BigDecimal slippageBps) {
+        // Test wiring: counters go to a throwaway registry rather than being
+        // skipped, so the instrumented paths still run under test.
+        this(commands, venue, fullEquityRisk, recoverySource, slippageBps, new SimpleMeterRegistry());
+    }
+
+    public ExchangeCoreExecutionVenueGateway(ExecutionCommandPublisher commands, ExchangeCoreVenue venue,
+                                             boolean fullEquityRisk, TradingDataClient recoverySource,
+                                             BigDecimal slippageBps, MeterRegistry meters) {
         this.commands = Objects.requireNonNull(commands, "commands");
         this.venue = Objects.requireNonNull(venue, "venue");
         this.fullEquityRisk = fullEquityRisk;
         this.recoverySource = recoverySource;
         this.slippageBps = Objects.requireNonNull(slippageBps, "slippageBps");
+        this.meters = Objects.requireNonNull(meters, "meters");
         if (slippageBps.signum() < 0) {
             throw new IllegalArgumentException("slippage budget must not be negative");
         }
@@ -465,10 +486,12 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         if (!running.get()) return;
         try {
             venue.checkpoint();
+            recordCheckpointSuccess();
         } catch (RuntimeException snapshotFailure) {
             log.error("Periodic exchange-core snapshot failed. Recovery is still correct - "
                     + "the journal holds every command since the last successful snapshot - "
                     + "but replay will take longer until one succeeds", snapshotFailure);
+            recordCheckpointFailure("periodic", unwrap(snapshotFailure));
         }
     }
 
@@ -571,9 +594,57 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         if (cause instanceof ExchangeCoreCheckpointException) {
             log.error("Exchange-core {} for order {} reached the venue, but checkpointing failed",
                     operation, order.id(), cause);
+            recordCheckpointFailure(operation, cause);
             return true;
         }
         return false;
+    }
+
+    /**
+     * Records that the venue accepted an operation it could not persist.
+     *
+     * <p>This is deliberately not an order rejection - the order did reach the
+     * venue, so rejecting it would be a lie - but that makes the failure
+     * invisible from outside: the caller sees 201, the venue operation records
+     * outcome=success, and nothing counts a rejection. A run once lost
+     * durability for 45 consecutive orders with every metric reading healthy
+     * and only a log line to show for it.
+     *
+     * <p>So it is counted and surfaced in health. Losing the ability to persist
+     * is a state the venue should be loud about, not one that has to be found
+     * by reading logs.
+     */
+    private void recordCheckpointFailure(String operation, Throwable cause) {
+        meters.counter("emporia.execution.venue.checkpoint.failures", "operation", operation)
+                .increment();
+        checkpointFailures.incrementAndGet();
+        lastCheckpointFailure = Instant.now();
+        lastCheckpointFailureDetail = cause.getMessage();
+    }
+
+    private void recordCheckpointSuccess() {
+        checkpointFailures.set(0);
+    }
+
+    /**
+     * Reports the venue unhealthy while it cannot persist its state.
+     *
+     * <p>Cleared by the next successful periodic snapshot rather than by a
+     * successful order, so recovery is confirmed by an actual write rather than
+     * inferred from an operation that may not have checkpointed at all.
+     */
+    @Override
+    public Health health() {
+        long failures = checkpointFailures.get();
+        Health.Builder status = failures == 0 ? Health.up() : Health.down();
+        status.withDetail("venue", "exchange-core")
+                .withDetail("checkpointFailuresSinceLastSuccess", failures);
+        if (lastCheckpointFailure != null) {
+            status.withDetail("lastCheckpointFailureAt", lastCheckpointFailure.toString())
+                    .withDetail("lastCheckpointFailureDetail",
+                            lastCheckpointFailureDetail == null ? "unknown" : lastCheckpointFailureDetail);
+        }
+        return status.build();
     }
 
     private void ensureSymbol(ListingSnapshot listing) {
