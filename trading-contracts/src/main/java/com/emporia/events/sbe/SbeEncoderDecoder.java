@@ -86,7 +86,7 @@ public final class SbeEncoderDecoder {
         putUuid(buf, event.orderId());
         buf.putLong(event.orderVersion());
         buf.put((byte) (event.status() == null ? 0 : event.status().ordinal()));
-        buf.putLong(event.occurredAt() == null ? 0 : event.occurredAt().toEpochMilli());
+        buf.putLong(absentOrEpochMillis(event.occurredAt()));
         putVarString(buf, userSubjectBytes);
         putVarString(buf, deskIdBytes);
         putVarString(buf, eventTypeBytes);
@@ -110,8 +110,7 @@ public final class SbeEncoderDecoder {
         long orderVersion = buf.getLong();
         int statusOrdinal = buf.get() & 0xFF;
         OrderStatus status = OrderStatus.values()[Math.min(statusOrdinal, OrderStatus.values().length - 1)];
-        long epochMs = buf.getLong();
-        Instant occurredAt = epochMs == 0 ? null : Instant.ofEpochMilli(epochMs);
+        Instant occurredAt = instantOrAbsent(buf.getLong());
         String userSubject = getVarString(buf);
         String deskId = getVarString(buf);
         String eventType = getVarString(buf);
@@ -167,7 +166,7 @@ public final class SbeEncoderDecoder {
         putUuid(buf, command.commandId());
         putUuid(buf, command.orderId());
         buf.put((byte) (command.commandType() == null ? 0 : command.commandType().ordinal()));
-        buf.putLong(command.occurredAt() == null ? 0L : command.occurredAt().toEpochMilli());
+        buf.putLong(absentOrEpochMillis(command.occurredAt()));
         buf.putLong(command.quantity() == null ? 0L : FixedPointMath.toScaledLong(command.quantity()));
         buf.putLong(command.price() == null ? 0L : FixedPointMath.toScaledLong(command.price()));
         putVarString(buf, deskIdBytes);
@@ -193,7 +192,7 @@ public final class SbeEncoderDecoder {
         ExecutionCommandType commandType = ExecutionCommandType.values()[
                 Math.min(cmdOrdinal, ExecutionCommandType.values().length - 1)];
         long epochMs = buf.getLong();
-        Instant occurredAt = epochMs == 0L ? null : Instant.ofEpochMilli(epochMs);
+        Instant occurredAt = instantOrAbsent(epochMs);
         long qtyScaled = buf.getLong();
         long priceScaled = buf.getLong();
         BigDecimal quantity = qtyScaled == 0L ? null : FixedPointMath.toBigDecimal(qtyScaled);
@@ -330,10 +329,7 @@ public final class SbeEncoderDecoder {
         buf.put((byte) (command.commandType() == null ? 0xFF : command.commandType().ordinal()));
         buf.put((byte) (command.side() == null ? 0xFF : command.side().ordinal()));
         buf.put((byte) (command.orderType() == null ? 0xFF : command.orderType().ordinal()));
-        // Long.MIN_VALUE for absent, not 0: the epoch is a real instant, and
-        // encoding it as "missing" would drop the timestamp of any command
-        // carrying it.
-        buf.putLong(command.requestedAt() == null ? Long.MIN_VALUE : command.requestedAt().toEpochMilli());
+        buf.putLong(absentOrEpochMillis(command.requestedAt()));
         buf.putLong(command.expectedVersion() == null ? Long.MIN_VALUE : command.expectedVersion());
         buf.putLong(FixedPointMath.toScaledLong(command.quantity()));
         buf.putLong(FixedPointMath.toScaledLong(command.limitPrice()));
@@ -362,8 +358,7 @@ public final class SbeEncoderDecoder {
         CommandType commandType = ordinal(buf.get(), CommandType.values());
         OrderSide side = ordinal(buf.get(), OrderSide.values());
         OrderType orderType = ordinal(buf.get(), OrderType.values());
-        long epochMs = buf.getLong();
-        Instant requestedAt = epochMs == Long.MIN_VALUE ? null : Instant.ofEpochMilli(epochMs);
+        Instant requestedAt = instantOrAbsent(buf.getLong());
         long expectedVersionRaw = buf.getLong();
         Long expectedVersion = expectedVersionRaw == Long.MIN_VALUE ? null : expectedVersionRaw;
         BigDecimal quantity = scaled(buf.getLong());
@@ -463,6 +458,21 @@ public final class SbeEncoderDecoder {
         return new ListingSnapshot(id, version, symbol, name, marketSymbol, exchangeMic,
                 exchangeName, countryCode, currency, tickSize, sizeIncrement, referencePrice,
                 previousClose);
+    }
+
+    /**
+     * Encodes an absent timestamp.
+     *
+     * <p>{@link Long#MIN_VALUE} rather than 0, because 0 is the epoch - a real
+     * instant. Encoding absent as 0 meant any message actually carrying
+     * 1970-01-01T00:00:00Z decoded with no timestamp at all.
+     */
+    private static long absentOrEpochMillis(Instant instant) {
+        return instant == null ? Long.MIN_VALUE : instant.toEpochMilli();
+    }
+
+    private static Instant instantOrAbsent(long epochMillis) {
+        return epochMillis == Long.MIN_VALUE ? null : Instant.ofEpochMilli(epochMillis);
     }
 
     private static void putUuid(ByteBuffer buf, UUID uuid) {
