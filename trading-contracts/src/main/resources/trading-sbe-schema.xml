@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="com.emporia.events.sbe"
+                   id="1"
+                   version="1"
+                   semanticVersion="5.2"
+                   description="Emporia Trading Platform High Frequency SBE Schema"
+                   byteOrder="LittleEndian">
+    <types>
+        <type name="uint8" primitiveType="uint8"/>
+        <type name="uint16" primitiveType="uint16"/>
+        <type name="uint32" primitiveType="uint32"/>
+        <type name="uint64" primitiveType="uint64"/>
+        <type name="int64" primitiveType="int64"/>
+        
+        <enum name="OrderStatus" encodingType="uint8">
+            <validValue name="LIVE">0</validValue>
+            <validValue name="PARTIALLY_FILLED">1</validValue>
+            <validValue name="FILLED">2</validValue>
+            <validValue name="CANCELLED">3</validValue>
+            <validValue name="REJECTED">4</validValue>
+        </enum>
+        
+        <enum name="ExecutionCommandType" encodingType="uint8">
+            <validValue name="FILL">0</validValue>
+            <validValue name="REJECT">1</validValue>
+            <validValue name="CANCEL">2</validValue>
+        </enum>
+    </types>
+
+    <sbe:message name="OrderDomainEvent" id="1" description="Order domain event binary payload">
+        <field name="schemaVersion" id="1" type="uint16"/>
+        <field name="eventIdMostSig" id="2" type="int64"/>
+        <field name="eventIdLeastSig" id="3" type="int64"/>
+        <field name="commandIdMostSig" id="4" type="int64"/>
+        <field name="commandIdLeastSig" id="5" type="int64"/>
+        <field name="orderIdMostSig" id="6" type="int64"/>
+        <field name="orderIdLeastSig" id="7" type="int64"/>
+        <field name="orderVersion" id="8" type="uint64"/>
+        <field name="status" id="9" type="OrderStatus"/>
+        <field name="occurredAtEpochMs" id="10" type="int64"/>
+        <data name="userSubject" id="11" type="varStringEncoding"/>
+        <data name="deskId" id="12" type="varStringEncoding"/>
+        <data name="eventType" id="13" type="varStringEncoding"/>
+        <data name="payload" id="14" type="varStringEncoding"/>
+    </sbe:message>
+
+    <sbe:message name="ExecutionCommand" id="2" description="Execution report binary payload">
+        <field name="schemaVersion" id="1" type="uint16"/>
+        <field name="commandIdMostSig" id="2" type="int64"/>
+        <field name="commandIdLeastSig" id="3" type="int64"/>
+        <field name="orderIdMostSig" id="4" type="int64"/>
+        <field name="orderIdLeastSig" id="5" type="int64"/>
+        <field name="commandType" id="6" type="ExecutionCommandType"/>
+        <field name="quantityMantissa" id="7" type="int64"/>
+        <field name="quantityScale" id="8" type="uint8"/>
+        <field name="priceMantissa" id="9" type="int64"/>
+        <field name="priceScale" id="10" type="uint8"/>
+        <field name="occurredAtEpochMs" id="11" type="int64"/>
+        <data name="deskId" id="12" type="varStringEncoding"/>
+        <data name="executionReference" id="13" type="varStringEncoding"/>
+        <data name="venue" id="14" type="varStringEncoding"/>
+        <data name="detail" id="15" type="varStringEncoding"/>
+    </sbe:message>
+</sbe:messageSchema>

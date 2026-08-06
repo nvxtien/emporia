@@ -1,7 +1,7 @@
 #!/bin/bash
 # Dumps and stops active JFR recordings (REWORK_NOTE Phase 1_4).
 #
-# Usage: scripts/perf/jfr-stop.sh order-command-service order-management-service execution-service
+# Usage: scripts/perf/jfr-stop.sh order-management-service execution-service
 #
 # Knobs: JFR_NAME, JFR_OUT_DIR (defaults to the directory jfr-start.sh last used)
 #
@@ -13,7 +13,7 @@ set -uo pipefail
 # shellcheck source=lib/jfr-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/jfr-common.sh"
 
-[ $# -gt 0 ] || jfr_fail "name at least one service, e.g. $0 order-command-service"
+[ $# -gt 0 ] || jfr_fail "name at least one service, e.g. $0 order-management-service"
 
 jfr_require_jcmd
 last_run_marker="$jfr_repo_root/.local-run/jfr/.last-run"

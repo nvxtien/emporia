@@ -1,12 +1,12 @@
 package com.emporia.ordermanagement.service;
 
 import com.emporia.events.TradingEvents.ExecutionCommand;
+import com.emporia.events.TradingEvents.OrderDomainEvent;
+import com.emporia.events.KafkaRoutingKeys;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
-
-import java.util.concurrent.TimeUnit;
 
 @Component
 class ExecutionCommandConsumer {
@@ -23,8 +23,9 @@ class ExecutionCommandConsumer {
 
     @KafkaListener(topics = "${emporia.kafka.executions-topic}", groupId = "order-management-executions-v1")
     void consume(ExecutionCommand command) throws Exception {
-        for (var event : handler.handle(command)) {
-            kafka.send(ordersTopic, event.orderId().toString(), event).get(5, TimeUnit.SECONDS);
+        // Non-blocking asynchronous Kafka sends for execution rollup events.
+        for (OrderDomainEvent event : handler.handle(command)) {
+            kafka.send(ordersTopic, KafkaRoutingKeys.orderEvent(event), event);
         }
     }
 }

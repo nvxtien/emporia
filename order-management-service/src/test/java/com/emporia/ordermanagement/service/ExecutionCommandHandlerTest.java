@@ -11,6 +11,7 @@ import com.emporia.ordermanagement.model.OrderEvent;
 import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.ExecutionRepository;
 import com.emporia.ordermanagement.repository.OrderEventRepository;
+import com.emporia.ordermanagement.repository.ProcessedCommandRepository;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -37,8 +38,12 @@ class ExecutionCommandHandlerTest {
     private final TradingOrderRepository orders = mock(TradingOrderRepository.class);
     private final ExecutionRepository executions = mock(ExecutionRepository.class);
     private final OrderEventRepository events = mock(OrderEventRepository.class);
+    private final ProcessedCommandRepository processed = mock(ProcessedCommandRepository.class);
+    private final OrderMetrics metrics = new OrderMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+    private final OrderStateCache cache = new OrderStateCache(orders, processed, 1000, 1000);
+    private final AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
     private final ExecutionCommandHandler handler =
-            new ExecutionCommandHandler(orders, executions, events, new ObjectMapper());
+            new ExecutionCommandHandler(orders, executions, events, new ObjectMapper(), metrics, cache, asyncDbWriter);
 
     @Test
     void recordsAPartialFillAndPublishesTheNewOrderState() {
@@ -63,7 +68,7 @@ class ExecutionCommandHandlerTest {
         verify(executions).save(persisted.capture());
         assertThat(persisted.getValue().getExecutionReference()).isEqualTo("venue-fill-1");
         assertThat(persisted.getValue().getVenue()).isEqualTo("XNAS");
-        verify(orders).saveAndFlush(order);
+        verify(asyncDbWriter).enqueue(order);
     }
 
     @Test
@@ -106,7 +111,7 @@ class ExecutionCommandHandlerTest {
         assertThat(lateEvents.getFirst().eventType()).isEqualTo("CANCELLED_FILL");
         assertThat(order.getStatus()).isEqualTo(OrderStatus.CANCELLED);
         assertThat(order.getTradedQuantity()).isEqualByComparingTo("1");
-        verify(orders).saveAndFlush(order);
+        verify(asyncDbWriter).enqueue(order);
     }
 
     @Test

@@ -21,16 +21,16 @@ This document details the software design patterns used across the **Emporia Tra
 - **Benefits**: Decouples order ingress, state machine management, smart order routing, and venue execution.
 
 ### Choreography Saga Pattern (Distributed Transactions & Compensation)
-- **Component**: Multi-service event flow (`order-command-service` $\rightarrow$ `order-management-service` $\rightarrow$ `execution-service` $\rightarrow$ `portfolio-service`).
+- **Component**: Multi-service event flow (`order-management-service` $\rightarrow$ `execution-service` $\rightarrow$ `portfolio-service`), with optional Kafka ingress via `order-command-service`.
 - **Implementation**:
   - **Choreography**: Each service reacts to incoming Kafka domain events, performs its local database transaction, and publishes downstream events without a central orchestrator.
   - **Compensating Actions**: If an execution venue rejects an order or if liquidity is exhausted, `execution-service` emits compensating `ExecutionCommand` messages (`REJECT` / `CANCEL`). `order-management-service` handles these by updating order state to `REJECTED`/`CANCELLED` and restoring reserved trader purchasing power.
 - **Benefits**: Maintains data consistency across independent microservices and databases without distributed locks or 2PC protocols.
 
 ### Command Query Responsibility Segregation (CQRS)
-- **Component**: `order-command-service` (Commands) vs `order-management-service` / `market-data-service` (Queries/Events).
-- **Implementation**: Write operations (`CREATE`, `MODIFY`, `CANCEL`) enter through `order-command-service`, while state projections and queries are served independently by `order-management-service` and `market-data-service`.
-- **Benefits**: Optimizes read/write performance independently and isolates validation logic.
+- **Component**: Gateway write path into `order-management-service` (commands via Disruptor) vs query/SSE projections on the same service and `market-data-service`.
+- **Implementation**: Browser mutations enter OMS in-process; Kafka remains the async distribution/audit channel (and an optional alternate ingress through `order-command-service`). Queries and blotter streams are served independently of that distribution path.
+- **Benefits**: Keeps the request critical path free of Kafka round-trips while preserving event-driven fan-out to execution and audit.
 
 ### Transactional Outbox & Idempotent Consumer Pattern
 - **Component**: `order-management-service` (`processed_order_command` table) and `execution-service` (`DurableEmporiaPortfolioGateway`).

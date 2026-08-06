@@ -5,6 +5,9 @@ global:
   scrape_interval: 10s
   evaluation_interval: 10s
 
+rule_files:
+  - /etc/prometheus/alerts/*.yml
+
 scrape_configs:
   # Broker-side consumer group lag. This is the source of truth for lag
   # dashboards: it keeps reporting when a consumer process is down, and it
@@ -21,8 +24,6 @@ scrape_configs:
   - job_name: emporia
     metrics_path: /actuator/prometheus
     static_configs:
-      - targets: ['order-command-service:8085']
-        labels: { service: order-command-service, deployment: docker }
       - targets: ['order-management-service:8086']
         labels: { service: order-management-service, deployment: docker }
       - targets: ['execution-service:8087']
@@ -31,14 +32,14 @@ scrape_configs:
         labels: { service: portfolio-service, deployment: docker }
       - targets: ['market-data-service:8084']
         labels: { service: market-data-service, deployment: docker }
+      - targets: ['gateway:8082']
+        labels: { service: gateway, deployment: docker }
 
   # Host-JVM modes (run-local.sh / run-infra-docker.sh): the services run
   # outside the container, so they are reached through host.docker.internal.
   - job_name: emporia-host
     metrics_path: /actuator/prometheus
     static_configs:
-      - targets: ['host.docker.internal:8085']
-        labels: { service: order-command-service, deployment: host }
       - targets: ['host.docker.internal:8086']
         labels: { service: order-management-service, deployment: host }
       - targets: ['host.docker.internal:8087']
@@ -47,3 +48,5 @@ scrape_configs:
         labels: { service: portfolio-service, deployment: host }
       - targets: ['host.docker.internal:8084']
         labels: { service: market-data-service, deployment: host }
+      - targets: ['host.docker.internal:8080']
+        labels: { service: gateway, deployment: host }

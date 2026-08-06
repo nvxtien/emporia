@@ -1,7 +1,7 @@
 #!/bin/bash
 # Starts bounded JFR recordings on host-JVM services (REWORK_NOTE Phase 1_4).
 #
-# Usage: scripts/perf/jfr-start.sh order-command-service order-management-service execution-service
+# Usage: scripts/perf/jfr-start.sh order-management-service execution-service
 #
 # Knobs:
 #   JFR_NAME=emporia-local     recording name, used again by jfr-stop.sh
@@ -18,7 +18,7 @@ set -euo pipefail
 # shellcheck source=lib/jfr-common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/jfr-common.sh"
 
-[ $# -gt 0 ] || jfr_fail "name at least one service, e.g. $0 order-command-service"
+[ $# -gt 0 ] || jfr_fail "name at least one service, e.g. $0 order-management-service"
 
 jfr_require_jcmd
 JFR_OUT_DIR="${JFR_OUT_DIR:-$jfr_repo_root/.local-run/jfr/$(date +%Y%m%d-%H%M%S)}"

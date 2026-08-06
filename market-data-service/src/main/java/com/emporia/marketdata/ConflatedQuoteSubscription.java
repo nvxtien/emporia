@@ -2,9 +2,11 @@ package com.emporia.marketdata;
 
 import com.emporia.marketdata.MarketDataService.Quote;
 
+import org.agrona.collections.Long2ObjectHashMap;
+
 import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -22,7 +24,7 @@ final class ConflatedQuoteSubscription implements AutoCloseable {
     private final Sink sink;
     private final Runnable onClosed;
     private final Consumer<Quote> onConflated;
-    private final Map<Long, Quote> latestByListing = new ConcurrentHashMap<>();
+    private final Long2ObjectHashMap<Quote> latestByListing = new Long2ObjectHashMap<>();
     private final Semaphore available = new Semaphore(0);
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final Thread worker;
@@ -52,7 +54,10 @@ final class ConflatedQuoteSubscription implements AutoCloseable {
         if (!running.get() || !accepts(quote.listingId())) {
             return;
         }
-        Quote replaced = latestByListing.put(quote.listingId(), quote);
+        Quote replaced;
+        synchronized (latestByListing) {
+            replaced = latestByListing.put(quote.listingId(), quote);
+        }
         if (replaced != null) {
             onConflated.accept(replaced);
         }
@@ -63,11 +68,16 @@ final class ConflatedQuoteSubscription implements AutoCloseable {
         try {
             while (running.get()) {
                 available.acquire();
-                for (Quote quote : latestByListing.values().stream()
-                        .sorted(Comparator.comparingLong(Quote::listingId)).toList()) {
-                    if (latestByListing.remove(quote.listingId(), quote)) {
-                        sink.send(quote);
+                List<Quote> quotesToDeliver;
+                synchronized (latestByListing) {
+                    quotesToDeliver = latestByListing.values().stream()
+                            .sorted(Comparator.comparingLong(Quote::listingId)).toList();
+                    for (Quote quote : quotesToDeliver) {
+                        latestByListing.remove(quote.listingId());
                     }
+                }
+                for (Quote quote : quotesToDeliver) {
+                    sink.send(quote);
                 }
             }
         } catch (InterruptedException interrupted) {

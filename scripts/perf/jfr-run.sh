@@ -2,7 +2,7 @@
 # Wraps a load scenario in JFR start/stop/summary (REWORK_NOTE Phase 1_4).
 #
 # Usage:
-#   scripts/perf/jfr-run.sh --services order-command-service,execution-service -- \
+#   scripts/perf/jfr-run.sh --services order-management-service,execution-service -- \
 #       k6 run -e RATE=48 -e DURATION=90s scripts/perf/order-load.js
 #
 # This is the normal way to collect JFR during Phase 1_2/1_3 load work: it keeps
@@ -17,7 +17,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/jfr-common.sh
 source "$script_dir/lib/jfr-common.sh"
 
-SERVICES="order-command-service,order-management-service,execution-service"
+SERVICES="order-management-service,execution-service"
 while [ $# -gt 0 ]; do
     case "$1" in
         --services) SERVICES="${2:-}"; shift 2 ;;

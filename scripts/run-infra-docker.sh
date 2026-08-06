@@ -64,7 +64,6 @@ DB_PASSWORD=admin123 \
 start_service user-preferences-service user-preferences-service mvn spring-boot:run
 
 start_service market-data-service market-data-service mvn spring-boot:run
-start_service order-command-service order-command-service mvn spring-boot:run
 
 DB_URL=jdbc:postgresql://localhost:5436/emporia_order_management \
 DB_PASSWORD=admin123 \
@@ -76,6 +75,13 @@ start_service portfolio-service portfolio-service mvn spring-boot:run
 
 wait_http_health portfolio-service http://localhost:8088/actuator/health
 PGPASSWORD=admin123 provision_portfolio_client "$BOOTSTRAP_ADMIN_USERNAME" psql -h localhost -p 5438 -U postgres -d emporia_portfolio
+
+# execution-service rebuilds its venue lifecycle projection from
+# order-management before it opens for trading, and fails closed when it cannot
+# reach it - opening with an empty projection would treat redelivered commands
+# as new ones. It therefore has to start after order-management is serving, not
+# merely after it has been launched.
+wait_http_health order-management-service http://localhost:8086/actuator/health
 
 DB_URL=jdbc:postgresql://localhost:5437/emporia_execution \
 DB_PASSWORD=admin123 \
@@ -91,7 +97,6 @@ start_service gateway gateway mvn spring-boot:run
 wait_http_health static-data-service http://localhost:8081/actuator/health
 wait_http_health user-preferences-service http://localhost:8083/actuator/health
 wait_http_health market-data-service http://localhost:8084/actuator/health
-wait_http_health order-command-service http://localhost:8085/actuator/health/readiness
 wait_http_health order-management-service http://localhost:8086/actuator/health
 wait_http_health execution-service http://localhost:8087/actuator/health
 wait_http_health gateway http://localhost:8082/actuator/health

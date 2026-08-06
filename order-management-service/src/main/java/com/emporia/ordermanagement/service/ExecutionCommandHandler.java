@@ -31,22 +31,26 @@ class ExecutionCommandHandler {
     private final ExecutionRepository executions;
     private final OrderEventRepository events;
     private final ObjectMapper objectMapper;
+    private final OrderMetrics metrics;
+    private final OrderStateCache cache;
+    private final AsyncDbWriter asyncDbWriter;
 
     ExecutionCommandHandler(TradingOrderRepository orders, ExecutionRepository executions,
-                            OrderEventRepository events, ObjectMapper objectMapper) {
+                            OrderEventRepository events, ObjectMapper objectMapper, OrderMetrics metrics,
+                            OrderStateCache cache, AsyncDbWriter asyncDbWriter) {
         this.orders = orders;
         this.executions = executions;
         this.events = events;
         this.objectMapper = objectMapper;
+        this.metrics = metrics;
+        this.cache = cache;
+        this.asyncDbWriter = asyncDbWriter;
     }
 
     /**
-     * Applies a venue update and every resulting parent transition in one
-     * database transaction. This makes partial-fill roll-up durable and lets an
-     * optimistic-lock conflict retry the whole Kafka record without double
-     * counting an execution.
+     * Applies a venue update and every resulting parent transition.
+     * Direct Java invocation without Spring AOP / CGLIB proxy reflection.
      */
-    @Transactional
     List<OrderDomainEvent> handle(ExecutionCommand command) {
         if (command.schemaVersion() != SCHEMA_VERSION) {
             throw new IllegalArgumentException("Unsupported execution command schema version");
@@ -56,7 +60,8 @@ class ExecutionCommandHandler {
             return List.of();
         }
 
-        TradingOrder order = orders.findByIdAndDeskId(command.orderId(), command.deskId())
+        // Cache-backed lookup: the child order is almost certainly warm.
+        TradingOrder order = cache.findByIdAndDeskId(command.orderId(), command.deskId())
                 .orElseThrow(() -> new IllegalArgumentException("Execution order was not found on its desk"));
         List<OrderDomainEvent> result = new ArrayList<>();
 
@@ -79,7 +84,8 @@ class ExecutionCommandHandler {
         TradingOrder child = order;
         UUID parentId = child.getParentOrderId();
         while (parentId != null) {
-            TradingOrder parent = orders.findByIdAndDeskId(parentId, child.getDeskId())
+            // Ancestor rollup walk: parent lookup expected to be warm in cache.
+            TradingOrder parent = cache.findByIdAndDeskId(parentId, child.getDeskId())
                     .orElseThrow(() -> new IllegalStateException("Parent order was not found on its desk"));
             String rollupReference = rollupReference(command.executionReference(), parent.getId());
             if (!executions.existsByExecutionReference(rollupReference)) {
@@ -109,18 +115,23 @@ class ExecutionCommandHandler {
                 venue,
                 occurredAt
         ));
-        orders.saveAndFlush(order);
+        cache.put(order);
+        asyncDbWriter.enqueue(order);
         addEvent(commandId, order,
                 order.getStatus() == OrderStatus.FILLED ? "FILLED"
                         : order.getStatus() == OrderStatus.CANCELLED ? "CANCELLED_FILL" : "PARTIALLY_FILLED",
                 message, result);
+        if (order.getStatus() == OrderStatus.FILLED) metrics.orderFilled();
+        if (order.getStatus() == OrderStatus.CANCELLED) metrics.orderCancelled();
     }
 
     private void reject(TradingOrder order, ExecutionCommand command, List<OrderDomainEvent> result) {
         if (isTerminal(order)) return;
         order.reject(command.detail());
-        orders.saveAndFlush(order);
+        cache.put(order);
+        asyncDbWriter.enqueue(order);
         addEvent(command.commandId(), order, "REJECTED", command.detail(), result);
+        metrics.orderRejected();
         completePendingAncestors(order.getParentOrderId(), command, result);
     }
 
@@ -136,9 +147,11 @@ class ExecutionCommandHandler {
         }
 
         order.confirmCancel();
-        orders.saveAndFlush(order);
+        cache.put(order);
+        asyncDbWriter.enqueue(order);
         addEvent(command.commandId(), order, "CANCELLED",
                 blankToDefault(command.detail(), "Execution venue confirmed cancellation"), result);
+        metrics.orderCancelled();
         completePendingAncestors(order.getParentOrderId(), command, result);
     }
 
@@ -146,23 +159,27 @@ class ExecutionCommandHandler {
                                           List<OrderDomainEvent> result) {
         UUID currentId = parentId;
         while (currentId != null) {
-            TradingOrder parent = orders.findByIdAndDeskId(currentId, command.deskId())
+            // Ancestor walk: cache hit expected since child was just written above.
+            TradingOrder parent = cache.findByIdAndDeskId(currentId, command.deskId())
                     .orElseThrow(() -> new IllegalStateException("Parent order was not found on its desk"));
             if (parent.getTargetStatus() != OrderStatus.CANCELLED || isTerminal(parent)
                     || !orders.findByParentOrderIdAndStatusIn(parent.getId(), ACTIVE).isEmpty()) {
                 return;
             }
             parent.confirmCancel();
-            orders.saveAndFlush(parent);
+            cache.put(parent);
+            asyncDbWriter.enqueue(parent);
             addEvent(command.commandId(), parent, "CANCELLED",
                     "All child orders reached a terminal state", result);
+            metrics.orderCancelled();
             currentId = parent.getParentOrderId();
         }
     }
 
     private void addEvent(UUID commandId, TradingOrder order, String type, String message,
                           List<OrderDomainEvent> result) {
-        OrderEvent event = events.save(new OrderEvent(commandId, order, type, message, json(order.view())));
+        OrderEvent event = new OrderEvent(commandId, order, type, message, json(order.view()));
+        asyncDbWriter.enqueue(event);
         result.add(event.domainEvent());
     }
 

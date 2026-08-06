@@ -2,6 +2,7 @@ package com.emporia.execution;
 
 import com.emporia.events.TradingEvents.ListingSnapshot;
 import com.emporia.events.TradingEvents.OrderSide;
+import com.emporia.events.math.FixedPointMath;
 import com.emporia.execution.TradingDataClient.DepthLevel;
 import com.emporia.execution.TradingDataClient.MarketQuote;
 
@@ -29,21 +30,22 @@ final class BestVenueSelector {
     List<RouteSlice> plan(OrderSide side, BigDecimal limitPrice, List<ListingSnapshot> listings,
                           List<MarketQuote> quotes, BigDecimal requestedQuantity,
                           BigDecimal sizeIncrement) {
-        if (requestedQuantity == null || requestedQuantity.signum() <= 0
-                || sizeIncrement == null || sizeIncrement.signum() <= 0
-                || requestedQuantity.remainder(sizeIncrement).signum() != 0) {
-            throw new IllegalArgumentException("Routed quantity must align with a positive size increment");
+        long remainingUnits;
+        try {
+            remainingUnits = FixedPointMath.exactUnits(requestedQuantity, sizeIncrement,
+                    "Routed quantity");
+        } catch (IllegalArgumentException invalid) {
+            throw new IllegalArgumentException("Routed quantity must align with a positive size increment", invalid);
         }
-
-        BigDecimal remaining = requestedQuantity;
         List<RouteSlice> result = new ArrayList<>();
         for (Candidate candidate : candidates(side, limitPrice, listings, quotes)) {
-            if (remaining.signum() == 0) break;
-            BigDecimal executable = candidate.size().min(remaining);
-            executable = executable.divideToIntegralValue(sizeIncrement).multiply(sizeIncrement);
-            if (executable.signum() <= 0) continue;
-            result.add(new RouteSlice(candidate.listing(), candidate.price(), executable));
-            remaining = remaining.subtract(executable);
+            if (remainingUnits == 0) break;
+            long candidateUnits = FixedPointMath.floorUnits(candidate.size(), sizeIncrement, "depth size");
+            long executableUnits = Math.min(candidateUnits, remainingUnits);
+            if (executableUnits <= 0) continue;
+            result.add(new RouteSlice(candidate.listing(), candidate.price(),
+                    FixedPointMath.unitsToBigDecimal(executableUnits, sizeIncrement, "route slice")));
+            remainingUnits -= executableUnits;
         }
         if (result.isEmpty()) {
             throw new IllegalStateException("No executable venue has market liquidity");

@@ -46,6 +46,10 @@
                             <goal>compile</goal>
                             <goal>compile-custom</goal>
                         </goals>
+                        <configuration>
+                            <temporaryProtoFileDirectory>${project.build.directory}/protoc-dependencies/fix-simulator</temporaryProtoFileDirectory>
+                            <clearOutputDirectory>false</clearOutputDirectory>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>

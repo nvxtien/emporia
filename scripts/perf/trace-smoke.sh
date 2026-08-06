@@ -1,6 +1,6 @@
 #!/bin/bash
 # REWORK_NOTE Phase 1_1, step 8: submit an order and confirm the resulting trace
-# spans order-command, order-management, and execution.
+# spans order-management and execution.
 #
 # This is the check that proves trace context propagates across BOTH HTTP and
 # Kafka. Kafka observations are off by default in Spring Boot; without them each
@@ -28,7 +28,7 @@ TEMPO_URL="${TEMPO_URL:-http://localhost:3200}"
 LISTING_ID="${SMOKE_LISTING_ID:-1}"
 
 # Services that must appear in the trace for propagation to be considered working.
-REQUIRED_SERVICES=(order-command-service order-management-service execution-service)
+REQUIRED_SERVICES=(order-management-service execution-service)
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 

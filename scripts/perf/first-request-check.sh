@@ -1,19 +1,13 @@
 #!/bin/bash
-# Regression check for the first-request 504.
+# Cold-start check for the OMS Disruptor hot path.
 #
-# order-command-service submits orders via synchronous request/reply over Kafka,
-# and its reply listener joins a brand-new consumer group on every start. With
-# auto-offset-reset=latest, a reply written before that join completes is
-# positioned past and skipped permanently, so an order that was created and
-# persisted normally returns 504 to the caller ~8 seconds later. Measured window:
-# about 2.7 seconds.
+# Restarts order-management-service and immediately submits an order through the
+# gateway. The retired order-command-service Kafka reply-listener race (504 after
+# publish) no longer applies; this check now verifies that the gateway → OMS
+# path accepts the first post-restart request without hanging.
 #
-# The failure exists only in the first seconds of a process's life, so nothing
-# else in the suite would ever notice a regression. This restarts the service and
-# submits at the earliest possible moment.
-#
-# Pass = 201 (ready in time) or 503 (honestly not ready yet, safely retryable).
-# Fail = 504, which means an order was created that the caller was told failed.
+# Pass = 201 Created (or another non-5xx success from OMS validation).
+# Fail = 5xx / timeout, which means the hot path is not accepting work yet.
 #
 # Usage: scripts/perf/first-request-check.sh
 set -uo pipefail
@@ -23,14 +17,14 @@ cd "$repo_root"
 
 ORIGIN="${EMPORIA_ORIGIN:-http://localhost:3001}"
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8082}"
-SERVICE_URL="${SERVICE_URL:-http://localhost:8085}"
+SERVICE_URL="${SERVICE_URL:-http://localhost:8086}"
 LISTING_ID="${SMOKE_LISTING_ID:-1}"
 log_dir="$repo_root/.local-run/logs"
-pid_file="$repo_root/.local-run/pids/order-command-service.pid"
+pid_file="$repo_root/.local-run/pids/order-management-service.pid"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-[ -f "$pid_file" ] || fail "no pid file; this check needs the host-JVM run mode (scripts/run-infra-docker.sh)"
+[ -f "$pid_file" ] || fail "no pid file; this check needs the host-JVM run mode (scripts/run-local.sh)"
 
 echo "==> Obtaining an access token (before the restart, so timing is not skewed)"
 access_token="$(EMPORIA_ORIGIN="$ORIGIN" \
@@ -40,7 +34,7 @@ access_token="$(EMPORIA_ORIGIN="$ORIGIN" \
     || fail "could not obtain an access token (is the stack up on ${ORIGIN}?)"
 [ -n "$access_token" ] || fail "no access token"
 
-echo "==> Restarting order-command-service"
+echo "==> Restarting order-management-service"
 launcher="$(cat "$pid_file")"
 # The pid file records the `mvn spring-boot:run` launcher, which forks the
 # application into a child JVM; both must go.
@@ -51,31 +45,23 @@ while kill -0 "$launcher" 2>/dev/null; do sleep 1; done
 sleep 2
 
 mkdir -p "$log_dir"
-( cd "$repo_root/order-command-service" && exec mvn spring-boot:run ) \
-    >"$log_dir/order-command-service.log" 2>&1 &
+(
+  cd "$repo_root/order-management-service" && \
+  DB_USERNAME="${DB_USERNAME:-$(whoami)}" DB_PASSWORD="${DB_PASSWORD:-admin123}" \
+  exec mvn spring-boot:run
+) >"$log_dir/order-management-service.log" 2>&1 &
 echo "$!" >"$pid_file"
 echo "    launcher pid $(cat "$pid_file")"
 
-# Must wait on the liveness probe specifically, NOT on /actuator/health.
-#
-# The replyListener health indicator contributes to the aggregate health
-# endpoint, so /actuator/health now returns 503 for the entire window this check
-# exists to probe. Waiting on it would skip the window completely and the check
-# could never fail. Measured on a restart:
-#
-#   t+0.8s   health=503  liveness=200  readiness=503   <- the window
-#   t+3.2s   health=200  liveness=200  readiness=200
-#
-# liveness is the only probe that is up during the gap.
-echo "==> Waiting for the liveness probe (deliberately not readiness or health)"
+echo "==> Waiting for OMS health"
 waited=0
-until curl -fsS "${SERVICE_URL}/actuator/health/liveness" >/dev/null 2>&1; do
+until curl -fsS "${SERVICE_URL}/actuator/health" >/dev/null 2>&1; do
     sleep 0.2
     waited=$((waited + 1))
-    [ "$waited" -gt 900 ] && fail "order-command-service did not come up within 180s"
+    [ "$waited" -gt 900 ] && fail "order-management-service did not come up within 180s"
 done
 
-echo "==> Submitting immediately"
+echo "==> Submitting immediately via gateway"
 status="$(curl -s -o /tmp/first-request-check.json -w '%{http_code}' --max-time 30 \
     -X POST "${GATEWAY_URL}/api/orders" \
     -H "Authorization: Bearer ${access_token}" \
@@ -85,34 +71,17 @@ status="$(curl -s -o /tmp/first-request-check.json -w '%{http_code}' --max-time 
 
 echo "    HTTP ${status}"
 case "$status" in
-    201)
-        echo "==> PASS: the reply listener was ready and the order was acknowledged"
+    201|200)
+        echo "==> PASS: gateway → OMS Disruptor hot path accepted the first request"
         ;;
-    503)
-        echo "==> PASS: the service correctly refused before the reply listener was ready"
-        echo "    503 is safe: nothing was published, so no order was created."
-        ;;
-    504)
+    5*)
         echo >&2
-        echo "FAIL: got 504 - the first-request race has regressed." >&2
-        echo >&2
-        echo "A 504 here means the command was published before the reply listener" >&2
-        echo "owned its partitions. The order was almost certainly created and" >&2
-        echo "persisted; only the reply was lost. Check that KafkaCommandGateway" >&2
-        echo "still refuses to publish while ReplyListenerReadiness reports not" >&2
-        echo "ready, and that its ConsumerSeekAware callbacks are still wired." >&2
+        echo "FAIL: got HTTP ${status} on the first post-restart submit." >&2
+        echo "Check that DisruptorOrderPipeline started and OrderCommandController" >&2
+        echo "is accepting work: $(head -c 200 /tmp/first-request-check.json)" >&2
         exit 1
         ;;
     *)
         fail "unexpected HTTP ${status}: $(head -c 200 /tmp/first-request-check.json)"
         ;;
 esac
-
-echo "==> Waiting for readiness before handing the stack back"
-waited=0
-until curl -fsS "${SERVICE_URL}/actuator/health/readiness" >/dev/null 2>&1; do
-    sleep 0.5
-    waited=$((waited + 1))
-    [ "$waited" -gt 120 ] && fail "readiness probe never came up"
-done
-echo "    ready"

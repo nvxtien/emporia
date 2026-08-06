@@ -9,6 +9,8 @@ import jakarta.annotation.PreDestroy;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import org.agrona.collections.Long2ObjectHashMap;
+
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -23,11 +25,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Service
 public class MarketDataStreamService {
     private final MarketDataService marketData;
+    private final AeronMarketDataPublisher aeronPublisher;
     private final Duration publishInterval;
     private final Duration heartbeatInterval;
     private final Map<UUID, ConflatedQuoteSubscription> subscriptions = new ConcurrentHashMap<>();
-    private final Map<Long, Quote> lastQuotes = new ConcurrentHashMap<>();
-    private final Map<Long, Instant> lastPublishedAt = new ConcurrentHashMap<>();
+    private final Long2ObjectHashMap<Quote> lastQuotes = new Long2ObjectHashMap<>();
+    private final Long2ObjectHashMap<Instant> lastPublishedAt = new Long2ObjectHashMap<>();
     private final ScheduledExecutorService publisher = Executors.newSingleThreadScheduledExecutor(runnable -> {
         Thread thread = new Thread(runnable, "market-data-publisher");
         thread.setDaemon(true);
@@ -38,10 +41,12 @@ public class MarketDataStreamService {
     private final Counter providerFailures;
     private final AtomicBoolean started = new AtomicBoolean();
 
-    MarketDataStreamService(MarketDataService marketData, MeterRegistry meters,
+    MarketDataStreamService(MarketDataService marketData, AeronMarketDataPublisher aeronPublisher,
+                            MeterRegistry meters,
                             @Value("${emporia.market-data.stream.publish-interval:250ms}") Duration publishInterval,
                             @Value("${emporia.market-data.stream.heartbeat-interval:5s}") Duration heartbeatInterval) {
         this.marketData = marketData;
+        this.aeronPublisher = aeronPublisher;
         this.publishInterval = publishInterval;
         this.heartbeatInterval = heartbeatInterval;
         this.quotesPublished = meters.counter("emporia.market.data.quotes.published");
@@ -94,6 +99,8 @@ public class MarketDataStreamService {
             lastQuotes.put(quote.listingId(), quote);
             lastPublishedAt.put(quote.listingId(), Instant.now());
             subscription.offer(quote);
+            // Immediately fan-out over Aeron for zero-latency multicast consumers.
+            aeronPublisher.publishQuote(quote);
             quotesPublished.increment();
         });
     }
@@ -117,6 +124,8 @@ public class MarketDataStreamService {
                 }
                 lastPublishedAt.put(quote.listingId(), now);
                 current.forEach(subscription -> subscription.offer(quote));
+                // Fan-out over Aeron IPC channel for sub-microsecond downstream consumers.
+                aeronPublisher.publishQuote(quote);
                 quotesPublished.increment();
             }
         } catch (RuntimeException error) {

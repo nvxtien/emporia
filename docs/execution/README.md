@@ -16,36 +16,91 @@ projection, Kafka event flow, cancellation semantics, and execution accounting.
 ```mermaid
 flowchart LR
     Browser["React order ticket"]
-    Command["Order command service"]
-    CommandTopic[["emporia.order.commands.v1"]]
-    Management["Order management"]
+    Management["Order management (Disruptor)"]
     OrderTopic[["emporia.orders.v1"]]
     Execution["Execution service"]
     Venue["Simulated or FIX venue"]
     ExecutionTopic[["emporia.execution.commands.v1"]]
+    CommandTopic[["emporia.order.commands.v1"]]
     Database[("PostgreSQL order projection")]
 
-    Browser -->|"POST /api/orders"| Command
-    Command --> CommandTopic
-    CommandTopic --> Management
+    Browser -->|"POST /api/orders"| Management
     Management --> Database
-    Management --> OrderTopic
+    Management -->|async| OrderTopic
     OrderTopic --> Execution
     Execution -->|"DMA submit / modify / cancel"| Venue
     Execution -->|"SMART or VWAP DMA child"| CommandTopic
+    CommandTopic --> Management
     Venue -->|"fill / reject / cancel acknowledgement"| Execution
     Execution --> ExecutionTopic
     ExecutionTopic --> Management
 ```
 
-The order-command service validates the authenticated trader, resolves an
-immutable listing snapshot, and publishes a versioned command. Order management
-persists the order before publishing its state event. The execution service
-then dispatches DMA orders or starts a SMART/VWAP strategy.
+Gateway order mutations land on `order-management-service`, which validates the
+authenticated trader, resolves an immutable listing snapshot, and applies the
+command on the Disruptor hot path before returning. Domain events are published
+asynchronously to `emporia.orders.v1`. The execution service then dispatches DMA
+orders or starts a SMART/VWAP strategy.
 
 Venue outcomes return as `FILL`, `REJECT`, or `CANCEL` commands. Order management
 applies each outcome transactionally and records the resulting order event and
 execution.
+
+## Boundary contract (Phase 1)
+
+This service follows a strict orchestration boundary so low-latency work can be
+split from control and I/O paths safely.
+
+1. Ingress (`order-management-service` gateway hot path)
+- Validates auth, request shape, and listing snapshot.
+- Applies versioned `OrderCommand` handling on the Disruptor pipeline.
+- Publishes domain events asynchronously; does not wait on Kafka for the HTTP response.
+- Optional alternate ingress: `order-command-service` still publishes to `emporia.order.commands.v1` for direct/Kafka callers.
+
+2. Execution orchestration (`execution-service`)
+- Consumes `OrderDomainEvent` and decides DMA, SMART, or VWAP actions.
+- May call venue adapters and publish `ExecutionCommand` events.
+- Does not persist or directly mutate order status.
+
+3. State authority (`order-management-service`)
+- Applies `ExecutionCommand` events transactionally.
+- Owns order lifecycle transitions (`LIVE`, `PARTIALLY_FILLED`, `FILLED`, `CANCELLED`, `REJECTED`).
+- Publishes resulting `OrderDomainEvent` records.
+
+4. Cancellation invariant
+- A stopped strategy runtime must emit an explicit cancel acknowledgement command.
+- Parent orders must not remain `LIVE` without an active runtime or venue owner.
+
+5. Hot-path constraints for future core loop
+- No blocking I/O in deterministic processing paths.
+- No dynamic object graphs in event contracts.
+- No direct cross-thread state mutation; external updates must flow through ordered events.
+
+## Hot-path operations
+
+`order-management-service` exposes internal-only operational endpoints for the
+deterministic OMS path:
+
+1. `GET /internal/hotpath/status`
+- Returns whether the loop is currently accepting commands.
+
+2. `POST /internal/hotpath/kill-switch?reason=...`
+- Rejects new hot-path submissions with an explicit `503` response.
+
+3. `DELETE /internal/hotpath/kill-switch`
+- Re-enables new hot-path submissions.
+
+4. `GET /internal/hotpath/shadow-report?limit=N`
+- Replays the append-only input log in an isolated in-memory OMS sandbox and
+  compares replayed outputs with persisted live outputs.
+
+Operational scripts:
+
+1. `scripts/perf/hotpath-acceptance.sh`
+- Runs a shadow comparison, a load profile, and a kill-switch drill.
+
+2. `scripts/perf/hotpath-rollout.sh`
+- Runs shadow mode first, then canary acceptance by listing groups.
 
 ## Creating an order
 
@@ -270,6 +325,15 @@ SMART and VWAP children:
 - use deterministic child and create-command IDs based on parent, strategy, and
   slice index;
 - record the strategy name and slice number in `executionParameters`.
+
+### Partitioning and ordering contract
+
+- Strategy child `CREATE` commands are published with the parent order id as
+  Kafka key.
+- This keeps all children of one strategy parent on the same command-topic
+  partition and preserves parent-local ordering under consumer concurrency.
+- Resulting order-domain events and execution commands remain keyed by the
+  target order id, so order-level sequencing stays stable end to end.
 
 A child fill is written to the child and rolled up through every parent ancestor
 inside one database transaction. Each execution reference is unique, and

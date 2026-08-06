@@ -43,10 +43,15 @@ wait_docker_healthy kafka docker-compose.yml
 echo "==> Starting observability stack (collector, Tempo, Prometheus, Grafana)"
 docker compose up -d otel-collector tempo prometheus grafana
 
-# clean is required: the protobuf-maven-plugin has produced inconsistent
-# incremental builds against a stale target/ from an earlier run.
-echo "==> Building and installing reactor modules (mvn clean install -DskipTests)"
-mvn -q -f pom.xml clean install -DskipTests
+# Ensure target directories are writeable and clear macOS xattr quarantine flags
+xattr -rc */target 2>/dev/null || true
+chmod -R +w */target 2>/dev/null || true
+
+echo "==> Pre-building contract modules (fix-simulator-contracts, fix-market-simulator)"
+mvn -q -pl fix-simulator-contracts,fix-market-simulator install -DskipTests
+
+echo "==> Building and installing reactor modules (mvn install -DskipTests)"
+mvn -q -f pom.xml install -DskipTests
 
 AUTH_ISSUER=http://localhost:3001 \
 OAUTH_REDIRECT_URI=http://localhost:3001/auth/callback \
@@ -66,12 +71,16 @@ wait_http_health authentication http://localhost:9000/actuator/health
 DB_USERNAME="$DB_USERNAME" DB_PASSWORD=admin123 start_service static-data-service static-data-service mvn spring-boot:run
 DB_USERNAME="$DB_USERNAME" DB_PASSWORD=admin123 start_service user-preferences-service user-preferences-service mvn spring-boot:run
 start_service market-data-service market-data-service mvn spring-boot:run
-start_service order-command-service order-command-service mvn spring-boot:run
 DB_USERNAME="$DB_USERNAME" DB_PASSWORD=admin123 start_service order-management-service order-management-service mvn spring-boot:run
 DB_USERNAME="$DB_USERNAME" DB_PASSWORD=admin123 start_service portfolio-service portfolio-service mvn spring-boot:run
 
 wait_http_health portfolio-service http://localhost:8088/actuator/health
 PGPASSWORD=admin123 provision_portfolio_client "$BOOTSTRAP_ADMIN_USERNAME" psql -h localhost -p 5432 -U "$DB_USERNAME" -d emporia
+
+# execution-service rebuilds its venue lifecycle projection from
+# order-management before it opens for trading, and fails closed when it cannot
+# reach it, so it has to start after order-management is serving.
+wait_http_health order-management-service http://localhost:8086/actuator/health
 
 DB_USERNAME="$DB_USERNAME" \
 DB_PASSWORD=admin123 \
@@ -87,7 +96,6 @@ start_service gateway gateway mvn spring-boot:run
 wait_http_health static-data-service http://localhost:8081/actuator/health
 wait_http_health user-preferences-service http://localhost:8083/actuator/health
 wait_http_health market-data-service http://localhost:8084/actuator/health
-wait_http_health order-command-service http://localhost:8085/actuator/health/readiness
 wait_http_health order-management-service http://localhost:8086/actuator/health
 wait_http_health execution-service http://localhost:8087/actuator/health
 wait_http_health gateway http://localhost:8082/actuator/health
