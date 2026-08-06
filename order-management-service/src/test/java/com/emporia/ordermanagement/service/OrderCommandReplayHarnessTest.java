@@ -20,7 +20,7 @@ class OrderCommandReplayHarnessTest {
         OrderInputEventRepository inputEvents = mock(OrderInputEventRepository.class);
         OrderCommandHandler handler = mock(OrderCommandHandler.class);
         ObjectMapper objectMapper = new ObjectMapper();
-        OrderCommandReplayHarness harness = new OrderCommandReplayHarness(inputEvents, handler, objectMapper);
+        OrderCommandReplayHarness harness = new OrderCommandReplayHarness(inputEvents, handler, objectMapper, new MemoryMappedWalLogger(null, 1));
 
         OrderCommand first = TestCommands.command(UUID.randomUUID());
         OrderCommand second = TestCommands.command(UUID.randomUUID());

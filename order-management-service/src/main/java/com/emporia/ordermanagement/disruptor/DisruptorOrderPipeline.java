@@ -6,6 +6,8 @@ import com.emporia.ordermanagement.service.OrderCommandHandler;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import com.emporia.events.sbe.SbeEncoderDecoder;
+import com.emporia.ordermanagement.service.MemoryMappedWalLogger;
 import com.lmax.disruptor.BusySpinWaitStrategy;
 import com.lmax.disruptor.EventHandler;
 import com.lmax.disruptor.RingBuffer;
@@ -15,6 +17,8 @@ import com.lmax.disruptor.dsl.Disruptor;
 import com.lmax.disruptor.dsl.ProducerType;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -31,9 +35,12 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 @Component
 public class DisruptorOrderPipeline {
+    private static final Logger log = LoggerFactory.getLogger(DisruptorOrderPipeline.class);
     private static final int BUFFER_SIZE = 64 * 1024; // 65,536 slots (power of 2)
 
     private final OrderCommandHandler orderCommandHandler;
+    private final MemoryMappedWalLogger wal;
+    private final Counter walFailures;
     private final String waitStrategyName;
     private final long minRemainingCapacity;
     private final int warmupIterations;
@@ -51,12 +58,14 @@ public class DisruptorOrderPipeline {
 
     public DisruptorOrderPipeline(OrderCommandHandler orderCommandHandler,
                                  MeterRegistry meters,
+                                 MemoryMappedWalLogger wal,
                                  @Value("${emporia.disruptor.wait-strategy:yielding}") String waitStrategyName,
                                  @Value("${emporia.disruptor.min-remaining-capacity:1024}") long minRemainingCapacity,
                                  @Value("${emporia.disruptor.warmup-iterations:2048}") int warmupIterations,
                                  @Value("${emporia.disruptor.cpu-set:}") String cpuSetHint,
                                  @Value("${emporia.disruptor.numa-node:}") String numaNodeHint) {
         this.orderCommandHandler = orderCommandHandler;
+        this.wal = wal;
         this.waitStrategyName = waitStrategyName;
         this.minRemainingCapacity = Math.max(0L, minRemainingCapacity);
         this.warmupIterations = Math.max(0, warmupIterations);
@@ -66,6 +75,7 @@ public class DisruptorOrderPipeline {
         this.warmupCounter = meters.counter("emporia.oms.pipeline.warmup.events");
         this.queueLatency = meters.timer("emporia.oms.pipeline.queue.latency");
         this.handleLatency = meters.timer("emporia.oms.pipeline.handle.latency");
+        this.walFailures = meters.counter("emporia.oms.pipeline.wal.failures");
         meters.gauge("emporia.oms.pipeline.queue.depth", queueDepth);
     }
 
@@ -98,7 +108,11 @@ public class DisruptorOrderPipeline {
                     return;
                 }
                 queueLatency.record(event.getStartedAtNanos() - event.getSubmittedAtNanos(), TimeUnit.NANOSECONDS);
+                logAhead(event.getCommand());
                 ProcessingOutcome outcome = orderCommandHandler.handle(event.getCommand());
+                // Handled, so its rows are queued for the writer; the log space
+                // up to here is reclaimable once a flush persists them.
+                wal.markSafePoint();
                 event.setOutcome(outcome);
                 if (event.getFuture() != null) {
                     event.getFuture().complete(outcome);
@@ -156,6 +170,39 @@ public class DisruptorOrderPipeline {
             ringBuffer.publish(sequence);
         }
         return future;
+    }
+
+    /**
+     * Records the command before it is applied, so a crash between accepting it
+     * and AsyncDbWriter flushing it can be recovered.
+     *
+     * <p>Write-ahead in the literal sense: it runs before the handler, because a
+     * record written afterwards cannot describe a command the process died
+     * during. It runs on the ring's single consumer thread, so the logger's
+     * synchronized append is uncontended.
+     *
+     * <p>Fails the command when the log is enabled but cannot take the record.
+     * Continuing would accept an order the system has no durable trace of while
+     * telling the caller it succeeded - the same silent loss the log exists to
+     * prevent. With the log rewound on every flush this should not occur outside
+     * a genuine fault.
+     */
+    private void logAhead(OrderCommand command) {
+        if (!wal.isEnabled()) return;
+        byte[] record;
+        try {
+            record = SbeEncoderDecoder.encodeOrderCommand(command);
+        } catch (RuntimeException serialisationFailure) {
+            walFailures.increment();
+            throw new HotPathRejectedException(500, "wal_encode",
+                    "Order could not be recorded before processing: " + serialisationFailure.getMessage(),
+                    serialisationFailure);
+        }
+        if (!wal.append(record)) {
+            walFailures.increment();
+            throw new HotPathRejectedException(507, "wal_full",
+                    "Order could not be recorded before processing; the write-ahead log rejected it");
+        }
     }
 
     public void engageKillSwitch(String reason) {

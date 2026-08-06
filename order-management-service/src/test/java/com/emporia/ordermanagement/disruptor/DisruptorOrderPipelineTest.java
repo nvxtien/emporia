@@ -11,6 +11,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import com.emporia.ordermanagement.service.MemoryMappedWalLogger;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -37,7 +38,7 @@ class DisruptorOrderPipelineTest {
     @BeforeEach
     void setUp() {
         handler = mock(OrderCommandHandler.class);
-        pipeline = new DisruptorOrderPipeline(handler, new SimpleMeterRegistry(), "yielding", 0, 0, "", "");
+        pipeline = new DisruptorOrderPipeline(handler, new SimpleMeterRegistry(), disabledWal(), "yielding", 0, 0, "", "");
         pipeline.start();
     }
 
@@ -119,6 +120,7 @@ class DisruptorOrderPipelineTest {
         DisruptorOrderPipeline constrained = new DisruptorOrderPipeline(
                 handler,
                 new SimpleMeterRegistry(),
+                disabledWal(),
                 "yielding",
                 65_535,
                 0,
@@ -154,5 +156,57 @@ class DisruptorOrderPipelineTest {
                 "trader-1", "DESK-A", Instant.now(), UUID.randomUUID(), null, null,
                 OrderSide.BUY, OrderType.LIMIT, new BigDecimal("100"), new BigDecimal("150.00"),
                 "DMA", "ref-1", null, java.util.Map.of());
+    }
+
+    @Test
+    void recordsTheCommandBeforeApplyingIt() throws Exception {
+        java.nio.file.Path walFile = java.nio.file.Files.createTempDirectory("wal-ahead")
+                .resolve("ahead.log");
+        try (MemoryMappedWalLogger wal = new MemoryMappedWalLogger(walFile.toString(), 1)) {
+            OrderCommandHandler recordingHandler = mock(OrderCommandHandler.class);
+            AtomicInteger positionWhenHandlerRan = new AtomicInteger(-1);
+            when(recordingHandler.handle(any())).thenAnswer(invocation -> {
+                positionWhenHandlerRan.set(wal.position());
+                return null;
+            });
+            DisruptorOrderPipeline logging = new DisruptorOrderPipeline(
+                    recordingHandler, new SimpleMeterRegistry(), wal,
+                    "yielding", 0, 0, "", "");
+            logging.start();
+
+            logging.submit(sampleCommand(UUID.randomUUID())).join();
+
+            // Write-ahead in the literal sense. A record written after the
+            // handler cannot describe a command the process died during, so the
+            // log must already hold it by the time the handler runs.
+            assertThat(positionWhenHandlerRan.get()).isPositive();
+            logging.stop();
+        }
+    }
+
+    @Test
+    void failsTheCommandRatherThanApplyingItUnrecorded() throws Exception {
+        java.nio.file.Path walFile = java.nio.file.Files.createTempDirectory("wal-full")
+                .resolve("full.log");
+        // One megabyte, filled by the first append, so the second cannot be recorded.
+        try (MemoryMappedWalLogger wal = new MemoryMappedWalLogger(walFile.toString(), 1)) {
+            wal.append(new byte[1024 * 1024 - 8]);
+            OrderCommandHandler neverCalled = mock(OrderCommandHandler.class);
+            DisruptorOrderPipeline logging = new DisruptorOrderPipeline(
+                    neverCalled, new SimpleMeterRegistry(), wal,
+                    "yielding", 0, 0, "", "");
+            logging.start();
+
+            // Accepting an order the system has no durable trace of, while
+            // telling the caller it succeeded, is the loss this log prevents.
+            assertThatThrownBy(() -> logging.submit(sampleCommand(UUID.randomUUID())).join())
+                    .hasRootCauseInstanceOf(HotPathRejectedException.class);
+            org.mockito.Mockito.verify(neverCalled, org.mockito.Mockito.never()).handle(any());
+            logging.stop();
+        }
+    }
+
+    private static MemoryMappedWalLogger disabledWal() {
+        return new MemoryMappedWalLogger(null, 1);
     }
 }

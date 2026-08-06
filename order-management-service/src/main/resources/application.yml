@@ -77,6 +77,17 @@ emporia.disruptor:
   warmup-iterations: ${EMPORIA_DISRUPTOR_WARMUP_ITERATIONS:2048}
   cpu-set: ${EMPORIA_DISRUPTOR_CPU_SET:}
   numa-node: ${EMPORIA_DISRUPTOR_NUMA_NODE:}
+
+emporia.wal:
+  # Covers the window between the ring accepting a command and AsyncDbWriter
+  # persisting it - milliseconds - and is rewound after every flush rather than
+  # rotated, so it needs no more room than that window can hold. Unset the path
+  # to run without it, at the cost of losing anything in flight on a crash.
+  #
+  # Outside target/ deliberately: a build must not be able to delete live
+  # runtime state.
+  file-path: ${EMPORIA_WAL_FILE_PATH:.local-run/order-management.wal}
+  file-size-mb: ${EMPORIA_WAL_FILE_SIZE_MB:64}
 management:
   endpoints.web.exposure.include: health,info,prometheus
   tracing.sampling.probability: ${OTEL_TRACE_SAMPLE_RATE:1.0}

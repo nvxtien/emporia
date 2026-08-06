@@ -19,6 +19,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import com.emporia.ordermanagement.service.MemoryMappedWalLogger;
 import org.mockito.ArgumentCaptor;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.security.oauth2.jwt.Jwt;
@@ -57,7 +58,7 @@ class OrderCommandControllerTest {
         observations.observationConfig()
                 .observationHandler(new DefaultMeterObservationHandler(meters));
         when(kafka.send(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(null));
-        disruptorPipeline = new DisruptorOrderPipeline(handler, meters, "yielding", 0, 0, "", "");
+        disruptorPipeline = new DisruptorOrderPipeline(handler, meters, new MemoryMappedWalLogger(null, 1), "yielding", 0, 0, "", "");
         disruptorPipeline.start();
         controller = new OrderCommandController(staticData, handler, disruptorPipeline, kafka, objectMapper, observations, "orders-topic", "results-topic");
     }

@@ -34,6 +34,8 @@ public class AsyncDbWriter {
     private final ProcessedCommandRepository processed;
     private final com.emporia.ordermanagement.repository.OrderInputEventRepository inputEvents;
     private final JdbcTemplate jdbcTemplate;
+    /** Rewound once its records are persisted; null when running without a log. */
+    private final MemoryMappedWalLogger wal;
 
     private final ConcurrentLinkedQueue<TradingOrder> orderQueue = new ConcurrentLinkedQueue<>();
     private final ConcurrentLinkedQueue<OrderEvent> eventQueue = new ConcurrentLinkedQueue<>();
@@ -47,7 +49,7 @@ public class AsyncDbWriter {
     private final com.emporia.ordermanagement.model.OrderInputEvent[] inputEventBatchBuffer = new com.emporia.ordermanagement.model.OrderInputEvent[BATCH_SIZE];
 
     public AsyncDbWriter(TradingOrderRepository orders, OrderEventRepository events, ProcessedCommandRepository processed) {
-        this(orders, events, processed, null, null);
+        this(orders, events, processed, null, null, null);
     }
 
     // Marks the constructor Spring injects through. Without it there are two
@@ -60,12 +62,14 @@ public class AsyncDbWriter {
     public AsyncDbWriter(TradingOrderRepository orders, OrderEventRepository events,
                          ProcessedCommandRepository processed,
                          com.emporia.ordermanagement.repository.OrderInputEventRepository inputEvents,
-                         JdbcTemplate jdbcTemplate) {
+                         JdbcTemplate jdbcTemplate,
+                         MemoryMappedWalLogger wal) {
         this.orders = orders;
         this.events = events;
         this.processed = processed;
         this.inputEvents = inputEvents;
         this.jdbcTemplate = jdbcTemplate;
+        this.wal = wal;
     }
 
     public void enqueue(TradingOrder order) {
@@ -90,6 +94,26 @@ public class AsyncDbWriter {
         flushEvents();
         flushProcessed();
         flushInputEvents();
+
+        reclaimWriteAheadLog();
+    }
+
+    /**
+     * Reclaims the write-ahead log space covering rows this flush persisted.
+     *
+     * <p>Only once the queues are empty: until then some enqueued row is still
+     * unwritten, and its log record is what would recover it. Compaction keeps
+     * whatever was accepted while the flush ran, so the log holds the in-flight
+     * window rather than a history - which is what lets a fixed-size mapping
+     * serve indefinitely instead of filling and refusing orders.
+     */
+    private void reclaimWriteAheadLog() {
+        if (wal == null || !wal.isEnabled()) return;
+        if (!orderQueue.isEmpty() || !eventQueue.isEmpty()
+                || !processedQueue.isEmpty() || !inputEventQueue.isEmpty()) {
+            return;
+        }
+        wal.compactToSafePoint();
     }
 
     @PreDestroy
