@@ -38,7 +38,7 @@ class DisruptorOrderPipelineTest {
     @BeforeEach
     void setUp() {
         handler = mock(OrderCommandHandler.class);
-        pipeline = new DisruptorOrderPipeline(handler, new SimpleMeterRegistry(), disabledWal(), "yielding", 0, 0, "", "");
+        pipeline = new DisruptorOrderPipeline(handler, new SimpleMeterRegistry(), disabledWal(), null, "yielding", 0, 0, "", "");
         pipeline.start();
     }
 
@@ -121,6 +121,7 @@ class DisruptorOrderPipelineTest {
                 handler,
                 new SimpleMeterRegistry(),
                 disabledWal(),
+                null,
                 "yielding",
                 65_535,
                 0,
@@ -170,7 +171,7 @@ class DisruptorOrderPipelineTest {
                 return null;
             });
             DisruptorOrderPipeline logging = new DisruptorOrderPipeline(
-                    recordingHandler, new SimpleMeterRegistry(), wal,
+                    recordingHandler, new SimpleMeterRegistry(), wal, null,
                     "yielding", 0, 0, "", "");
             logging.start();
 
@@ -193,7 +194,7 @@ class DisruptorOrderPipelineTest {
             wal.append(new byte[1024 * 1024 - 8]);
             OrderCommandHandler neverCalled = mock(OrderCommandHandler.class);
             DisruptorOrderPipeline logging = new DisruptorOrderPipeline(
-                    neverCalled, new SimpleMeterRegistry(), wal,
+                    neverCalled, new SimpleMeterRegistry(), wal, null,
                     "yielding", 0, 0, "", "");
             logging.start();
 

@@ -14,7 +14,7 @@ import java.util.List;
 import java.util.Comparator;
 
 @Service
-class OrderCommandReplayHarness {
+public class OrderCommandReplayHarness {
     private static final Logger log = LoggerFactory.getLogger(OrderCommandReplayHarness.class);
 
     private final OrderInputEventRepository inputEvents;
@@ -46,7 +46,7 @@ class OrderCommandReplayHarness {
      * <p>Must run before the pipeline accepts anything, since appending starts
      * again at the beginning of the file.
      */
-    List<ProcessingOutcome> replayWriteAheadLog() {
+    public List<ProcessingOutcome> replayWriteAheadLog() {
         if (wal == null || !wal.isEnabled()) return List.of();
         List<byte[]> records = wal.readPendingRecords();
         if (records.isEmpty()) return List.of();

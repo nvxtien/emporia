@@ -8,6 +8,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import com.emporia.events.sbe.SbeEncoderDecoder;
 import com.emporia.ordermanagement.service.MemoryMappedWalLogger;
+import com.emporia.ordermanagement.service.OrderCommandReplayHarness;
 import com.lmax.disruptor.BusySpinWaitStrategy;
 import com.lmax.disruptor.EventHandler;
 import com.lmax.disruptor.RingBuffer;
@@ -40,6 +41,8 @@ public class DisruptorOrderPipeline {
 
     private final OrderCommandHandler orderCommandHandler;
     private final MemoryMappedWalLogger wal;
+    /** Null only in tests that construct the pipeline without recovery. */
+    private final OrderCommandReplayHarness replayHarness;
     private final Counter walFailures;
     private final String waitStrategyName;
     private final long minRemainingCapacity;
@@ -59,6 +62,7 @@ public class DisruptorOrderPipeline {
     public DisruptorOrderPipeline(OrderCommandHandler orderCommandHandler,
                                  MeterRegistry meters,
                                  MemoryMappedWalLogger wal,
+                                 OrderCommandReplayHarness replayHarness,
                                  @Value("${emporia.disruptor.wait-strategy:yielding}") String waitStrategyName,
                                  @Value("${emporia.disruptor.min-remaining-capacity:1024}") long minRemainingCapacity,
                                  @Value("${emporia.disruptor.warmup-iterations:2048}") int warmupIterations,
@@ -66,6 +70,7 @@ public class DisruptorOrderPipeline {
                                  @Value("${emporia.disruptor.numa-node:}") String numaNodeHint) {
         this.orderCommandHandler = orderCommandHandler;
         this.wal = wal;
+        this.replayHarness = replayHarness;
         this.waitStrategyName = waitStrategyName;
         this.minRemainingCapacity = Math.max(0L, minRemainingCapacity);
         this.warmupIterations = Math.max(0, warmupIterations);
@@ -81,6 +86,17 @@ public class DisruptorOrderPipeline {
 
     @PostConstruct
     public void start() {
+        // Before the ring exists, and so before anything appends. A fresh
+        // mapping writes from the beginning of the file, so replaying later
+        // would read records the process had already started overwriting.
+        //
+        // Replay goes straight to the handler rather than through the ring:
+        // routed back through it, every recovered command would be appended to
+        // the log a second time.
+        if (replayHarness != null) {
+            replayHarness.replayWriteAheadLog();
+        }
+
         WaitStrategy waitStrategy = "busyspin".equalsIgnoreCase(waitStrategyName)
                 ? new BusySpinWaitStrategy()
                 : new YieldingWaitStrategy();

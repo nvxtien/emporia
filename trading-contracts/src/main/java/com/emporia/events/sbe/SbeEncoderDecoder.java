@@ -330,7 +330,10 @@ public final class SbeEncoderDecoder {
         buf.put((byte) (command.commandType() == null ? 0xFF : command.commandType().ordinal()));
         buf.put((byte) (command.side() == null ? 0xFF : command.side().ordinal()));
         buf.put((byte) (command.orderType() == null ? 0xFF : command.orderType().ordinal()));
-        buf.putLong(command.requestedAt() == null ? 0 : command.requestedAt().toEpochMilli());
+        // Long.MIN_VALUE for absent, not 0: the epoch is a real instant, and
+        // encoding it as "missing" would drop the timestamp of any command
+        // carrying it.
+        buf.putLong(command.requestedAt() == null ? Long.MIN_VALUE : command.requestedAt().toEpochMilli());
         buf.putLong(command.expectedVersion() == null ? Long.MIN_VALUE : command.expectedVersion());
         buf.putLong(FixedPointMath.toScaledLong(command.quantity()));
         buf.putLong(FixedPointMath.toScaledLong(command.limitPrice()));
@@ -360,7 +363,7 @@ public final class SbeEncoderDecoder {
         OrderSide side = ordinal(buf.get(), OrderSide.values());
         OrderType orderType = ordinal(buf.get(), OrderType.values());
         long epochMs = buf.getLong();
-        Instant requestedAt = epochMs == 0 ? null : Instant.ofEpochMilli(epochMs);
+        Instant requestedAt = epochMs == Long.MIN_VALUE ? null : Instant.ofEpochMilli(epochMs);
         long expectedVersionRaw = buf.getLong();
         Long expectedVersion = expectedVersionRaw == Long.MIN_VALUE ? null : expectedVersionRaw;
         BigDecimal quantity = scaled(buf.getLong());

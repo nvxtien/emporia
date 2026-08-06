@@ -225,6 +225,19 @@ class SbeEncoderDecoderTest {
         assertThat(decoded.listing()).isNull();
         assertThat(decoded.expectedVersion()).isNull();
         assertThat(decoded.commandType()).isEqualTo(TradingEvents.CommandType.CANCEL);
+        // The epoch is a real instant, so it must not decode as absent.
+        assertThat(SbeEncoderDecoder.decodeOrderCommand(SbeEncoderDecoder.encodeOrderCommand(
+                withRequestedAt(sparse, Instant.EPOCH))).requestedAt()).isEqualTo(Instant.EPOCH);
+    }
+
+    private static TradingEvents.OrderCommand withRequestedAt(
+            TradingEvents.OrderCommand command, Instant requestedAt) {
+        return new TradingEvents.OrderCommand(command.schemaVersion(), command.commandId(),
+                command.commandType(), command.userSubject(), command.deskId(), requestedAt,
+                command.orderId(), command.expectedVersion(), command.listing(), command.side(),
+                command.orderType(), command.quantity(), command.limitPrice(),
+                command.destination(), command.originatorReference(), command.parentOrderId(),
+                command.executionParameters());
     }
 
     @Test
