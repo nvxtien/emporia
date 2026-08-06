@@ -58,7 +58,7 @@ class OrderCommandControllerTest {
         observations.observationConfig()
                 .observationHandler(new DefaultMeterObservationHandler(meters));
         when(kafka.send(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(null));
-        disruptorPipeline = new DisruptorOrderPipeline(handler, meters, new MemoryMappedWalLogger(null, 1), "yielding", 0, 0, "", "");
+        disruptorPipeline = new DisruptorOrderPipeline(handler, meters, new MemoryMappedWalLogger(null, 1), null, "yielding", 0, 0, "", "");
         disruptorPipeline.start();
         controller = new OrderCommandController(staticData, handler, disruptorPipeline, kafka, objectMapper, observations, "orders-topic", "results-topic");
     }
