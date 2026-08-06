@@ -168,6 +168,23 @@ public final class SbeView {
 
     // ── Constructor — no ByteBuffer allocation ────────────────────────────────
 
+    /**
+     * Maps the wire's absent-value sentinel back onto this class's own
+     * zero-means-absent convention for occurredAt/quantity/price.
+     *
+     * <p>{@link SbeEncoderDecoder} encodes "not present" as
+     * {@link Long#MIN_VALUE} rather than 0, because 0 is a real value for a
+     * timestamp (the epoch) and was previously indistinguishable from absent.
+     * This class is a separate, hand-rolled zero-copy reader of the same wire
+     * format - it does not call {@code SbeEncoderDecoder}'s decode methods -
+     * so it has to apply the same mapping itself. Normalising once here, at
+     * the point each field is read, keeps every accessor below correct without
+     * duplicating the {@code == Long.MIN_VALUE} check at each call site.
+     */
+    private static long normalizeAbsent(long raw) {
+        return raw == Long.MIN_VALUE ? 0L : raw;
+    }
+
     private SbeView(byte[] buffer, short expectedMsgType) {
         // Magic check: read 4 bytes directly via VarHandle — no ByteBuffer.wrap()
         if (buffer == null || buffer.length < 6
@@ -193,7 +210,7 @@ public final class SbeView {
             uuid2Lo = ByteArrayReader.getLong(buffer, ODE_OFF_UUID2 + 8);
             orderVersion     = ByteArrayReader.getLong(buffer, ODE_OFF_ORDER_VER);
             statusOrCmdType  = ByteArrayReader.getUnsignedByte(buffer, ODE_OFF_STATUS);
-            occurredAtMillis = ByteArrayReader.getLong(buffer, ODE_OFF_OCCURRED_AT);
+            occurredAtMillis = normalizeAbsent(ByteArrayReader.getLong(buffer, ODE_OFF_OCCURRED_AT));
             quantityScaled   = 0L;
             priceScaled      = 0L;
             // Scan var fields starting at ODE_OFF_VARS
@@ -210,9 +227,9 @@ public final class SbeView {
             uuid2Hi = 0L; uuid2Lo = 0L;
             orderVersion     = 0L;
             statusOrCmdType  = ByteArrayReader.getUnsignedByte(buffer, EC_OFF_CMD_TYPE);
-            occurredAtMillis = ByteArrayReader.getLong(buffer, EC_OFF_OCCURRED_AT);
-            quantityScaled   = ByteArrayReader.getLong(buffer, EC_OFF_QTY);
-            priceScaled      = ByteArrayReader.getLong(buffer, EC_OFF_PRICE);
+            occurredAtMillis = normalizeAbsent(ByteArrayReader.getLong(buffer, EC_OFF_OCCURRED_AT));
+            quantityScaled   = normalizeAbsent(ByteArrayReader.getLong(buffer, EC_OFF_QTY));
+            priceScaled      = normalizeAbsent(ByteArrayReader.getLong(buffer, EC_OFF_PRICE));
             // Scan var fields starting at EC_OFF_VARS
             int pos = EC_OFF_VARS;
             v0Len = ByteArrayReader.getUnsignedShort(buffer, pos); v0Off = pos + 2; pos += 2 + v0Len;
