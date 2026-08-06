@@ -44,6 +44,15 @@ public final class TradingEvents {
             long tickSizeScaled,
             long sizeIncrementScaled
     ) {
+        // Marks this the constructor Jackson deserialises through. Without it,
+        // Jackson uses the canonical 16-arg constructor a record gets by
+        // default, which requires tickSizeScaled/sizeIncrementScaled in the
+        // JSON - fields that are a derived, hot-path-only convenience, not
+        // part of static-data-service's wire contract. Every existing producer
+        // of this JSON (static-data-service's REST responses) has no reason to
+        // ever include them, so deserialisation failed with "Cannot map null
+        // into type long" on every response.
+        @com.fasterxml.jackson.annotation.JsonCreator
         public ListingSnapshot(long id, int version, String symbol, String name, String marketSymbol,
                                String exchangeMic, String exchangeName, String countryCode, String currency,
                                BigDecimal tickSize, BigDecimal sizeIncrement, BigDecimal referencePrice,
