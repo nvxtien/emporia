@@ -6,6 +6,7 @@ import com.emporia.events.TradingEvents.OrderCommandResult;
 import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderType;
+import com.emporia.events.risk.OrderRiskChecks;
 import com.emporia.ordermanagement.dto.ProcessingOutcome;
 import com.emporia.ordermanagement.model.OrderEvent;
 import com.emporia.ordermanagement.model.ProcessedCommand;
@@ -35,27 +36,31 @@ public class OrderCommandHandler {
     private final ProcessedCommandRepository processed;
     private final ObjectMapper objectMapper;
     private final ObservationRegistry observations;
+    private final OrderMetrics metrics;
+    private final OrderStateCache cache;
+    private final AsyncDbWriter asyncDbWriter;
 
     public OrderCommandHandler(TradingOrderRepository orders, OrderEventRepository events,
                         ProcessedCommandRepository processed, ObjectMapper objectMapper,
-                        ObservationRegistry observations) {
+                        ObservationRegistry observations, OrderMetrics metrics, OrderStateCache cache,
+                        AsyncDbWriter asyncDbWriter) {
         this.orders = orders; this.events = events; this.processed = processed; this.objectMapper = objectMapper;
-        this.observations = observations;
+        this.observations = observations; this.metrics = metrics; this.cache = cache;
+        this.asyncDbWriter = asyncDbWriter;
     }
 
     /**
-     * Records {@code emporia.oms.command.handle} over the whole transactional
-     * unit, deliberately including the idempotency lookup and the flush, since
-     * database time is one of the things Phase 1_1 must attribute.
+     * Executes order command handling on the single-writer Disruptor thread.
+     * Direct Java invocation without Spring AOP / CGLIB proxy reflection.
      */
-    @Transactional
     public ProcessingOutcome handle(OrderCommand command) {
         Observation observation = Observation.createNotStarted("emporia.oms.command.handle", observations)
                 .lowCardinalityKeyValue("command_type", commandTypeTag(command))
                 .start();
         String outcome = "success";
         try {
-            ProcessedCommand cached = processed.findById(command.commandId()).orElse(null);
+            // Cache-backed idempotency check: avoids a DB SELECT on every command.
+            ProcessedCommand cached = cache.findProcessedById(command.commandId()).orElse(null);
             if (cached != null) {
                 outcome = "duplicate";
                 return new ProcessingOutcome(cached.result(), events.findByCommandIdOrderByOccurredAtAsc(command.commandId())
@@ -74,7 +79,9 @@ public class OrderCommandHandler {
                 outcome = "rejected";
                 OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), false,
                         problem.status, problem.getMessage(), null);
-                processed.save(new ProcessedCommand(result));
+                ProcessedCommand processedCmd = new ProcessedCommand(result);
+                cache.putProcessed(processedCmd);
+                asyncDbWriter.enqueue(processedCmd);
                 return new ProcessingOutcome(result, List.of());
             }
         } catch (RuntimeException exception) {
@@ -94,7 +101,8 @@ public class OrderCommandHandler {
     private ProcessingOutcome create(OrderCommand command) {
         require(command.orderId() != null && command.listing() != null && command.side() != null
                 && command.orderType() != null, 400, "Create command is incomplete");
-        require(!orders.existsById(command.orderId()), 409, "Order already exists");
+        // Cache-backed duplicate order guard: avoids a DB SELECT on CREATE.
+        require(!cache.existsById(command.orderId()), 409, "Order already exists");
         String deskId = desk(command);
         BigDecimal price = checkOrderRisk(command.orderType(), command.quantity(),
                 command.listing().sizeIncrement(), BigDecimal.ZERO,
@@ -109,7 +117,9 @@ public class OrderCommandHandler {
                 command.listing(), command.side(),
                 command.orderType(), command.quantity(), price, command.destination(), command.originatorReference(),
                 parent == null ? null : parent.getId(), parent == null ? null : parent.getRootOrderId(), json(command.executionParameters()));
-        orders.saveAndFlush(order);
+        cache.put(order);
+        asyncDbWriter.enqueue(order);
+        metrics.orderCreated();
         return success(command, order, "CREATED", "Order accepted by Emporia", 201);
     }
 
@@ -126,7 +136,8 @@ public class OrderCommandHandler {
                 order.getListing().getSizeIncrement(), order.getTradedQuantity(),
                 command.limitPrice(), order.getListing().getTickSize());
         order.modify(command.quantity(), price);
-        orders.saveAndFlush(order);
+        cache.put(order);
+        asyncDbWriter.enqueue(order);
         return success(command, order, "MODIFIED", "Quantity or price changed", 200);
     }
 
@@ -138,13 +149,18 @@ public class OrderCommandHandler {
         List<OrderDomainEvent> domainEvents = new ArrayList<>();
         requestChildCancellations(command, order.getId(), domainEvents);
         order.requestCancel();
-        orders.saveAndFlush(order);
-        OrderEvent parentEvent = events.save(new OrderEvent(command.commandId(), order, "CANCEL_REQUESTED",
-                "Cancellation requested by user", json(order.view())));
+        cache.put(order);
+        asyncDbWriter.enqueue(order);
+        metrics.cancelRequested();
+        OrderEvent parentEvent = new OrderEvent(command.commandId(), order, "CANCEL_REQUESTED",
+                "Cancellation requested by user", json(order.view()));
+        asyncDbWriter.enqueue(parentEvent);
         domainEvents.add(parentEvent.domainEvent());
         OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), true, 200,
                 null, json(order.view()));
-        processed.save(new ProcessedCommand(result));
+        ProcessedCommand processedCmd = new ProcessedCommand(result);
+        cache.putProcessed(processedCmd);
+        asyncDbWriter.enqueue(processedCmd);
         return new ProcessingOutcome(result, domainEvents);
     }
 
@@ -154,9 +170,12 @@ public class OrderCommandHandler {
             requestChildCancellations(command, child.getId(), domainEvents);
             if (child.getTargetStatus() == OrderStatus.CANCELLED) continue;
             child.requestCancel();
-            orders.saveAndFlush(child);
-            OrderEvent childEvent = events.save(new OrderEvent(command.commandId(), child, "CANCEL_REQUESTED",
-                    "Cancellation requested with parent order", json(child.view())));
+            cache.put(child);
+            asyncDbWriter.enqueue(child);
+            metrics.cancelRequested();
+            OrderEvent childEvent = new OrderEvent(command.commandId(), child, "CANCEL_REQUESTED",
+                    "Cancellation requested with parent order", json(child.view()));
+            asyncDbWriter.enqueue(childEvent);
             domainEvents.add(childEvent.domainEvent());
         }
     }
@@ -166,23 +185,31 @@ public class OrderCommandHandler {
         for (TradingOrder order : orders.findByDeskIdAndStatusInOrderByCreatedAtDesc(desk(command), CANCELLABLE)) {
             if (order.getTargetStatus() == OrderStatus.CANCELLED) continue;
             order.requestCancel();
-            orders.saveAndFlush(order);
+            cache.put(order);
+            asyncDbWriter.enqueue(order);
+            metrics.cancelRequested();
             String payload = json(order.view());
-            OrderEvent event = events.save(new OrderEvent(command.commandId(), order, "CANCEL_REQUESTED",
-                    "Cancellation requested by user using cancel all", payload));
+            OrderEvent event = new OrderEvent(command.commandId(), order, "CANCEL_REQUESTED",
+                    "Cancellation requested by user using cancel all", payload);
+            asyncDbWriter.enqueue(event);
             domainEvents.add(event.domainEvent());
         }
         String payload = json(new CancelAllView(domainEvents.size()));
         OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), true, 200, null, payload);
-        processed.save(new ProcessedCommand(result));
+        ProcessedCommand processedCmd = new ProcessedCommand(result);
+        cache.putProcessed(processedCmd);
+        asyncDbWriter.enqueue(processedCmd);
         return new ProcessingOutcome(result, domainEvents);
     }
 
     private ProcessingOutcome success(OrderCommand command, TradingOrder order, String type, String message, int status) {
         String payload = json(order.view());
-        OrderEvent event = events.save(new OrderEvent(command.commandId(), order, type, message, payload));
+        OrderEvent event = new OrderEvent(command.commandId(), order, type, message, payload);
+        asyncDbWriter.enqueue(event);
         OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), true, status, null, payload);
-        processed.save(new ProcessedCommand(result));
+        ProcessedCommand processedCommand = new ProcessedCommand(result);
+        cache.putProcessed(processedCommand);
+        asyncDbWriter.enqueue(processedCommand);
         return new ProcessingOutcome(result, List.of(event.domainEvent()));
     }
 
@@ -195,7 +222,8 @@ public class OrderCommandHandler {
 
     private TradingOrder findOnDesk(String deskId, java.util.UUID orderId) {
         require(orderId != null, 400, "Order id is required");
-        return orders.findByIdAndDeskId(orderId, deskId)
+        // Cache-backed lookup: avoids a DB SELECT on every command for a live order.
+        return cache.findByIdAndDeskId(orderId, deskId)
                 .orElseThrow(() -> new DomainProblem(404, "Order not found"));
     }
 
@@ -215,46 +243,17 @@ public class OrderCommandHandler {
     private BigDecimal checkOrderRisk(OrderType type, BigDecimal quantity, BigDecimal increment,
                                       BigDecimal traded, BigDecimal price, BigDecimal tickSize) {
         Observation observation = Observation.createNotStarted("emporia.risk.check", observations).start();
-        String decision = "allow";
-        String reason = "ok";
+        OrderRiskChecks.RiskOutcome outcome = OrderRiskChecks.evaluate(type, quantity, increment, traded, price, tickSize);
         try {
-            try {
-                validateQuantity(quantity, increment, traded);
-            } catch (DomainProblem problem) {
-                decision = "deny";
-                reason = "quantity";
-                throw problem;
+            if (!outcome.allowed()) {
+                throw new DomainProblem(outcome.status(), outcome.message());
             }
-            try {
-                return validatePrice(type, price, tickSize);
-            } catch (DomainProblem problem) {
-                decision = "deny";
-                reason = "symbol";
-                throw problem;
-            }
+            return outcome.validatedPrice();
         } finally {
-            observation.lowCardinalityKeyValue("decision", decision)
-                    .lowCardinalityKeyValue("reason", reason)
+            observation.lowCardinalityKeyValue("decision", outcome.allowed() ? "allow" : "deny")
+                    .lowCardinalityKeyValue("reason", outcome.reason())
                     .stop();
         }
-    }
-
-    private void validateQuantity(BigDecimal quantity, BigDecimal increment, BigDecimal traded) {
-        require(quantity != null && quantity.signum() > 0, 400, "Quantity must be greater than zero");
-        require(quantity.compareTo(traded) > 0, 400,
-                "Quantity must be greater than the quantity already traded");
-        require(increment != null && increment.signum() > 0, 400,
-                "Listing size increment must be greater than zero");
-        require(quantity.remainder(increment).signum() == 0, 400, "Quantity must align with the listing size increment");
-    }
-
-    private BigDecimal validatePrice(OrderType type, BigDecimal price, BigDecimal tickSize) {
-        require(tickSize != null && tickSize.signum() > 0, 400,
-                "Listing tick size must be greater than zero");
-        if (type == OrderType.MARKET) return null;
-        require(price != null && price.signum() > 0, 400, "A positive limit price is required for limit orders");
-        require(price.remainder(tickSize).signum() == 0, 400, "Limit price must align with the listing tick size");
-        return price;
     }
 
     private void require(boolean condition, int status, String message) {

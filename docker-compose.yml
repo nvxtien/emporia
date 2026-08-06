@@ -167,6 +167,7 @@ services:
       - --enable-feature=exemplar-storage
     volumes:
       - ./deploy/otel/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/otel/alerts:/etc/prometheus/alerts:ro
       - emporia-prometheus-data:/prometheus
     ports:
       - "9090:9090"

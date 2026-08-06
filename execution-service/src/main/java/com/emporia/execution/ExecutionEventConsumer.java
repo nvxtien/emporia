@@ -2,6 +2,7 @@ package com.emporia.execution;
 
 import com.emporia.events.TradingEvents.ExecutionRecoveryView;
 import com.emporia.events.TradingEvents.ListingSnapshot;
+import com.emporia.events.KafkaRoutingKeys;
 import com.emporia.events.TradingEvents.OrderCommand;
 import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderStatus;
@@ -32,6 +33,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
@@ -58,6 +60,8 @@ class ExecutionEventConsumer {
     private final int defaultVwapBuckets;
     private final Counter routed;
     private final Counter rejected;
+    private final Counter childPublishImmediateFailures;
+    private final Counter childPublishAsyncFailures;
     private final ObservationRegistry observations;
     private final String venueMode;
     private final ConcurrentHashMap<UUID, List<ScheduledFuture<?>>> runtimes = new ConcurrentHashMap<>();
@@ -86,6 +90,10 @@ class ExecutionEventConsumer {
         this.defaultVwapBuckets = Math.max(1, defaultVwapBuckets);
         this.routed = meters.counter("emporia.execution.orders.routed");
         this.rejected = meters.counter("emporia.execution.orders.rejected");
+        this.childPublishImmediateFailures = meters.counter("emporia.execution.child.publish.failures",
+            "stage", "immediate");
+        this.childPublishAsyncFailures = meters.counter("emporia.execution.child.publish.failures",
+            "stage", "async");
         this.observations = observations;
         this.venueMode = venueMode.strip().toLowerCase(Locale.ROOT).replace('-', '_');
         this.maxSweepRetries = Math.max(1, maxSweepRetries);
@@ -156,31 +164,77 @@ class ExecutionEventConsumer {
     )
     void consume(OrderDomainEvent event) {
         OrderView order = read(event.payload());
-        if ("CREATED".equals(event.eventType())) {
-            try {
-                start(order, new StrategyStateView(order, List.of()));
-                routed.increment();
-            } catch (RuntimeException routingFailure) {
-                reject(order, routingFailure.getMessage());
-            }
-            return;
+        switch (event.eventType()) {
+            case "CREATED" -> handleCreated(order);
+            case "MODIFIED" -> handleModified(order);
+            case "CANCEL_REQUESTED" -> handleCancelRequested(order);
+            default -> handleTerminalParent(order);
         }
-        if ("MODIFIED".equals(event.eventType()) && "DMA".equalsIgnoreCase(order.destination())) {
+    }
+
+    /**
+     * Orchestration boundary: this method dispatches execution but never writes
+     * order state directly; order-management remains the state authority.
+     */
+    private void handleCreated(OrderView order) {
+        try {
+            validateCreatedOrder(order);
+            start(order, new StrategyStateView(order, List.of()));
+            routed.increment();
+        } catch (RuntimeException routingFailure) {
+            reject(order, routingFailure.getMessage());
+        }
+    }
+
+    /**
+     * External I/O boundary: only DMA orders are modifiable at venue level.
+     */
+    private void handleModified(OrderView order) {
+        if (isDmaDestination(order)) {
             venueOperation("modify", () -> executionVenue.modify(order));
+        }
+    }
+
+    /**
+     * Runtime boundary: strategy cancellation stops local schedulers and emits
+     * an explicit execution command so OMS resolves parent state.
+     */
+    private void handleCancelRequested(OrderView order) {
+        if (isDmaDestination(order)) {
+            venueOperation("cancel", () -> executionVenue.cancel(order));
             return;
         }
-        if ("CANCEL_REQUESTED".equals(event.eventType())) {
-            if ("DMA".equalsIgnoreCase(order.destination())) {
-                venueOperation("cancel", () -> executionVenue.cancel(order));
-            } else {
-                stopRuntime(order.id());
-                executionCommands.venueCancel(order.id(), order.deskId(),
-                        "STRATEGY-CANCEL-" + order.id() + ":" + order.version(),
-                        order.listing().exchangeMic(), "Strategy scheduler stopped");
-            }
-            return;
+        stopRuntime(order.id());
+        executionCommands.venueCancel(order.id(), order.deskId(),
+                "STRATEGY-CANCEL-" + order.id() + ":" + order.version(),
+                order.listing().exchangeMic(), "Strategy scheduler stopped");
+    }
+
+    private void handleTerminalParent(OrderView order) {
+        if (order.parentOrderId() == null && isTerminal(order.status())) {
+            stopRuntime(order.id());
         }
-        if (order.parentOrderId() == null && isTerminal(order.status())) stopRuntime(order.id());
+    }
+
+    /**
+     * Phase 3 invariant gate for created orders. Rejects malformed input before
+     * any venue call or strategy scheduling can happen.
+     */
+    private void validateCreatedOrder(OrderView order) {
+        require(order.id() != null, "Order id is required");
+        require(order.deskId() != null && !order.deskId().isBlank(), "Order desk is required");
+        require(order.listing() != null, "Listing is required");
+        require(order.listing().exchangeMic() != null && !order.listing().exchangeMic().isBlank(),
+                "Listing exchange MIC is required");
+        require(order.destination() != null && !order.destination().isBlank(),
+                "Execution destination is required");
+        require(order.quantity() != null && order.quantity().signum() > 0,
+                "Order quantity must be positive");
+        require(order.remainingQuantity() != null && order.remainingQuantity().signum() >= 0,
+                "Order remaining quantity must be non-negative");
+        if (order.type() == OrderType.LIMIT) {
+            require(order.limitPrice() != null, "Limit order price is required");
+        }
     }
 
     private void start(OrderView order, StrategyStateView state) {
@@ -197,6 +251,7 @@ class ExecutionEventConsumer {
         try {
             observeStrategyDecision("smart", () -> advanceSmartState(initial));
         } catch (RuntimeException unavailableLiquidity) {
+            if (!waitingForLiquidity(unavailableLiquidity)) throw unavailableLiquidity;
             log.info("SMART strategy {} is waiting for executable liquidity: {}",
                     initial.parent().id(), unavailableLiquidity.getMessage());
         }
@@ -309,7 +364,7 @@ class ExecutionEventConsumer {
         int firstIndex = state.children().size();
         for (int index = 0; index < plan.size(); index++) {
             BestVenueSelector.RouteSlice slice = plan.get(index);
-            publishChild(parent, slice.listing(), slice.price(), slice.quantity(),
+            publishChild(parent, slice.listing(), parent.limitPrice(), slice.price(), slice.quantity(),
                     "SMART", firstIndex + index);
         }
         return "success";
@@ -386,7 +441,7 @@ class ExecutionEventConsumer {
         }
 
         BestVenueSelector.Selection selection = selectVenue(state.parent());
-        publishChild(state.parent(), selection.listing(), selection.price(), due,
+        publishChild(state.parent(), selection.listing(), state.parent().limitPrice(), selection.price(), due,
                 "VWAP", state.children().size());
         return "success";
     }
@@ -463,7 +518,21 @@ class ExecutionEventConsumer {
                 tradingData.quotes(listings.stream().map(ListingSnapshot::id).toList()));
     }
 
-    private void publishChild(OrderView parent, ListingSnapshot listing, BigDecimal price,
+    /**
+     * Publishes a routed child order for a strategy slice.
+     *
+     * <p>{@code limitPrice} is the parent's original limit price, which
+     * {@link ExchangeCoreExecutionVenueGateway#protectionPriceTicks} uses as
+     * the slippage anchor. Anchoring against the venue quote (the old
+     * behaviour) allowed fills at quote + slippageBps even when the quote was
+     * already outside the parent's budget.
+     *
+     * <p>{@code venuePrice} is the best-available quote at the time of routing,
+     * kept in {@code executionParameters} for observability and fill
+     * reconciliation but not used for risk or matching.
+     */
+    private void publishChild(OrderView parent, ListingSnapshot listing,
+                              BigDecimal limitPrice, BigDecimal venuePrice,
                               BigDecimal quantity, String strategy, int index) {
         UUID childId = deterministic(parent.id() + ":" + strategy + ":" + index);
         UUID commandId = deterministic(childId + ":CREATE");
@@ -480,7 +549,7 @@ class ExecutionEventConsumer {
                 parent.side(),
                 OrderType.LIMIT,
                 quantity,
-                price,
+                limitPrice,
                 "DMA",
                 parent.id().toString(),
                 parent.id(),
@@ -489,9 +558,30 @@ class ExecutionEventConsumer {
                 // on the book. Resting children are why thousands of orders
                 // accumulated, and the venue's checkpoint cost grows with the
                 // book, so a child that does not fill must not linger.
-                Map.of("strategy", strategy, "slice", index, "tif", "IOC")
+                // venuePrice records the best quote at routing time for
+                // observability; the protection cap is derived from limitPrice.
+                Map.of("strategy", strategy, "slice", index, "tif", "IOC",
+                        "venuePrice", venuePrice)
         );
-        kafka.send(orderCommandsTopic, childId.toString(), child);
+        try {
+            // Shard-affinity key: all child CREATE commands for one parent use
+            // the parent id as Kafka key so they stay on one partition.
+            CompletableFuture<?> send = kafka.send(orderCommandsTopic, KafkaRoutingKeys.strategyChildCreate(parent.id()), child);
+            if (send != null) {
+                send.whenComplete((ignored, error) -> {
+                    if (error != null) {
+                        childPublishAsyncFailures.increment();
+                        // Deterministic fallback: record the failure and let
+                        // the next strategy tick retry from parent remaining quantity.
+                        log.warn("Child command publish failed asynchronously for parent {} child {} (strategy={}): {}",
+                                parent.id(), childId, strategy, error.getMessage());
+                    }
+                });
+            }
+        } catch (RuntimeException exception) {
+            childPublishImmediateFailures.increment();
+            throw new IllegalStateException("Could not publish child order command", exception);
+        }
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -583,6 +673,14 @@ class ExecutionEventConsumer {
     private boolean isTerminal(OrderStatus status) {
         return status == OrderStatus.FILLED || status == OrderStatus.CANCELLED
                 || status == OrderStatus.REJECTED;
+    }
+
+    private static boolean isDmaDestination(OrderView order) {
+        return "DMA".equalsIgnoreCase(order.destination());
+    }
+
+    private static void require(boolean condition, String message) {
+        if (!condition) throw new IllegalArgumentException(message);
     }
 
     private Duration tickPeriod() {

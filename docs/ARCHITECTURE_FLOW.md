@@ -23,16 +23,15 @@ flowchart TD
         Gateway --> Static["static-data-service :8081"]
         Gateway --> Preferences["user-preferences-service :8083"]
         Gateway --> Market["market-data-service :8084"]
-        Gateway --> OrderCmd["order-command-service :8085"]
         Gateway --> Orders["order-management-service :8086"]
+        OrderCmd["order-command-service :8085"] -.->|optional Kafka ingress| KafkaCmd["Kafka: emporia.order.commands.v1"]
     end
 
     subgraph Kafka Event Backplane
-        OrderCmd -->|1. OrderCommand| KafkaCmd["Kafka: emporia.order.commands.v1"]
+        Orders -->|async OrderDomainEvent| KafkaEvt["Kafka: emporia.orders.v1"]
         KafkaCmd --> Orders
-        Orders -->|2. OrderDomainEvent| KafkaEvt["Kafka: emporia.orders.v1"]
-        Orders -->|3. OrderCommandResult| KafkaRes["Kafka: emporia.order.results.v1"]
-        KafkaRes --> OrderCmd
+        Orders -->|OrderCommandResult for Kafka ingress| KafkaRes["Kafka: emporia.order.results.v1"]
+        KafkaRes -.-> OrderCmd
     end
 
     subgraph Execution & Routing Engine
@@ -69,8 +68,8 @@ flowchart TD
 | **`static-data-service`** | `8081` | Reference data master, asset & listing search, Alpaca asset master importer. | `emporia_static_data` |
 | **`user-preferences-service`** | `8083` | User-configured watchlists and workspace UI layout configurations. | `emporia_client_config` |
 | **`market-data-service`** | `8084` (HTTP)<br>`50551` (gRPC) | Conflated top-of-book market quotes, depth, Alpaca IEX & FIX simulator adapters, SSE/gRPC streaming. | Memory Cache & Stream Subscriptions |
-| **`order-command-service`** | `8085` | Ingress boundary for client order commands (`CREATE`, `MODIFY`, `CANCEL`, `CANCEL_ALL`), listing validation, command correlation. | Command correlation maps |
-| **`order-management-service`** | `8086` | State engine, order lifecycle, PostgreSQL order projections, command idempotency, SSE blotter streaming. | `emporia_order_data` |
+| **`order-command-service`** | `8085` | Optional Kafka ingress for client order commands; not on the gateway hot path. | Command correlation maps |
+| **`order-management-service`** | `8086` | Gateway command hot path (Disruptor), state engine, order lifecycle, write-behind persistence, SSE blotter streaming. | `emporia_order_data` |
 | **`execution-service`** | `8087` | Smart Order Routing (`DMA`, `SMART`, `VWAP`), venue selection (`BestVenueSelector`), `exchange-core` & FIX venue gateways. | `emporia_execution` |
 | **`portfolio-service`** | `8088` | Fully funded cash and asset balance accounting, idempotent snapshot receipts for exchange engines. | `emporia_portfolio` |
 | **`trading-contracts`** | N/A | Build-time library defining versioned Java records for Kafka topics. | Shared Java Domain Contracts |
@@ -85,17 +84,15 @@ flowchart TD
 
 ### Step 2: Order Command Ingress
 1. Trader creates an order (e.g. `BUY 100 AAPL @ 150.00 LIMIT`) in the React UI.
-2. The request hits **`order-command-service`** (`POST /api/orders`).
-3. `order-command-service` validates the target instrument with **`static-data-service`** and constructs an `OrderCommand`.
-4. It publishes `OrderCommand` to Kafka topic `emporia.order.commands.v1`.
+2. The request hits **`order-management-service`** via the gateway (`POST /api/orders`).
+3. OMS validates the target instrument with **`static-data-service`**, builds an `OrderCommand`, and processes it on the Disruptor hot path.
+4. OMS returns the correlated result to the browser and publishes `OrderDomainEvent` asynchronously to `emporia.orders.v1`.
 
 ### Step 3: Order State Transition & Event Publication
-1. **`order-management-service`** consumes the command from `emporia.order.commands.v1`.
-2. It executes a database transaction on `emporia_order_data`:
-   - Validates command idempotency via `processed_order_command`.
-   - Inserts order in state `PENDING` -> `LIVE`.
-3. Publishes `OrderDomainEvent` (`CREATED`) to `emporia.orders.v1` and correlation result to `emporia.order.results.v1`.
-4. Emits real-time SSE updates to the React UI order blotter.
+1. On the gateway hot path, state transitions are applied in-process (cache + write-behind DB) before the HTTP response returns.
+2. Idempotency is preserved via `processed_order_command` (and the in-memory processed cache).
+3. Domain events on `emporia.orders.v1` drive execution routing and blotter SSE updates.
+4. The optional Kafka ingress path (`order-command-service` → `emporia.order.commands.v1`) still feeds the same OMS handler for direct/load-test callers.
 
 ### Step 4: Routing Strategy Execution
 **`execution-service`** consumes the `OrderDomainEvent` (`CREATED`):

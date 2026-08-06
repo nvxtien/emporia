@@ -7,6 +7,7 @@ import com.emporia.events.TradingEvents.ListingSnapshot;
 import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.events.TradingEvents.OrderView;
+import com.emporia.events.math.FixedPointMath;
 import exchange.core2.core.common.CoreSymbolSpecification;
 import exchange.core2.core.common.OrderAction;
 import exchange.core2.core.common.SymbolType;
@@ -40,7 +41,6 @@ import org.springframework.stereotype.Component;
 import javax.sql.DataSource;
 import java.io.IOException;
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -606,7 +606,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     }
 
     static long priceTicks(OrderView order) {
-        return exactUnits(order.limitPrice(), order.listing().tickSize(), "limit price");
+        return FixedPointMath.exactUnits(order.limitPrice(), order.listing().tickSize(), "limit price");
     }
 
     /**
@@ -631,33 +631,32 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     static long protectionPriceTicks(OrderView order, BigDecimal slippageBps) {
         ListingSnapshot listing = order.listing();
         BigDecimal anchor = order.limitPrice() != null ? order.limitPrice() : listing.referencePrice();
-        if (anchor == null || anchor.signum() <= 0) {
+        BigDecimal tickSize = listing.tickSize();
+        long scaledAnchor = FixedPointMath.toScaledLong(anchor);
+        long scaledTickSize = FixedPointMath.toScaledLong(tickSize);
+        long scaledBps = slippageBps == null ? -1L : slippageBps.longValueExact();
+        if (scaledAnchor <= 0) {
             throw new IllegalArgumentException("protection price anchor must be positive");
         }
-        BigDecimal tolerance = anchor.multiply(slippageBps)
-                .divide(BigDecimal.valueOf(10_000), 10, RoundingMode.HALF_UP);
-        boolean buying = order.side() == OrderSide.BUY;
-        BigDecimal cap = buying ? anchor.add(tolerance) : anchor.subtract(tolerance);
-        if (cap.signum() <= 0) {
-            throw new IllegalArgumentException("protection price must remain positive");
-        }
-        BigDecimal tickSize = listing.tickSize();
-        if (tickSize == null || tickSize.signum() <= 0) {
+        if (scaledTickSize <= 0) {
             throw new IllegalArgumentException("tick size must be positive");
         }
-        return cap.divide(tickSize, 0, buying ? RoundingMode.CEILING : RoundingMode.FLOOR)
-                .longValueExact();
+        if (scaledBps < 0) {
+            throw new IllegalArgumentException("slippage budget must be non-negative");
+        }
+        long scaledTolerance = FixedPointMath.applyBps(scaledAnchor, scaledBps);
+        boolean buying = order.side() == OrderSide.BUY;
+        long scaledCap = buying ? scaledAnchor + scaledTolerance : scaledAnchor - scaledTolerance;
+        if (scaledCap <= 0) {
+            throw new IllegalArgumentException("protection price must remain positive");
+        }
+        return buying
+                ? FixedPointMath.divideCeiling(scaledCap, scaledTickSize, "protection price")
+                : FixedPointMath.divideFloor(scaledCap, scaledTickSize, "protection price");
     }
 
     static long quantitySteps(BigDecimal quantity, ListingSnapshot listing) {
-        return exactUnits(quantity, listing.sizeIncrement(), "quantity");
-    }
-
-    private static long exactUnits(BigDecimal value, BigDecimal increment, String field) {
-        if (value == null || increment == null || value.signum() <= 0 || increment.signum() <= 0) {
-            throw new IllegalArgumentException(field + " and increment must be positive");
-        }
-        return value.divide(increment, 0, RoundingMode.UNNECESSARY).longValueExact();
+        return FixedPointMath.exactUnits(quantity, listing.sizeIncrement(), "quantity");
     }
 
     private static BigDecimal decimalPrice(long ticks, ListingSnapshot listing) {

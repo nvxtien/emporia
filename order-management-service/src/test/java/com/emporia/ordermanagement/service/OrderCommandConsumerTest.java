@@ -9,8 +9,11 @@ import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.ordermanagement.dto.ProcessingOutcome;
+import com.emporia.ordermanagement.model.OrderInputEvent;
+import com.emporia.ordermanagement.repository.OrderInputEventRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.kafka.core.KafkaTemplate;
+import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -32,9 +35,10 @@ class OrderCommandConsumerTest {
     @Test
     void consumeProcessesCommandAndPublishesEventsAndResultToKafka() throws Exception {
         OrderCommandHandler handler = mock(OrderCommandHandler.class);
+        AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
         @SuppressWarnings("unchecked")
         KafkaTemplate<String, Object> kafka = mock(KafkaTemplate.class);
-        OrderCommandConsumer consumer = new OrderCommandConsumer(handler, kafka, "results-topic", "orders-topic");
+        OrderCommandConsumer consumer = new OrderCommandConsumer(handler, asyncDbWriter, kafka, new ObjectMapper(), "results-topic", "orders-topic");
 
         UUID commandId = UUID.randomUUID();
         UUID orderId = UUID.randomUUID();
@@ -59,6 +63,7 @@ class OrderCommandConsumerTest {
 
         assertThatCode(() -> consumer.consume(command)).doesNotThrowAnyException();
 
+        verify(asyncDbWriter).enqueue(any(OrderInputEvent.class));
         verify(kafka).send(eq("orders-topic"), eq(orderId.toString()), eq(event));
         verify(kafka).send(eq("results-topic"), eq(commandId.toString()), eq(result));
     }

@@ -2,6 +2,7 @@ package com.emporia.ordermanagement.model;
 
 import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderStatus;
+import com.emporia.events.time.DomainClock;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -40,7 +41,7 @@ public class OrderEvent {
     public OrderEvent(UUID commandId, TradingOrder order, String eventType, String message, String payload) {
         this.id = UUID.randomUUID(); this.commandId = commandId; this.order = order; this.orderVersion = order.getVersion();
         this.eventType = eventType; this.status = order.getStatus(); this.quantity = order.getQuantity(); this.price = order.getLimitPrice();
-        this.message = message; this.payload = payload; this.occurredAt = Instant.now();
+        this.message = message; this.payload = payload; this.occurredAt = DomainClock.now();
     }
 
     public OrderDomainEvent domainEvent() {

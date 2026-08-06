@@ -64,20 +64,27 @@ spring:
                 - Method=GET
               filters:
                 - StripPrefix=1
-            - id: order-command-post
-              uri: ${emporia.services.order-command-url}
+            - id: order-management-command-service
+              uri: ${emporia.services.order-management-url}
               predicates:
                 - Path=/api/orders/**
-                - Method=POST
+                - Method=POST,PUT
               filters:
                 - StripPrefix=1
-            - id: order-command-put
-              uri: ${emporia.services.order-command-url}
-              predicates:
-                - Path=/api/orders/**
-                - Method=PUT
-              filters:
-                - StripPrefix=1
+                - name: OrderRateLimiter
+                  args:
+                    replenishRate: ${emporia.gateway.order-rate-limiter.replenish-rate:20}
+                    burstCapacity: ${emporia.gateway.order-rate-limiter.burst-capacity:40}
+                    requestedTokens: ${emporia.gateway.order-rate-limiter.requested-tokens:1}
+                - name: CircuitBreaker
+                  args:
+                    name: orderCommands
+                    fallbackUri: forward:/fallback/orders
+                    statusCodes:
+                      - 500
+                      - 502
+                      - 503
+                      - 504
             - id: portfolio-service
               uri: ${emporia.services.portfolio-url}
               predicates:
@@ -124,19 +131,39 @@ spring:
 emporia:
   auth:
     url: ${EMPORIA_AUTH_URL:http://localhost:9000}
+  gateway:
+    order-rate-limiter:
+      replenish-rate: ${EMPORIA_GATEWAY_ORDER_RL_REPLENISH_RATE:20}
+      burst-capacity: ${EMPORIA_GATEWAY_ORDER_RL_BURST_CAPACITY:40}
+      requested-tokens: ${EMPORIA_GATEWAY_ORDER_RL_REQUESTED_TOKENS:1}
+      bypass-service-account-claim: ${EMPORIA_GATEWAY_ORDER_RL_BYPASS_SERVICE_ACCOUNT_CLAIM:service_account=true}
+      bypass-authorities: ${EMPORIA_GATEWAY_ORDER_RL_BYPASS_AUTHORITIES:}
+      bypass-claims: ${EMPORIA_GATEWAY_ORDER_RL_BYPASS_CLAIMS:}
+      bypass-remote-addresses: ${EMPORIA_GATEWAY_ORDER_RL_BYPASS_REMOTE_ADDRESSES:}
   services:
     static-data-url: ${EMPORIA_STATIC_DATA_URL:http://localhost:8081}
     user-preferences-url: ${EMPORIA_USER_PREFERENCES_URL:http://localhost:8083}
     market-data-url: ${EMPORIA_MARKET_DATA_URL:http://localhost:8084}
-    order-command-url: ${EMPORIA_ORDER_COMMAND_URL:http://localhost:8085}
     order-management-url: ${EMPORIA_ORDER_MANAGEMENT_URL:http://localhost:8086}
     portfolio-url: ${EMPORIA_PORTFOLIO_URL:http://localhost:8088}
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      orderCommands:
+        slidingWindowType: COUNT_BASED
+        slidingWindowSize: ${EMPORIA_GATEWAY_ORDER_CB_WINDOW_SIZE:2}
+        minimumNumberOfCalls: ${EMPORIA_GATEWAY_ORDER_CB_MIN_CALLS:2}
+        failureRateThreshold: ${EMPORIA_GATEWAY_ORDER_CB_FAILURE_RATE:50}
+        waitDurationInOpenState: ${EMPORIA_GATEWAY_ORDER_CB_OPEN_DURATION:2s}
+        permittedNumberOfCallsInHalfOpenState: ${EMPORIA_GATEWAY_ORDER_CB_HALF_OPEN_CALLS:1}
+        automaticTransitionFromOpenToHalfOpenEnabled: true
 
 management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       probes:

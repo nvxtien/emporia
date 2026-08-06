@@ -23,13 +23,22 @@ spring:
     # fragments into several disconnected traces.
     template.observation-enabled: true
     producer:
+      acks: ${KAFKA_PRODUCER_ACKS:all}
+      batch-size: ${KAFKA_PRODUCER_BATCH_SIZE:16384}
+      compression-type: ${KAFKA_PRODUCER_COMPRESSION:lz4}
+      buffer-memory: ${KAFKA_PRODUCER_BUFFER_MEMORY:67108864}
+      retries: ${KAFKA_PRODUCER_RETRIES:3}
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+      value-serializer: com.emporia.events.sbe.SbeKafkaSerializer
+      properties:
+        linger.ms: ${KAFKA_PRODUCER_LINGER_MS:5}
+        max.block.ms: ${KAFKA_PRODUCER_MAX_BLOCK_MS:2000}
+        delivery.timeout.ms: ${KAFKA_PRODUCER_DELIVERY_TIMEOUT_MS:10000}
     consumer:
       auto-offset-reset: earliest
       enable-auto-commit: false
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-      value-deserializer: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
+      value-deserializer: com.emporia.events.sbe.SbeKafkaDeserializer
       properties.spring.json.trusted.packages: com.emporia.events
     listener:
       ack-mode: record

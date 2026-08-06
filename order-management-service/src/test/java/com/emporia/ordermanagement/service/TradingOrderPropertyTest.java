@@ -695,13 +695,14 @@ class TradingOrderPropertyTest {
                                 .filter(candidate -> arguments[0].equals(candidate.getParentOrderId()))
                                 .filter(candidate -> ((List<?>) arguments[1]).contains(candidate.getStatus()))
                                 .toList();
-                        case "saveAndFlush" -> {
+                        case "save", "saveAndFlush" -> {
                             TradingOrder order = (TradingOrder) arguments[0];
                             setVersion(order, order.getVersion() == null ? 0 : order.getVersion() + 1);
                             storedOrders.put(order.getId(), order);
                             orderWrites++;
                             yield order;
                         }
+                        case "count", "countByStatus", "countByStatusIn", "countByTargetStatusAndStatusIn" -> 0L;
                         default -> throw unsupported(TradingOrderRepository.class, method);
                     }
             );
@@ -734,8 +735,30 @@ class TradingOrderPropertyTest {
                     }
             );
 
+            OrderMetrics metrics = new OrderMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+            OrderStateCache cache = new OrderStateCache(orders, processed, 1000, 1000);
+            AsyncDbWriter asyncDbWriter = org.mockito.Mockito.mock(AsyncDbWriter.class);
+            org.mockito.Mockito.doAnswer(invocation -> {
+                TradingOrder o = invocation.getArgument(0);
+                storedOrders.put(o.getId(), o);
+                orderWrites++;
+                return null;
+            }).when(asyncDbWriter).enqueue(org.mockito.Mockito.any(TradingOrder.class));
+
+            org.mockito.Mockito.doAnswer(invocation -> {
+                OrderEvent e = invocation.getArgument(0);
+                eventsByCommand.computeIfAbsent(e.getCommandId(), ignored -> new ArrayList<>()).add(e);
+                return null;
+            }).when(asyncDbWriter).enqueue(org.mockito.Mockito.any(OrderEvent.class));
+
+            org.mockito.Mockito.doAnswer(invocation -> {
+                ProcessedCommand p = invocation.getArgument(0);
+                processedCommands.put(p.result().commandId(), p);
+                return null;
+            }).when(asyncDbWriter).enqueue(org.mockito.Mockito.any(ProcessedCommand.class));
+
             handler = new OrderCommandHandler(orders, events, processed, new ObjectMapper(),
-                    io.micrometer.observation.ObservationRegistry.NOOP);
+                    io.micrometer.observation.ObservationRegistry.NOOP, metrics, cache, asyncDbWriter);
         }
 
         private static <T> T repository(Class<T> repositoryType, RepositoryMethod method) {

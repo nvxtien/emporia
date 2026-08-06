@@ -2,6 +2,7 @@ package com.emporia.execution;
 
 import com.emporia.events.TradingEvents.ExecutionCommand;
 import com.emporia.events.TradingEvents.ExecutionCommandType;
+import com.emporia.events.KafkaRoutingKeys;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.observation.Observation;
@@ -71,7 +72,7 @@ class ExecutionCommandPublisher {
         try {
             CompletableFuture<SendResult<String, Object>> send;
             try (Observation.Scope ignored = observation.openScope()) {
-                send = kafka.send(topic, command.orderId().toString(), command);
+                send = kafka.send(topic, KafkaRoutingKeys.executionCommand(command), command);
             }
             if (send == null) {
                 stopPublishObservation(observation, null);

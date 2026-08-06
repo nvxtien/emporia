@@ -214,30 +214,6 @@ services:
       <<: *spring-healthcheck
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8084/actuator/health || exit 1"]
 
-  order-command-service:
-    build:
-      context: ./order-command-service
-    container_name: emporia-order-command
-    ports:
-      - "8085:8085"
-    environment:
-      <<: *otel-env
-      KAFKA_BROKERS: kafka:9092
-      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      EMPORIA_STATIC_DATA_URL: http://static-data-service:8081
-      EMPORIA_AUTH_ISSUER: http://localhost:3000
-      EMPORIA_AUTH_JWK_SET_URI: http://authentication:9000/oauth2/jwks
-    depends_on:
-      kafka:
-        condition: service_healthy
-      authentication:
-        condition: service_healthy
-      static-data-service:
-        condition: service_healthy
-    healthcheck:
-      <<: *spring-healthcheck
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8085/actuator/health || exit 1"]
-
   order-management-service:
     build:
       context: ./order-management-service
@@ -251,6 +227,7 @@ services:
       DB_PASSWORD: admin123
       KAFKA_BROKERS: kafka:9092
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      EMPORIA_STATIC_DATA_URL: http://static-data-service:8081
       EMPORIA_AUTH_ISSUER: http://localhost:3000
       EMPORIA_AUTH_JWK_SET_URI: http://authentication:9000/oauth2/jwks
     depends_on:
@@ -259,6 +236,8 @@ services:
       kafka:
         condition: service_healthy
       authentication:
+        condition: service_healthy
+      static-data-service:
         condition: service_healthy
     healthcheck:
       <<: *spring-healthcheck
@@ -326,7 +305,6 @@ services:
       EMPORIA_STATIC_DATA_URL: http://static-data-service:8081
       EMPORIA_USER_PREFERENCES_URL: http://user-preferences-service:8083
       EMPORIA_MARKET_DATA_URL: http://market-data-service:8084
-      EMPORIA_ORDER_COMMAND_URL: http://order-command-service:8085
       EMPORIA_ORDER_MANAGEMENT_URL: http://order-management-service:8086
       EMPORIA_PORTFOLIO_URL: http://portfolio-service:8088
     depends_on:
@@ -337,8 +315,6 @@ services:
       user-preferences-service:
         condition: service_healthy
       market-data-service:
-        condition: service_healthy
-      order-command-service:
         condition: service_healthy
       order-management-service:
         condition: service_healthy
@@ -410,6 +386,7 @@ services:
       - --enable-feature=exemplar-storage
     volumes:
       - ./deploy/otel/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/otel/alerts:/etc/prometheus/alerts:ro
       - emporia-prometheus-data:/prometheus
     ports:
       - "9090:9090"

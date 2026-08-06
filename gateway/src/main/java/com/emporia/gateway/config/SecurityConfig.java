@@ -25,6 +25,7 @@ public class SecurityConfig {
                                 "/userinfo",
                                 "/connect/logout",
                                 "/auth/csrf",
+                                "/fallback/**",
                                 "/login",
                                 "/logout",
                                 "/default-ui.css",

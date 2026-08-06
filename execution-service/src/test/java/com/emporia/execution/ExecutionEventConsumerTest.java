@@ -17,6 +17,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.kafka.support.SendResult;
 
 import java.time.Duration;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -27,6 +28,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 import static com.emporia.events.TradingEvents.SCHEMA_VERSION;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -134,7 +136,11 @@ class ExecutionEventConsumerTest {
         consumer.consume(event("CREATED", order));
 
         verify(venue).submit(order);
+        verify(venue, never()).modify(any());
+        verify(venue, never()).cancel(any());
         verify(kafka, never()).send(eq("orders.commands"), any(), any());
+        verify(executionCommands, never()).reject(any(), any(), any(), any(), any());
+        verify(executionCommands, never()).venueCancel(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -153,18 +159,63 @@ class ExecutionEventConsumerTest {
 
         consumer.consume(event("CREATED", parent));
 
+        ArgumentCaptor<String> keyCaptor = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<Object> childMessage = ArgumentCaptor.forClass(Object.class);
-        verify(kafka).send(eq("orders.commands"), any(), childMessage.capture());
+        verify(kafka).send(eq("orders.commands"), keyCaptor.capture(), childMessage.capture());
         OrderCommand child = (OrderCommand) childMessage.getValue();
+        assertThat(keyCaptor.getValue()).isEqualTo(parent.id().toString());
         assertThat(child.parentOrderId()).isEqualTo(parent.id());
         assertThat(child.deskId()).isEqualTo(parent.deskId());
         assertThat(child.listing().exchangeMic()).isEqualTo("XNYS");
-        assertThat(child.limitPrice()).isEqualByComparingTo("101.25");
+        // limitPrice must be the parent's limit price so protectionPriceTicks
+        // anchors the slippage budget against the parent's intent, not the venue quote.
+        assertThat(child.limitPrice()).isEqualByComparingTo("102");
+        // The venue quote that drove venue selection is preserved for observability.
+        assertThat(child.executionParameters()).containsEntry("venuePrice", new BigDecimal("101.25"));
         assertThat(child.quantity()).isEqualByComparingTo(parent.remainingQuantity());
         assertThat(child.destination()).isEqualTo("DMA");
         assertThat(timerCount("emporia.strategy.decision", "strategy", "smart",
                 "outcome", "success")).isEqualTo(1);
     }
+
+        @Test
+        void smartRoutingRejectsParentWhenChildPublishFailsOnCreate() throws Exception {
+        OrderView parent = order("SMART", null, OrderStatus.LIVE);
+        ListingSnapshot nyse = listing(8, "XNYS", "New York Stock Exchange");
+        when(tradingData.sameInstrument(parent.listing().id())).thenReturn(List.of(parent.listing(), nyse));
+        when(tradingData.quotes(List.of(parent.listing().id(), nyse.id()))).thenReturn(List.of(
+            quote(parent.listing().id(), "101.50"),
+            quote(nyse.id(), "101.25")
+        ));
+        when(kafka.send(eq("orders.commands"), any(), any()))
+            .thenThrow(new RuntimeException("kafka unavailable"));
+
+        consumer.consume(event("CREATED", parent));
+
+        verify(executionCommands).reject(eq(parent.id()), eq(parent.deskId()), any(), any(),
+            eq("Could not publish child order command"));
+        }
+
+        @Test
+        void smartRoutingCountsAsyncChildPublishFailure() throws Exception {
+        OrderView parent = order("SMART", null, OrderStatus.LIVE);
+        ListingSnapshot nyse = listing(8, "XNYS", "New York Stock Exchange");
+        when(tradingData.sameInstrument(parent.listing().id())).thenReturn(List.of(parent.listing(), nyse));
+        when(tradingData.quotes(List.of(parent.listing().id(), nyse.id()))).thenReturn(List.of(
+            quote(parent.listing().id(), "101.50"),
+            quote(nyse.id(), "101.25")
+        ));
+
+        CompletableFuture<SendResult<String, Object>> send = new CompletableFuture<>();
+        when(kafka.send(eq("orders.commands"), any(), any())).thenReturn(send);
+
+        consumer.consume(event("CREATED", parent));
+        send.completeExceptionally(new RuntimeException("async broker error"));
+
+        assertThat(counterCount("emporia.execution.child.publish.failures",
+            "stage", "async")).isEqualTo(1);
+        verify(executionCommands, never()).reject(any(), any(), any(), any(), any());
+        }
 
     @Test
     void childFillsAreNotRepublishedBecauseOrderManagementRollsThemUpAtomically() throws Exception {
@@ -188,6 +239,17 @@ class ExecutionEventConsumerTest {
         OrderView order = order("SMART", null, OrderStatus.LIVE);
         consumer.consume(event("CANCEL_REQUESTED", order));
         verify(executionCommands).venueCancel(eq(order.id()), eq(order.deskId()), any(), any(), any());
+        verify(venue, never()).cancel(any());
+    }
+
+    @Test
+    void cancelRequestedForDmaUsesVenueCancelAndSkipsExecutionCommandCancel() throws Exception {
+        OrderView order = order("DMA", null, OrderStatus.LIVE);
+
+        consumer.consume(event("CANCEL_REQUESTED", order));
+
+        verify(venue).cancel(order);
+        verify(executionCommands, never()).venueCancel(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -212,6 +274,25 @@ class ExecutionEventConsumerTest {
                 "outcome", "success")).isEqualTo(1);
     }
 
+        @Test
+        void vwapRejectsParentWhenChildPublishFailsOnCreate() throws Exception {
+        long now = Instant.now().getEpochSecond();
+        OrderView parent = withExecutionParameters(order("VWAP", null, OrderStatus.LIVE),
+            "{\"utcStartTimeSecs\":" + now + ",\"utcEndTimeSecs\":" + (now + 600) + ",\"buckets\":2}");
+        ListingSnapshot nyse = listing(8, "XNYS", "New York Stock Exchange");
+        when(tradingData.sameInstrument(parent.listing().id())).thenReturn(List.of(parent.listing(), nyse));
+        when(tradingData.quotes(List.of(parent.listing().id(), nyse.id()))).thenReturn(List.of(
+            quote(parent.listing().id(), "101.50")
+        ));
+        when(kafka.send(eq("orders.commands"), any(), any()))
+            .thenThrow(new RuntimeException("kafka unavailable"));
+
+        consumer.consume(event("CREATED", parent));
+
+        verify(executionCommands).reject(eq(parent.id()), eq(parent.deskId()), any(), any(),
+            eq("Could not publish child order command"));
+        }
+
     @Test
     void smartRoutingWalksDepthAndCreatesMultipleVenueChildren() throws Exception {
         OrderView parent = order("SMART", null, OrderStatus.LIVE);
@@ -228,9 +309,15 @@ class ExecutionEventConsumerTest {
 
         consumer.consume(event("CREATED", parent));
 
+        ArgumentCaptor<String> keys = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<Object> messages = ArgumentCaptor.forClass(Object.class);
-        verify(kafka, times(2)).send(eq("orders.commands"), any(), messages.capture());
+        verify(kafka, times(2)).send(eq("orders.commands"), keys.capture(), messages.capture());
+        assertThat(keys.getAllValues()).containsExactly(parent.id().toString(), parent.id().toString());
+        // Compared numerically, not with equals: routed quantities now come back
+        // through FixedPointMath at its canonical scale of 6, so "4" and
+        // "4.000000" are the same quantity but not the same BigDecimal.
         assertThat(messages.getAllValues()).extracting(message -> ((OrderCommand) message).quantity())
+                .usingComparatorForType(BigDecimal::compareTo, BigDecimal.class)
                 .containsExactly(new BigDecimal("4"), new BigDecimal("6"));
         assertThat(messages.getAllValues()).extracting(message -> ((OrderCommand) message).listing().exchangeMic())
                 .containsExactly("XNAS", "XNYS");
@@ -244,8 +331,12 @@ class ExecutionEventConsumerTest {
 
         consumer.consume(event("CREATED", parent));
 
+        verify(venue, never()).submit(any());
+        verify(venue, never()).modify(any());
+        verify(venue, never()).cancel(any());
         verify(kafka, never()).send(eq("orders.commands"), any(), any());
         verify(executionCommands, never()).reject(any(), any(), any(), any(), any());
+        verify(executionCommands, never()).venueCancel(any(), any(), any(), any(), any());
         assertThat(timerCount("emporia.strategy.decision", "strategy", "smart",
                 "outcome", "waiting")).isEqualTo(1);
     }
@@ -349,6 +440,44 @@ class ExecutionEventConsumerTest {
                 eq("Unsupported execution destination UNKNOWN_DEST"));
     }
 
+        @Test
+        void rejectsCreatedOrderWithoutDestinationBeforeVenueOrScheduling() throws Exception {
+        OrderView base = order("DMA", null, OrderStatus.LIVE);
+        OrderView invalid = new OrderView(
+            base.id(), base.version(), base.ownerSubject(), base.deskId(), base.listing(),
+            base.side(), base.type(), base.quantity(), base.limitPrice(),
+            base.remainingQuantity(), base.tradedQuantity(), base.averageTradePrice(),
+            base.status(), base.targetStatus(), "", base.originatorReference(),
+            base.parentOrderId(), base.rootOrderId(), base.executionParameters(),
+            base.errorMessage(), base.createdAt(), base.updatedAt());
+
+        consumer.consume(event("CREATED", invalid));
+
+        verify(venue, never()).submit(any());
+        verify(kafka, never()).send(eq("orders.commands"), any(), any());
+        verify(executionCommands).reject(eq(invalid.id()), eq(invalid.deskId()), any(), any(),
+            eq("Execution destination is required"));
+        }
+
+        @Test
+        void rejectsCreatedLimitOrderWithoutPriceBeforeVenueOrScheduling() throws Exception {
+        OrderView base = order("DMA", null, OrderStatus.LIVE);
+        OrderView invalid = new OrderView(
+            base.id(), base.version(), base.ownerSubject(), base.deskId(), base.listing(),
+            base.side(), base.type(), base.quantity(), null,
+            base.remainingQuantity(), base.tradedQuantity(), base.averageTradePrice(),
+            base.status(), base.targetStatus(), base.destination(), base.originatorReference(),
+            base.parentOrderId(), base.rootOrderId(), base.executionParameters(),
+            base.errorMessage(), base.createdAt(), base.updatedAt());
+
+        consumer.consume(event("CREATED", invalid));
+
+        verify(venue, never()).submit(any());
+        verify(kafka, never()).send(eq("orders.commands"), any(), any());
+        verify(executionCommands).reject(eq(invalid.id()), eq(invalid.deskId()), any(), any(),
+            eq("Limit order price is required"));
+        }
+
     @Test
     void advanceSmartExecutesOnScheduledTick() throws Exception {
         OrderView parent = order("SMART", null, OrderStatus.LIVE);
@@ -406,6 +535,21 @@ class ExecutionEventConsumerTest {
         OrderView order = order("DMA", null, OrderStatus.LIVE);
         consumer.consume(event("MODIFIED", order));
         verify(venue).modify(order);
+        verify(executionCommands, never()).venueCancel(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void nonTerminalParentEventDoesNotCallVenueOrEmitExecutionCommand() throws Exception {
+        OrderView order = order("SMART", null, OrderStatus.LIVE);
+
+        consumer.consume(event("ACKNOWLEDGED", order));
+
+        verify(venue, never()).submit(any());
+        verify(venue, never()).modify(any());
+        verify(venue, never()).cancel(any());
+        verify(executionCommands, never()).fill(any(), any(), any(), any(), any(), any(), any());
+        verify(executionCommands, never()).reject(any(), any(), any(), any(), any());
+        verify(executionCommands, never()).venueCancel(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -596,6 +740,11 @@ class ExecutionEventConsumerTest {
     private long timerCount(String name, String... tags) {
         return meters.find(name).tags(tags).timer() == null
                 ? 0 : meters.find(name).tags(tags).timer().count();
+    }
+
+    private double counterCount(String name, String... tags) {
+        return meters.find(name).tags(tags).counter() == null
+                ? 0 : meters.find(name).tags(tags).counter().count();
     }
 
     private static OrderView order(String destination, UUID parentId, OrderStatus status) {

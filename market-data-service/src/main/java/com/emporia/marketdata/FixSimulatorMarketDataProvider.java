@@ -47,6 +47,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
+import org.agrona.collections.Long2ObjectHashMap;
+
 @Service
 @ConditionalOnProperty(name = "emporia.market-data.provider", havingValue = "fix-simulator")
 public class FixSimulatorMarketDataProvider implements MarketDataProvider, SmartLifecycle, HealthIndicator {
@@ -57,8 +59,8 @@ public class FixSimulatorMarketDataProvider implements MarketDataProvider, Smart
     private final Duration initialDataTimeout;
     private final Duration reconnectDelay;
     private final Map<String, List<FixConnection>> connectionsByMic = new TreeMap<>();
-    private final Map<Long, BookState> books = new ConcurrentHashMap<>();
-    private final Map<Long, FixConnection> listingConnections = new ConcurrentHashMap<>();
+    private final Long2ObjectHashMap<BookState> books = new Long2ObjectHashMap<>();
+    private final Long2ObjectHashMap<FixConnection> listingConnections = new Long2ObjectHashMap<>();
     private final ScheduledExecutorService reconnects = Executors.newSingleThreadScheduledExecutor(runnable -> {
         Thread thread = new Thread(runnable, "fix-simulator-reconnect");
         thread.setDaemon(true);

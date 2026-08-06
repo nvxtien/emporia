@@ -50,7 +50,7 @@ STABLE_GROUPS=(
 # Ephemeral groups are named with a random uuid per process instance. They are
 # expected to appear and disappear, so they are informational only and never
 # fail the check.
-EPHEMERAL_PREFIXES=(order-command-service- order-stream-)
+EPHEMERAL_PREFIXES=(order-stream-)
 
 exit_code=0
 warnings=0

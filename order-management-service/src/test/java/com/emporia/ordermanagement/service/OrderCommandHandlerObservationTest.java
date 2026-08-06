@@ -54,12 +54,15 @@ class OrderCommandHandlerObservationTest {
     @BeforeEach
     void setUp() {
         observations.observationConfig().observationHandler(new DefaultMeterObservationHandler(meters));
-        handler = new OrderCommandHandler(orders, events, processed, new ObjectMapper(), observations);
+        OrderMetrics metrics = new OrderMetrics(meters);
+        OrderStateCache cache = new OrderStateCache(orders, processed, 1000, 1000);
+        AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
+        handler = new OrderCommandHandler(orders, events, processed, new ObjectMapper(), observations, metrics, cache, asyncDbWriter);
         when(processed.findById(any())).thenReturn(Optional.empty());
         when(orders.existsById(any())).thenReturn(false);
         when(events.save(any(OrderEvent.class))).thenAnswer(invocation -> invocation.getArgument(0));
-        // The real repository assigns the optimistic-locking version on flush.
-        when(orders.saveAndFlush(any(TradingOrder.class))).thenAnswer(invocation -> {
+        // The real repository assigns the optimistic-locking version on save.
+        when(orders.save(any(TradingOrder.class))).thenAnswer(invocation -> {
             TradingOrder order = invocation.getArgument(0);
             ReflectionTestUtils.setField(order, "version",
                     order.getVersion() == null ? 1L : order.getVersion() + 1);

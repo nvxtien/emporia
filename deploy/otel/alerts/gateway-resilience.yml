@@ -1,0 +1,22 @@
+groups:
+  - name: emporia-gateway-resilience
+    rules:
+      - alert: EmporiaGatewayOrderRateLimitedBurst
+        expr: sum(rate(emporia_gateway_orders_rate_limited_total[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+          service: gateway
+        annotations:
+          summary: Gateway order rate limiter is actively rejecting traffic
+          description: Gateway has been rate limiting more than 1 order command per second over the last 5 minutes.
+
+      - alert: EmporiaGatewayOrderCircuitOpen
+        expr: sum(rate(emporia_gateway_orders_circuit_open_total[5m])) > 0
+        for: 2m
+        labels:
+          severity: critical
+          service: gateway
+        annotations:
+          summary: Gateway order circuit breaker is open
+          description: Gateway fallback for order routes is firing, indicating upstream order command instability.

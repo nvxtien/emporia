@@ -23,12 +23,14 @@ import static org.mockito.Mockito.when;
 
 class MarketDataStreamServiceTest {
     private final MarketDataService marketData = mock(MarketDataService.class);
+    private final AeronMarketDataPublisher aeronPublisher = mock(AeronMarketDataPublisher.class);
     private MarketDataStreamService streamService;
 
     @BeforeEach
     void setUp() {
         streamService = new MarketDataStreamService(
                 marketData,
+                aeronPublisher,
                 new SimpleMeterRegistry(),
                 Duration.ofMillis(50),
                 Duration.ofSeconds(1)

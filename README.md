@@ -45,8 +45,9 @@ flowchart TD
     Gateway --> Static[Static data :8081]
     Gateway --> Preferences[User preferences :8083]
     Gateway --> Market[Market data :8084]
-    Gateway --> OrderCommands[Order command service :8085]
-    Gateway --> Orders[Order management :8086]
+    Gateway -->|POST/PUT /api/orders| Orders
+    Gateway -->|GET /api/orders| Orders
+    OrderCommands[Order command service :8085] -.->|optional Kafka ingress| Commands[[emporia.order.commands.v1]]
     Execution[Execution service :8087] -->|client credentials| Auth
     ExchangeCore[exchange-core simulation] -->|risk seed + durable snapshots| Portfolio[Portfolio service :8088]
     ExchangeCore -->|bearer token| Auth
@@ -56,13 +57,12 @@ flowchart TD
     Market -->|client credentials| Auth
     Fix[FIX simulator gRPC sources] -->|incremental books| Market
     Alpaca[Alpaca IEX] -->|snapshot + WebSocket| Market
-    OrderCommands -->|validate listing| Static
+    Orders -->|validate listing| Static
 
-    OrderCommands -->|CREATE / MODIFY / CANCEL / CANCEL_ALL| Commands[[emporia.order.commands.v1]]
+    Orders -->|async audit / distribution| OrderLog[[emporia.orders.v1]]
     Commands --> Orders
-    Orders -->|correlated outcome| Results[[emporia.order.results.v1]]
-    Results --> OrderCommands
-    Orders -->|immutable state events| OrderLog[[emporia.orders.v1]]
+    Orders -->|correlated outcome for Kafka ingress| Results[[emporia.order.results.v1]]
+    Results -.-> OrderCommands
     OrderLog --> Execution
     Execution -->|SMART/VWAP child CREATE| Commands
     Execution -->|FILL / REJECT / venue CANCEL| ExecutionCommands[[emporia.execution.commands.v1]]
@@ -80,7 +80,11 @@ flowchart TD
 ```
 
 The browser sees one `/api` surface. The gateway routes requests by path and
-HTTP method to the service that owns each business capability.
+HTTP method to the service that owns each business capability. Mutating order
+calls (`POST`/`PUT /api/orders/**`) go directly to `order-management-service`,
+which handles them on an in-process LMAX Disruptor and publishes Kafka events
+asynchronously for execution and audit. `order-command-service` remains an
+optional Kafka-based ingress (direct `:8085` / load tests), not the gateway hot path.
 
 ## Service ownership
 
@@ -90,8 +94,8 @@ HTTP method to the service that owns each business capability.
 | `static-data-service` | 8081 | Instruments and exchange listings |
 | `user-preferences-service` | 8083 | Per-user watchlists and persisted workspace layouts |
 | `market-data-service` | 8084 HTTP / 50551 gRPC | Simulated, Alpaca IEX, or FIX-simulator market data; venue/composite books; REST, SSE, and gRPC distribution |
-| `order-command-service` | 8085 | Authenticated create, modify, cancel, and cancel-all command boundary |
-| `order-management-service` | 8086 | Order lifecycle, state, history, executions, and command idempotency |
+| `order-command-service` | 8085 | Optional Kafka ingress for create/modify/cancel (not used by gateway) |
+| `order-management-service` | 8086 | Order command hot path (Disruptor), lifecycle, state, history, executions, and idempotency |
 | `execution-service` | 8087 internal | DMA venue access, best-venue SMART routing, scheduled VWAP child orders, and execution reports |
 | `portfolio-service` | 8088 internal | Fully funded cash/equity balances and idempotent exchange snapshot receipts |
 | `gateway` | 8082 | Browser security boundary and routing |
@@ -106,23 +110,39 @@ When a service needs listing data, it calls `static-data-service` and forwards
 a bearer token. Orders store an immutable listing snapshot instead of a
 cross-schema foreign key.
 
-## Kafka order flow
+## Order command flow
 
-1. `order-command-service` creates a versioned command with a unique
-   `commandId` and publishes it to `emporia.order.commands.v1`.
-2. `order-management-service` consumes the command, validates the transition, and
-   updates its PostgreSQL projection in a transaction.
-3. The command result is stored in `processed_order_command`. A redelivered Kafka
-   command therefore returns the same result instead of applying the change twice.
-4. `order-management-service` publishes the state transition to `emporia.orders.v1`
-   and a correlated response to `emporia.order.results.v1`.
-5. `order-command-service` completes the waiting browser request. If Kafka or
-   the order processor does not answer within eight seconds, it returns a
-   timeout or service error rather than pretending the order succeeded.
+### Gateway hot path (browser)
 
-Commands are keyed by order ID (or user subject for cancel-all). The six Kafka
-partitions can process independent orders in parallel while maintaining the order
-of commands for one key.
+1. Gateway forwards `POST`/`PUT /api/orders/**` to `order-management-service`.
+2. OMS validates the listing snapshot, builds an `OrderCommand`, and submits it
+   to the single-writer Disruptor pipeline.
+3. `OrderCommandHandler` applies the transition against the in-memory order
+   cache, enqueues write-behind persistence, and returns the correlated result
+   to the waiting HTTP request.
+4. OMS publishes order domain events to `emporia.orders.v1` asynchronously for
+   `execution-service` and audit consumers (Kafka is not on the request
+   critical path).
+
+### Optional Kafka ingress (`order-command-service`)
+
+1. A direct caller hits `order-command-service` (`:8085`), which creates a
+   versioned command with a unique `commandId` and publishes it to
+   `emporia.order.commands.v1`.
+2. `order-management-service` consumes the command, validates the transition,
+   and updates its projection via the same handler path.
+3. The command result is stored in `processed_order_command`. A redelivered
+   Kafka command therefore returns the same result instead of applying the
+   change twice.
+4. `order-management-service` publishes the state transition to
+   `emporia.orders.v1` and a correlated response to `emporia.order.results.v1`.
+5. `order-command-service` completes the waiting request. If Kafka or the order
+   processor does not answer within eight seconds, it returns a timeout or
+   service error rather than pretending the order succeeded.
+
+Commands on the Kafka path are keyed by order ID (or user subject for
+cancel-all). The six Kafka partitions can process independent orders in
+parallel while maintaining the order of commands for one key.
 
 ## Execution flow
 
@@ -151,6 +171,10 @@ See the [DMA, SMART, and VWAP execution guide](docs/execution/README.md) for
 strategy behavior, order examples, cancellation, recovery, and current
 boundaries. Service-level configuration is collected in
 [execution-service/README.md](execution-service/README.md).
+
+Gateway routing, order-route circuit breaker and rate limiter behavior, and the
+internal service-account token policy are documented in
+[gateway/README.md](gateway/README.md).
 
 ## Local prerequisites
 

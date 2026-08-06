@@ -48,8 +48,11 @@ class OrderCommandHandlerTest {
     private final ProcessedCommandRepository processed = mock(ProcessedCommandRepository.class);
     private final MeterRegistry meters = new SimpleMeterRegistry();
     private final ObservationRegistry observations = observationRegistry(meters);
+    private final OrderMetrics metrics = new OrderMetrics(new SimpleMeterRegistry());
+    private final OrderStateCache cache = new OrderStateCache(orders, processed, 1000, 1000);
+    private final AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
     private final OrderCommandHandler handler =
-            new OrderCommandHandler(orders, events, processed, new ObjectMapper(), observations);
+            new OrderCommandHandler(orders, events, processed, new ObjectMapper(), observations, metrics, cache, asyncDbWriter);
 
     /**
      * Wiring a meter handler turns observations into timers, so they can be
@@ -65,11 +68,15 @@ class OrderCommandHandlerTest {
     void defaultNoCache() {
         when(processed.findById(any())).thenReturn(Optional.empty());
         when(events.save(any(OrderEvent.class))).thenAnswer(inv -> inv.getArgument(0));
-        when(orders.saveAndFlush(any(TradingOrder.class))).thenAnswer(inv -> {
+        when(orders.save(any(TradingOrder.class))).thenAnswer(inv -> {
             TradingOrder o = inv.getArgument(0);
             ReflectionTestUtils.setField(o, "version", o.getVersion() == null ? 1L : o.getVersion() + 1);
             return o;
         });
+        when(orders.count()).thenReturn(0L);
+        when(orders.countByStatusIn(any())).thenReturn(0L);
+        when(orders.countByStatus(any())).thenReturn(0L);
+        when(orders.countByTargetStatusAndStatusIn(any(), any())).thenReturn(0L);
     }
 
     // -------------------------------------------------------------------------
@@ -87,7 +94,7 @@ class OrderCommandHandlerTest {
         assertThat(outcome.result().status()).isEqualTo(201);
         assertThat(outcome.events()).hasSize(1);
         assertThat(outcome.events().getFirst().eventType()).isEqualTo("CREATED");
-        verify(processed).save(any(ProcessedCommand.class));
+        verify(asyncDbWriter).enqueue(any(ProcessedCommand.class));
     }
 
     @Test
@@ -129,7 +136,7 @@ class OrderCommandHandlerTest {
 
         assertThat(outcome.result().success()).isTrue();
         // The order should have been saved; desk = userSubject
-        verify(orders).saveAndFlush(any(TradingOrder.class));
+        verify(asyncDbWriter).enqueue(any(TradingOrder.class));
     }
 
     // -------------------------------------------------------------------------
@@ -149,7 +156,7 @@ class OrderCommandHandlerTest {
 
         assertThat(outcome.result().success()).isFalse();
         assertThat(outcome.result().status()).isEqualTo(400);
-        verify(orders, never()).saveAndFlush(any());
+        verify(orders, never()).save(any());
     }
 
     @Test

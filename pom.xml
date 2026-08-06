@@ -38,7 +38,6 @@
         <module>static-data-service</module>
         <module>user-preferences-service</module>
         <module>market-data-service</module>
-        <module>order-command-service</module>
         <module>order-management-service</module>
         <module>execution-service</module>
         <module>portfolio-service</module>

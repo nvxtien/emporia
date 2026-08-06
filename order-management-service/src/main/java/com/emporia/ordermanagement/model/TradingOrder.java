@@ -5,6 +5,7 @@ import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.events.TradingEvents.OrderView;
+import com.emporia.events.time.DomainClock;
 import jakarta.persistence.Column;
 import jakarta.persistence.Embedded;
 import jakarta.persistence.Entity;
@@ -18,7 +19,6 @@ import jakarta.persistence.Version;
 import lombok.Getter;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.UUID;
 
@@ -61,12 +61,12 @@ public class TradingOrder {
     public TradingOrder(UUID id, String userSubject, String deskId, ListingSnapshot listing, OrderSide side,
                  OrderType type, BigDecimal quantity, BigDecimal limitPrice, String destination,
                  String originatorReference, UUID parentOrderId, UUID rootOrderId, String executionParameters) {
-        this.id = id; this.userSubject = userSubject; this.deskId = deskId; this.listing = new ListingDetails(listing); this.side = side;
+        this.id = id; this.version = 0L; this.userSubject = userSubject; this.deskId = deskId; this.listing = new ListingDetails(listing); this.side = side;
         this.type = type; this.quantity = quantity; this.limitPrice = limitPrice; this.remainingQuantity = quantity;
         this.tradedQuantity = BigDecimal.ZERO; this.status = OrderStatus.LIVE; this.targetStatus = OrderStatus.LIVE;
         this.destination = destination; this.originatorReference = originatorReference; this.parentOrderId = parentOrderId;
         this.rootOrderId = rootOrderId == null ? id : rootOrderId; this.executionParameters = executionParameters;
-        this.createdAt = Instant.now(); this.updatedAt = this.createdAt;
+        this.createdAt = DomainClock.now(); this.updatedAt = this.createdAt;
         validateInvariants();
     }
 
@@ -82,7 +82,7 @@ public class TradingOrder {
         quantity = newQuantity;
         limitPrice = newLimitPrice;
         remainingQuantity = newQuantity.subtract(tradedQuantity);
-        updatedAt = Instant.now();
+        updatedAt = DomainClock.now();
         validateInvariants();
     }
 
@@ -99,15 +99,19 @@ public class TradingOrder {
         require(fillPrice != null && fillPrice.signum() > 0,
                 "Fill price must be greater than zero");
 
-        BigDecimal previousTradeValue = averageTradePrice == null
-                ? BigDecimal.ZERO
-                : averageTradePrice.multiply(tradedQuantity);
-        BigDecimal newTradedQuantity = tradedQuantity.add(fillQuantity);
-        BigDecimal newTradeValue = previousTradeValue.add(fillPrice.multiply(fillQuantity));
+        long currentTradedQtyScaled = com.emporia.events.math.FixedPointMath.toScaledLong(tradedQuantity);
+        long currentAvgPriceScaled = com.emporia.events.math.FixedPointMath.toScaledLong(averageTradePrice);
+        long fillQtyScaled = com.emporia.events.math.FixedPointMath.toScaledLong(fillQuantity);
+        long fillPriceScaled = com.emporia.events.math.FixedPointMath.toScaledLong(fillPrice);
 
+        long newAvgPriceScaled = com.emporia.events.math.FixedPointMath.calculateWeightedAveragePrice(
+                currentTradedQtyScaled, currentAvgPriceScaled, fillQtyScaled, fillPriceScaled
+        );
+
+        BigDecimal newTradedQuantity = tradedQuantity.add(fillQuantity);
         tradedQuantity = newTradedQuantity;
         remainingQuantity = quantity.subtract(newTradedQuantity);
-        averageTradePrice = newTradeValue.divide(newTradedQuantity, 6, RoundingMode.HALF_UP);
+        averageTradePrice = com.emporia.events.math.FixedPointMath.toBigDecimal(newAvgPriceScaled);
         if (remainingQuantity.signum() == 0) {
             status = OrderStatus.FILLED;
             targetStatus = OrderStatus.FILLED;
@@ -115,7 +119,7 @@ public class TradingOrder {
             status = OrderStatus.PARTIALLY_FILLED;
             if (targetStatus != OrderStatus.CANCELLED) targetStatus = OrderStatus.LIVE;
         }
-        updatedAt = Instant.now();
+        updatedAt = DomainClock.now();
         validateInvariants();
     }
 
@@ -125,7 +129,7 @@ public class TradingOrder {
         require(targetStatus != OrderStatus.CANCELLED,
                 "Order cancellation is already pending");
         targetStatus = OrderStatus.CANCELLED;
-        updatedAt = Instant.now();
+        updatedAt = DomainClock.now();
         validateInvariants();
     }
 
@@ -134,7 +138,7 @@ public class TradingOrder {
                 "Only active orders can confirm cancellation");
         targetStatus = OrderStatus.CANCELLED;
         status = OrderStatus.CANCELLED;
-        updatedAt = Instant.now();
+        updatedAt = DomainClock.now();
         validateInvariants();
     }
 
@@ -154,7 +158,7 @@ public class TradingOrder {
         status = OrderStatus.REJECTED;
         targetStatus = OrderStatus.REJECTED;
         errorMessage = message == null || message.isBlank() ? "Execution venue rejected the order" : message;
-        updatedAt = Instant.now();
+        updatedAt = DomainClock.now();
         validateInvariants();
     }
 
