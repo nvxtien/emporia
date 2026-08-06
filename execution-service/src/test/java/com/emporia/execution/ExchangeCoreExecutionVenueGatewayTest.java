@@ -470,7 +470,7 @@ class ExchangeCoreExecutionVenueGatewayTest {
     void rejectsFullEquityRiskAccountingWithoutPortfolioUrl() {
         assertThatThrownBy(() -> new ExchangeCoreExecutionVenueGateway(
                 commands, null, Optional.empty(), null, "ex-1", java.nio.file.Path.of("/tmp"), 1,
-                "full-equity-risk", "", Duration.ofSeconds(3), true, new BigDecimal("10")))
+                "full-equity-risk", "", Duration.ofSeconds(3), true, new BigDecimal("10"), new SimpleMeterRegistry()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("EXCHANGE_CORE_PORTFOLIO_URL is required");
     }
@@ -480,7 +480,7 @@ class ExchangeCoreExecutionVenueGatewayTest {
     void initializesWithRealProductionSimulationVenue(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tempDir) throws Exception {
         ExchangeCoreExecutionVenueGateway realGateway = new ExchangeCoreExecutionVenueGateway(
                 commands, null, Optional.empty(), null, "ex-1", tempDir, 1,
-                "matching-only", null, Duration.ofSeconds(3), true, new BigDecimal("10"));
+                "matching-only", null, Duration.ofSeconds(3), true, new BigDecimal("10"), new SimpleMeterRegistry());
 
         assertThat(realGateway).isNotNull();
         realGateway.start();
@@ -536,6 +536,51 @@ class ExchangeCoreExecutionVenueGatewayTest {
         // fails if Spring Kafka's default moves under us.
         assertThat(gateway.getPhase())
                 .isLessThan(org.springframework.kafka.listener.AbstractMessageListenerContainer.DEFAULT_PHASE);
+    }
+
+    @Test
+    void reportsCheckpointFailuresThatDoNotRejectTheOrder() {
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        FakeVenue failing = new FakeVenue();
+        failing.checkpointFailure = new ExchangeCoreExecutionVenueGateway
+                .ExchangeCoreCheckpointException(new java.io.IOException("No such file or directory"));
+        ExchangeCoreExecutionVenueGateway gateway =
+                new ExchangeCoreExecutionVenueGateway(commands, failing, false, null,
+                        ExchangeCoreExecutionVenueGateway.DEFAULT_SLIPPAGE_BPS, meters);
+        gateway.start();
+
+        gateway.snapshotPeriodically();
+
+        // The venue accepted work it could not persist. That is deliberately
+        // not an order rejection - the order did reach the venue - which is
+        // exactly why it has to show up somewhere else. It once cost 45 orders
+        // their durability with every metric reading healthy.
+        assertThat(meters.counter("emporia.execution.venue.checkpoint.failures",
+                "operation", "periodic").count()).isEqualTo(1.0);
+        assertThat(gateway.health().getStatus().getCode()).isEqualTo("DOWN");
+        assertThat(gateway.health().getDetails())
+                .containsEntry("checkpointFailuresSinceLastSuccess", 1L);
+    }
+
+    @Test
+    void returnsToHealthyOnceASnapshotSucceedsAgain() {
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        FakeVenue recovering = new FakeVenue();
+        recovering.checkpointFailure = new ExchangeCoreExecutionVenueGateway
+                .ExchangeCoreCheckpointException(new java.io.IOException("No such file or directory"));
+        ExchangeCoreExecutionVenueGateway gateway =
+                new ExchangeCoreExecutionVenueGateway(commands, recovering, false, null,
+                        ExchangeCoreExecutionVenueGateway.DEFAULT_SLIPPAGE_BPS, meters);
+        gateway.start();
+        gateway.snapshotPeriodically();
+        assertThat(gateway.health().getStatus().getCode()).isEqualTo("DOWN");
+
+        // Cleared by a real write, not by an order that may not have
+        // checkpointed at all.
+        recovering.checkpointFailure = null;
+        gateway.snapshotPeriodically();
+
+        assertThat(gateway.health().getStatus().getCode()).isEqualTo("UP");
     }
 
     @Test
