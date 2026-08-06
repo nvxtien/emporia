@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.ObjectMapper;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Comparator;
 
@@ -51,17 +52,22 @@ public class OrderCommandReplayHarness {
         List<byte[]> records = wal.readPendingRecords();
         if (records.isEmpty()) return List.of();
         log.info("Replaying {} order command(s) from the write-ahead log", records.size());
-        return records.stream().map(this::replayRecord).toList();
-    }
 
-    private ProcessingOutcome replayRecord(byte[] record) {
-        try {
-            return handler.handle(SbeEncoderDecoder.decodeOrderCommand(record));
-        } catch (RuntimeException undecodable) {
-            throw new IllegalStateException(
-                    "Could not replay a write-ahead log record of " + record.length + " bytes",
-                    undecodable);
+        List<ProcessingOutcome> outcomes = new ArrayList<>(records.size());
+        int failed = 0;
+        for (byte[] record : records) {
+            try {
+                outcomes.add(handler.handle(SbeEncoderDecoder.decodeOrderCommand(record)));
+            } catch (RuntimeException unreplayable) {
+                failed++;
+                log.error("Could not replay a write-ahead log record of {} bytes; "
+                        + "the order it describes is not recovered", record.length, unreplayable);
+            }
         }
+        if (failed > 0) {
+            log.error("{} of {} write-ahead log record(s) could not be replayed", failed, records.size());
+        }
+        return outcomes;
     }
 
     List<ProcessingOutcome> replayAll() {
