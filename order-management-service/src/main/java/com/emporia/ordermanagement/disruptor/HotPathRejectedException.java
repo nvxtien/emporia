@@ -5,7 +5,11 @@ public final class HotPathRejectedException extends RuntimeException {
     private final String reason;
 
     public HotPathRejectedException(int status, String reason, String message) {
-        super(message);
+        this(status, reason, message, null);
+    }
+
+    public HotPathRejectedException(int status, String reason, String message, Throwable cause) {
+        super(message, cause);
         this.status = status;
         this.reason = reason;
     }
