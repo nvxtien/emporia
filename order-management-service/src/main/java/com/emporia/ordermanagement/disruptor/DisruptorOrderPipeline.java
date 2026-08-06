@@ -93,8 +93,18 @@ public class DisruptorOrderPipeline {
         // Replay goes straight to the handler rather than through the ring:
         // routed back through it, every recovered command would be appended to
         // the log a second time.
+        // Never fatal. A record this build cannot replay must not leave the
+        // service unable to start: that turns losing one order into losing the
+        // ability to accept any, and the log would keep failing the same way on
+        // every restart.
         if (replayHarness != null) {
-            replayHarness.replayWriteAheadLog();
+            try {
+                replayHarness.replayWriteAheadLog();
+            } catch (RuntimeException recoveryFailure) {
+                log.error("Write-ahead log recovery failed; starting without it. "
+                        + "Orders accepted but unwritten before the last stop are lost",
+                        recoveryFailure);
+            }
         }
 
         WaitStrategy waitStrategy = "busyspin".equalsIgnoreCase(waitStrategyName)
