@@ -64,4 +64,14 @@ class AeronOrderCommandSubscriberTest {
 
         org.mockito.Mockito.verifyNoInteractions(mockPipeline);
     }
+
+    @Test
+    void testStartPollAndCloseMethods() {
+        DisruptorOrderPipeline mockPipeline = mock(DisruptorOrderPipeline.class);
+        try (AeronOrderCommandSubscriber subscriber = new AeronOrderCommandSubscriber(mockPipeline)) {
+            assertThat(subscriber.poll()).isEqualTo(0);
+            subscriber.start();
+            assertThat(subscriber.poll()).isEqualTo(0);
+        }
+    }
 }

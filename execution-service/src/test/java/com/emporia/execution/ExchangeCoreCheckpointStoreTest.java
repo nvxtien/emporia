@@ -42,4 +42,14 @@ class ExchangeCoreCheckpointStoreTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("checkpointId");
     }
+
+    @Test
+    void latestCheckpointRecordBehaviors() {
+        ExchangeCoreCheckpointStore.LatestCheckpoint cp1 = new ExchangeCoreCheckpointStore.LatestCheckpoint(10L, Set.of(1, 2));
+        ExchangeCoreCheckpointStore.LatestCheckpoint cp2 = new ExchangeCoreCheckpointStore.LatestCheckpoint(10L, Set.of(1, 2));
+
+        assertThat(cp1).isEqualTo(cp2);
+        assertThat(cp1.hashCode()).isEqualTo(cp2.hashCode());
+        assertThat(cp1.toString()).contains("checkpointId=10");
+    }
 }
