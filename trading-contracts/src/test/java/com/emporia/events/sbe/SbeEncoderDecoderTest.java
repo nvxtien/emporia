@@ -250,4 +250,38 @@ class SbeEncoderDecoderTest {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
+
+    @Test
+    void keepsTheEpochAsATimestampInEveryMessage() {
+        // 0 is the epoch, a real instant. Encoding absent as 0 silently dropped
+        // the timestamp of any message that carried it.
+        TradingEvents.OrderDomainEvent event = new TradingEvents.OrderDomainEvent(
+                TradingEvents.SCHEMA_VERSION, UUID.randomUUID(), UUID.randomUUID(),
+                UUID.randomUUID(), "trader-a", "desk-a", "CREATED", 1L,
+                TradingEvents.OrderStatus.LIVE, Instant.EPOCH, "{}");
+        assertThat(SbeEncoderDecoder.decodeOrderDomainEvent(
+                SbeEncoderDecoder.encodeOrderDomainEvent(event)).occurredAt())
+                .isEqualTo(Instant.EPOCH);
+
+        TradingEvents.ExecutionCommand execution = new TradingEvents.ExecutionCommand(
+                TradingEvents.SCHEMA_VERSION, UUID.randomUUID(),
+                TradingEvents.ExecutionCommandType.FILL, UUID.randomUUID(), "desk-a",
+                "exec-1", java.math.BigDecimal.ONE, java.math.BigDecimal.TEN, "XNAS",
+                Instant.EPOCH, "filled");
+        assertThat(SbeEncoderDecoder.decodeExecutionCommand(
+                SbeEncoderDecoder.encodeExecutionCommand(execution)).occurredAt())
+                .isEqualTo(Instant.EPOCH);
+    }
+
+    @Test
+    void stillDistinguishesAnAbsentTimestamp() {
+        TradingEvents.OrderDomainEvent noTimestamp = new TradingEvents.OrderDomainEvent(
+                TradingEvents.SCHEMA_VERSION, UUID.randomUUID(), UUID.randomUUID(),
+                UUID.randomUUID(), "trader-a", "desk-a", "CREATED", 1L,
+                TradingEvents.OrderStatus.LIVE, null, "{}");
+
+        assertThat(SbeEncoderDecoder.decodeOrderDomainEvent(
+                SbeEncoderDecoder.encodeOrderDomainEvent(noTimestamp)).occurredAt()).isNull();
+    }
+
 }
