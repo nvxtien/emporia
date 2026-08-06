@@ -14,7 +14,7 @@
         <dependency>
             <groupId>exchange.core2</groupId>
             <artifactId>exchange-core</artifactId>
-            <version>0.5.4-SNAPSHOT</version>
+            <version>0.5.4-ec</version>
             <exclusions>
                 <exclusion>
                     <groupId>org.slf4j</groupId>
