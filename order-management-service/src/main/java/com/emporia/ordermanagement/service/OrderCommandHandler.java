@@ -104,9 +104,9 @@ public class OrderCommandHandler {
         // Cache-backed duplicate order guard: avoids a DB SELECT on CREATE.
         require(!cache.existsById(command.orderId()), 409, "Order already exists");
         String deskId = desk(command);
-        BigDecimal price = checkOrderRisk(command.orderType(), command.quantity(),
-                command.listing().sizeIncrement(), BigDecimal.ZERO,
-                command.limitPrice(), command.listing().tickSize());
+        long priceScaled = checkOrderRiskScaled(command.orderType(), command.quantityScaled(),
+                command.listing().sizeIncrementScaled(), 0L,
+                command.limitPriceScaled(), command.listing().tickSizeScaled());
         TradingOrder parent = command.parentOrderId() == null ? null : findOnDesk(deskId, command.parentOrderId());
         if (parent != null) {
             requireCancellable(parent);
@@ -115,7 +115,7 @@ public class OrderCommandHandler {
         }
         TradingOrder order = new TradingOrder(command.orderId(), command.userSubject(), deskId,
                 command.listing(), command.side(),
-                command.orderType(), command.quantity(), price, command.destination(), command.originatorReference(),
+                command.orderType(), command.quantityScaled(), priceScaled, command.destination(), command.originatorReference(),
                 parent == null ? null : parent.getId(), parent == null ? null : parent.getRootOrderId(), json(command.executionParameters()));
         cache.put(order);
         asyncDbWriter.enqueue(order);
@@ -132,10 +132,11 @@ public class OrderCommandHandler {
                 "SMART and VWAP strategy orders do not support modification; cancel and replace the order");
         require(command.expectedVersion() != null && order.getVersion().equals(command.expectedVersion()), 409,
                 "Order changed since it was loaded; refresh before modifying it");
-        BigDecimal price = checkOrderRisk(order.getType(), command.quantity(),
-                order.getListing().getSizeIncrement(), order.getTradedQuantity(),
-                command.limitPrice(), order.getListing().getTickSize());
-        order.modify(command.quantity(), price);
+        long currentTradedQtyScaled = com.emporia.events.math.FixedPointMath.toScaledLong(order.getTradedQuantity());
+        long priceScaled = checkOrderRiskScaled(order.getType(), command.quantityScaled(),
+                order.getListing().getSizeIncrementScaled(), currentTradedQtyScaled,
+                command.limitPriceScaled(), order.getListing().getTickSizeScaled());
+        order.modify(command.quantityScaled(), priceScaled);
         cache.put(order);
         asyncDbWriter.enqueue(order);
         return success(command, order, "MODIFIED", "Quantity or price changed", 200);
@@ -240,15 +241,15 @@ public class OrderCommandHandler {
      * value, so a tick-size rejection is reported as {@code symbol} — it is an
      * instrument-level rule.
      */
-    private BigDecimal checkOrderRisk(OrderType type, BigDecimal quantity, BigDecimal increment,
-                                      BigDecimal traded, BigDecimal price, BigDecimal tickSize) {
+    private long checkOrderRiskScaled(OrderType type, long qtyScaled, long incrementScaled,
+                                      long tradedScaled, long priceScaled, long tickScaled) {
         Observation observation = Observation.createNotStarted("emporia.risk.check", observations).start();
-        OrderRiskChecks.RiskOutcome outcome = OrderRiskChecks.evaluate(type, quantity, increment, traded, price, tickSize);
+        OrderRiskChecks.RiskOutcome outcome = OrderRiskChecks.evaluate(type, qtyScaled, incrementScaled, tradedScaled, priceScaled, tickScaled);
         try {
             if (!outcome.allowed()) {
                 throw new DomainProblem(outcome.status(), outcome.message());
             }
-            return outcome.validatedPrice();
+            return outcome.validatedPriceScaled();
         } finally {
             observation.lowCardinalityKeyValue("decision", outcome.allowed() ? "allow" : "deny")
                     .lowCardinalityKeyValue("reason", outcome.reason())

@@ -3,6 +3,7 @@ package com.emporia.authentication.admin;
 import com.emporia.authentication.user.UserAccount;
 import com.emporia.authentication.user.UserAccountRepository;
 import com.emporia.authentication.user.UserAuthority;
+import com.emporia.authentication.user.UserTier;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
@@ -63,6 +64,7 @@ public class AdminUserService {
                 passwordEncoder.encode(password(request.password())),
                 desk(request.desk()),
                 Boolean.TRUE.equals(request.canTrade()),
+                tier(request.tier()),
                 authorities(request.authorities())
         );
         AdminUserView created = AdminUserView.from(users.save(account));
@@ -86,6 +88,9 @@ public class AdminUserService {
 
         account.updateAccount(username, email, nextEnabled, nextAuthorities);
         account.updateTradingIdentity(desk(request.desk()), Boolean.TRUE.equals(request.canTrade()));
+        if (request.tier() != null) {
+            account.updateTier(request.tier());
+        }
         AdminUserView updated = AdminUserView.from(account);
         audit.recordUserEvent(auditContext, "USER_UPDATED", before, updated, null);
         return updated;
@@ -114,6 +119,21 @@ public class AdminUserService {
         account.updateTradingIdentity(desk(request.desk()), request.canTrade());
         AdminUserView updated = AdminUserView.from(account);
         audit.recordUserEvent(auditContext, "USER_TRADING_IDENTITY_UPDATED", before, updated, null);
+        return updated;
+    }
+
+    @Transactional
+    public AdminUserView updateTier(
+            UUID userId,
+            UpdateUserTierRequest request,
+            AdminAuditContext auditContext
+    ) {
+        requireBody(request);
+        UserAccount account = find(userId);
+        AdminUserView before = AdminUserView.from(account);
+        account.updateTier(tier(request.tier()));
+        AdminUserView updated = AdminUserView.from(account);
+        audit.recordUserEvent(auditContext, "USER_TIER_UPDATED", before, updated, null);
         return updated;
     }
 
@@ -173,6 +193,10 @@ public class AdminUserService {
         return result;
     }
 
+    private static UserTier tier(UserTier value) {
+        return value == null ? UserTier.RETAIL : value;
+    }
+
     private static String password(String value) {
         String result = required(value, "Password is required");
         if (result.length() < MIN_PASSWORD_LENGTH) {
@@ -219,6 +243,7 @@ public class AdminUserService {
             String password,
             String desk,
             Boolean canTrade,
+            UserTier tier,
             Set<String> authorities
     ) {
     }
@@ -229,6 +254,7 @@ public class AdminUserService {
             Boolean enabled,
             String desk,
             Boolean canTrade,
+            UserTier tier,
             Set<String> authorities
     ) {
     }
@@ -239,6 +265,9 @@ public class AdminUserService {
     public record UpdateTradingIdentityRequest(String desk, boolean canTrade) {
     }
 
+    public record UpdateUserTierRequest(UserTier tier) {
+    }
+
     public record AdminUserView(
             UUID id,
             String username,
@@ -246,6 +275,7 @@ public class AdminUserService {
             boolean enabled,
             String desk,
             boolean canTrade,
+            UserTier tier,
             List<String> authorities,
             Instant createdAt
     ) {
@@ -257,6 +287,7 @@ public class AdminUserService {
                     account.isEnabled(),
                     account.getDesk(),
                     account.canTrade(),
+                    account.getTier(),
                     account.getAuthorities().stream()
                             .map(Enum::name)
                             .sorted(Comparator.naturalOrder())
@@ -264,6 +295,5 @@ public class AdminUserService {
                     account.getCreatedAt()
             );
         }
-
     }
 }

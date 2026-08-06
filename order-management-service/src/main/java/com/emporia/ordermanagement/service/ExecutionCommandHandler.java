@@ -78,7 +78,8 @@ class ExecutionCommandHandler {
         if (order.getStatus() == OrderStatus.FILLED || order.getStatus() == OrderStatus.REJECTED) return;
 
         applyFillAndRecord(order, command.commandId(), command.executionReference(),
-                command.quantity(), command.price(), command.venue(), command.occurredAt(),
+                command.quantity(), command.price(), command.quantityScaled(), command.priceScaled(),
+                command.venue(), command.occurredAt(),
                 "Execution " + command.executionReference() + " received from " + command.venue(), result);
 
         TradingOrder child = order;
@@ -90,7 +91,8 @@ class ExecutionCommandHandler {
             String rollupReference = rollupReference(command.executionReference(), parent.getId());
             if (!executions.existsByExecutionReference(rollupReference)) {
                 applyFillAndRecord(parent, command.commandId(), rollupReference,
-                        command.quantity(), command.price(), command.venue(), command.occurredAt(),
+                        command.quantity(), command.price(), command.quantityScaled(), command.priceScaled(),
+                        command.venue(), command.occurredAt(),
                         "Child execution " + command.executionReference() + " rolled up from " + child.getId(),
                         result);
             }
@@ -102,10 +104,11 @@ class ExecutionCommandHandler {
     }
 
     private void applyFillAndRecord(TradingOrder order, UUID commandId, String reference,
-                                    BigDecimal quantity, BigDecimal price, String venue,
+                                    BigDecimal quantity, BigDecimal price,
+                                    long quantityScaled, long priceScaled, String venue,
                                     java.time.Instant occurredAt, String message,
                                     List<OrderDomainEvent> result) {
-        order.applyFill(quantity, price);
+        order.applyFill(quantityScaled, priceScaled);
         executions.save(new Execution(
                 deterministic(reference),
                 reference,

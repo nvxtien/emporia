@@ -64,9 +64,11 @@ public class OrderRateLimiterGatewayFilterFactory
                         bypassed.increment();
                         return chain.filter(exchange);
                     }
+                    long replenishRate = getReplenishRate(identity, config);
+                    long burstCapacity = getBurstCapacity(identity, config);
                     TokenBucket bucket = buckets.computeIfAbsent(identity.key(),
-                            ignored -> new TokenBucket(config.getBurstCapacity(), config.getBurstCapacity(), System.nanoTime()));
-                    if (bucket.tryConsume(config.getReplenishRate(), config.getBurstCapacity(), config.getRequestedTokens())) {
+                            ignored -> new TokenBucket(burstCapacity, burstCapacity, System.nanoTime()));
+                    if (bucket.tryConsume(replenishRate, burstCapacity, config.getRequestedTokens())) {
                         return chain.filter(exchange);
                     }
                     rateLimited.increment();
@@ -77,6 +79,36 @@ public class OrderRateLimiterGatewayFilterFactory
                     exchange.getResponse().getHeaders().set("Retry-After", "1");
                     return exchange.getResponse().writeWith(Mono.just(exchange.getResponse().bufferFactory().wrap(payload)));
                 });
+    }
+
+    private long getReplenishRate(Identity identity, Config config) {
+        String tier = getTierClaim(identity);
+        if ("institutional".equalsIgnoreCase(tier)) {
+            return 5000L;
+        } else if ("retail".equalsIgnoreCase(tier)) {
+            return 100L;
+        }
+        return config.getReplenishRate();
+    }
+
+    private long getBurstCapacity(Identity identity, Config config) {
+        String tier = getTierClaim(identity);
+        if ("institutional".equalsIgnoreCase(tier)) {
+            return 10000L;
+        } else if ("retail".equalsIgnoreCase(tier)) {
+            return 200L;
+        }
+        return config.getBurstCapacity();
+    }
+
+    private String getTierClaim(Identity identity) {
+        if (identity != null && identity.authentication() instanceof JwtAuthenticationToken jwt) {
+            Object claim = jwt.getToken().getClaims().get("tier");
+            if (claim != null) {
+                return claim.toString();
+            }
+        }
+        return "";
     }
 
     private String identity(Authentication authentication, ServerWebExchange exchange) {

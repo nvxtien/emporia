@@ -40,8 +40,19 @@ public final class TradingEvents {
             BigDecimal tickSize,
             BigDecimal sizeIncrement,
             BigDecimal referencePrice,
-            BigDecimal previousClose
+            BigDecimal previousClose,
+            long tickSizeScaled,
+            long sizeIncrementScaled
     ) {
+        public ListingSnapshot(long id, int version, String symbol, String name, String marketSymbol,
+                               String exchangeMic, String exchangeName, String countryCode, String currency,
+                               BigDecimal tickSize, BigDecimal sizeIncrement, BigDecimal referencePrice,
+                               BigDecimal previousClose) {
+            this(id, version, symbol, name, marketSymbol, exchangeMic, exchangeName, countryCode, currency,
+                    tickSize, sizeIncrement, referencePrice, previousClose,
+                    com.emporia.events.math.FixedPointMath.toScaledLong(tickSize),
+                    com.emporia.events.math.FixedPointMath.toScaledLong(sizeIncrement));
+        }
     }
 
     public record OrderCommand(
@@ -61,8 +72,22 @@ public final class TradingEvents {
             String destination,
             String originatorReference,
             UUID parentOrderId,
-            Map<String, Object> executionParameters
+            Map<String, Object> executionParameters,
+            long quantityScaled,
+            long limitPriceScaled
     ) {
+        public OrderCommand(int schemaVersion, UUID commandId, CommandType commandType, String userSubject,
+                            String deskId, Instant requestedAt, UUID orderId, Long expectedVersion, ListingSnapshot listing,
+                            OrderSide side, OrderType orderType, BigDecimal quantity, BigDecimal limitPrice,
+                            String destination, String originatorReference, UUID parentOrderId,
+                            Map<String, Object> executionParameters) {
+            this(schemaVersion, commandId, commandType, userSubject, deskId, requestedAt, orderId,
+                    expectedVersion, listing, side, orderType, quantity, limitPrice, destination,
+                    originatorReference, parentOrderId, executionParameters,
+                    com.emporia.events.math.FixedPointMath.toScaledLong(quantity),
+                    limitPrice == null ? 0L : com.emporia.events.math.FixedPointMath.toScaledLong(limitPrice));
+        }
+
         public OrderCommand(int schemaVersion, UUID commandId, CommandType commandType, String userSubject,
                             Instant requestedAt, UUID orderId, Long expectedVersion, ListingSnapshot listing,
                             OrderSide side, OrderType orderType, BigDecimal quantity, BigDecimal limitPrice,
@@ -71,6 +96,18 @@ public final class TradingEvents {
             this(schemaVersion, commandId, commandType, userSubject, userSubject, requestedAt, orderId,
                     expectedVersion, listing, side, orderType, quantity, limitPrice, destination,
                     originatorReference, parentOrderId, executionParameters);
+        }
+
+        public com.emporia.events.math.LongPair commandIdPair() {
+            return com.emporia.events.math.LongPair.fromUuid(commandId());
+        }
+
+        public com.emporia.events.math.LongPair orderIdPair() {
+            return com.emporia.events.math.LongPair.fromUuid(orderId());
+        }
+
+        public com.emporia.events.math.LongPair parentOrderIdPair() {
+            return com.emporia.events.math.LongPair.fromUuid(parentOrderId());
         }
     }
 
@@ -110,8 +147,18 @@ public final class TradingEvents {
             BigDecimal price,
             String venue,
             Instant occurredAt,
-            String detail
+            String detail,
+            long quantityScaled,
+            long priceScaled
     ) {
+        public ExecutionCommand(int schemaVersion, UUID commandId, ExecutionCommandType commandType,
+                                UUID orderId, String deskId, String executionReference, BigDecimal quantity,
+                                BigDecimal price, String venue, Instant occurredAt, String detail) {
+            this(schemaVersion, commandId, commandType, orderId, deskId, executionReference, quantity, price,
+                    venue, occurredAt, detail,
+                    com.emporia.events.math.FixedPointMath.toScaledLong(quantity),
+                    price == null ? 0L : com.emporia.events.math.FixedPointMath.toScaledLong(price));
+        }
     }
 
     public record OrderView(

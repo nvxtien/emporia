@@ -50,6 +50,7 @@ public class BootstrapAdminInitializer implements ApplicationRunner {
                 passwordEncoder.encode(properties.password()),
                 StringUtils.hasText(properties.desk()) ? properties.desk().strip() : "default",
                 properties.canTrade(),
+                com.emporia.authentication.user.UserTier.INTERNAL,
                 Set.of(UserAuthority.ROLE_USER, UserAuthority.ROLE_ADMIN)
         );
         userAccountRepository.save(administrator);
