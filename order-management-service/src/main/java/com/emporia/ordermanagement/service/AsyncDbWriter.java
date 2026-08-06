@@ -48,8 +48,10 @@ public class AsyncDbWriter {
     private final ProcessedCommand[] processedBatchBuffer = new ProcessedCommand[BATCH_SIZE];
     private final com.emporia.ordermanagement.model.OrderInputEvent[] inputEventBatchBuffer = new com.emporia.ordermanagement.model.OrderInputEvent[BATCH_SIZE];
 
+    private final org.springframework.transaction.support.TransactionTemplate transactionTemplate;
+
     public AsyncDbWriter(TradingOrderRepository orders, OrderEventRepository events, ProcessedCommandRepository processed) {
-        this(orders, events, processed, null, null, null);
+        this(orders, events, processed, null, null, null, null);
     }
 
     // Marks the constructor Spring injects through. Without it there are two
@@ -63,13 +65,15 @@ public class AsyncDbWriter {
                          ProcessedCommandRepository processed,
                          com.emporia.ordermanagement.repository.OrderInputEventRepository inputEvents,
                          JdbcTemplate jdbcTemplate,
-                         MemoryMappedWalLogger wal) {
+                         MemoryMappedWalLogger wal,
+                         org.springframework.transaction.support.TransactionTemplate transactionTemplate) {
         this.orders = orders;
         this.events = events;
         this.processed = processed;
         this.inputEvents = inputEvents;
         this.jdbcTemplate = jdbcTemplate;
         this.wal = wal;
+        this.transactionTemplate = transactionTemplate;
     }
 
     public void enqueue(TradingOrder order) {
@@ -88,8 +92,19 @@ public class AsyncDbWriter {
         if (inputEvent != null) inputEventQueue.add(inputEvent);
     }
 
-    @Scheduled(fixedDelay = 10)
+    // Configurable so scripts/perf/wal-recovery-check.sh can widen it well
+    // beyond HTTP round-trip time, guaranteeing a burst lands mid-window rather
+    // than racing a 10ms flush that a single curl process cannot beat.
+    @Scheduled(fixedDelayString = "${emporia.async-db-writer.flush-delay-ms:10}")
     public synchronized void flush() {
+        if (transactionTemplate != null) {
+            transactionTemplate.executeWithoutResult(status -> doFlush());
+        } else {
+            doFlush();
+        }
+    }
+
+    private void doFlush() {
         flushOrders();
         flushEvents();
         flushProcessed();
