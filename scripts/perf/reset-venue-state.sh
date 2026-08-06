@@ -22,7 +22,7 @@ cd "$repo_root"
 PG_CONTAINER="${PG_CONTAINER:-emporia-order-management-postgres}"
 PG_DB="${PG_DB:-emporia_order_management}"
 PG_USER="${PG_USER:-postgres}"
-STORAGE_DIR="${EXCHANGE_CORE_STORAGE_DIRECTORY:-$repo_root/execution-service/target/exchange-core-simulation}"
+STORAGE_DIR="${EXCHANGE_CORE_STORAGE_DIRECTORY:-$repo_root/execution-service/.local-run/exchange-core-simulation}"
 REASON="${RESET_REASON:-Force-cancelled by scripts/perf/reset-venue-state.sh before a capacity baseline}"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
