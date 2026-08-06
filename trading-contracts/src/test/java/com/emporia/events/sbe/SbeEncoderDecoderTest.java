@@ -5,6 +5,7 @@ import com.emporia.events.TradingEvents.ExecutionCommandType;
 import com.emporia.events.TradingEvents.OrderCommandResult;
 import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderStatus;
+import com.emporia.events.TradingEvents;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
@@ -182,4 +183,58 @@ class SbeEncoderDecoderTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Invalid SBE payload for ExecutionCommand");
     }
+
+    @Test
+    void roundTripsAnOrderCommandIncludingListingAndParameters() {
+        TradingEvents.ListingSnapshot listing = new TradingEvents.ListingSnapshot(
+                7L, 3, "AAPL", "Apple Inc.", "AAPL", "XNAS", "Nasdaq", "US", "USD",
+                new java.math.BigDecimal("0.010000"), new java.math.BigDecimal("1.000000"),
+                new java.math.BigDecimal("101.000000"), new java.math.BigDecimal("100.000000"));
+        TradingEvents.OrderCommand command = new TradingEvents.OrderCommand(
+                TradingEvents.SCHEMA_VERSION, UUID.randomUUID(), TradingEvents.CommandType.CREATE,
+                "trader-a", "desk-a", Instant.ofEpochMilli(1_780_000_000_000L),
+                UUID.randomUUID(), 4L, listing, TradingEvents.OrderSide.SELL,
+                TradingEvents.OrderType.LIMIT,
+                new java.math.BigDecimal("10.000000"), new java.math.BigDecimal("102.250000"),
+                "SMART", "originator-1", UUID.randomUUID(),
+                java.util.Map.of("strategy", "SMART", "tif", "IOC"));
+
+        byte[] encoded = SbeEncoderDecoder.encodeOrderCommand(command);
+        TradingEvents.OrderCommand decoded = SbeEncoderDecoder.decodeOrderCommand(encoded);
+
+        // A command that does not survive the round trip cannot be replayed,
+        // which is the only reason to encode it.
+        assertThat(SbeEncoderDecoder.isSbePayload(encoded)).isTrue();
+        assertThat(decoded).isEqualTo(command);
+    }
+
+    @Test
+    void distinguishesAbsentEnumsFromTheirFirstOrdinal() {
+        // CREATE, BUY and MARKET are all ordinal 0, so encoding null as 0 would
+        // decode an absent side into a BUY - an order in the wrong direction.
+        TradingEvents.OrderCommand sparse = new TradingEvents.OrderCommand(
+                TradingEvents.SCHEMA_VERSION, UUID.randomUUID(), TradingEvents.CommandType.CANCEL,
+                "trader-a", null, Instant.ofEpochMilli(1_780_000_000_000L),
+                UUID.randomUUID(), null, null, null, null, null, null, null, null, null, null);
+
+        TradingEvents.OrderCommand decoded =
+                SbeEncoderDecoder.decodeOrderCommand(SbeEncoderDecoder.encodeOrderCommand(sparse));
+
+        assertThat(decoded.side()).isNull();
+        assertThat(decoded.orderType()).isNull();
+        assertThat(decoded.listing()).isNull();
+        assertThat(decoded.expectedVersion()).isNull();
+        assertThat(decoded.commandType()).isEqualTo(TradingEvents.CommandType.CANCEL);
+    }
+
+    @Test
+    void rejectsAPayloadEncodedAsADifferentMessage() {
+        byte[] otherMessage = SbeEncoderDecoder.encodeOrderCommandResult(
+                new TradingEvents.OrderCommandResult(TradingEvents.SCHEMA_VERSION,
+                        UUID.randomUUID(), true, 201, null, null));
+
+        assertThatThrownBy(() -> SbeEncoderDecoder.decodeOrderCommand(otherMessage))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
 }
