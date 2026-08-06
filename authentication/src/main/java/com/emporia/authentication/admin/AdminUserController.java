@@ -5,6 +5,7 @@ import com.emporia.authentication.admin.AdminUserService.CreateUserRequest;
 import com.emporia.authentication.admin.AdminUserService.UpdatePasswordRequest;
 import com.emporia.authentication.admin.AdminUserService.UpdateTradingIdentityRequest;
 import com.emporia.authentication.admin.AdminUserService.UpdateUserRequest;
+import com.emporia.authentication.admin.AdminUserService.UpdateUserTierRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -77,5 +78,15 @@ class AdminUserController {
             @RequestHeader(value = "X-Request-Id", required = false) String requestId
     ) {
         return users.updateTradingIdentity(userId, request, AdminAuditContext.from(authentication, requestId));
+    }
+
+    @PutMapping("/{userId}/tier")
+    AdminUserView updateTier(
+            @PathVariable UUID userId,
+            @RequestBody UpdateUserTierRequest request,
+            Authentication authentication,
+            @RequestHeader(value = "X-Request-Id", required = false) String requestId
+    ) {
+        return users.updateTier(userId, request, AdminAuditContext.from(authentication, requestId));
     }
 }

@@ -78,6 +78,13 @@ emporia.disruptor:
   cpu-set: ${EMPORIA_DISRUPTOR_CPU_SET:}
   numa-node: ${EMPORIA_DISRUPTOR_NUMA_NODE:}
 
+emporia.aeron.intake:
+  enabled: ${EMPORIA_AERON_INTAKE_ENABLED:false}
+  channel: ${EMPORIA_AERON_INTAKE_CHANNEL:aeron:ipc}
+  stream-id: ${EMPORIA_AERON_INTAKE_STREAM_ID:1002}
+  driver-dir: ${EMPORIA_AERON_INTAKE_DRIVER_DIR:}
+  fragment-limit: ${EMPORIA_AERON_INTAKE_FRAGMENT_LIMIT:10}
+
 emporia.wal:
   # Covers the window between the ring accepting a command and AsyncDbWriter
   # persisting it - milliseconds - and is rewound after every flush rather than

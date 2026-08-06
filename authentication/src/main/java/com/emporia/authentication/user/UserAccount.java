@@ -44,6 +44,10 @@ public class UserAccount {
     @Column(name = "can_trade", nullable = false)
     private boolean canTrade;
 
+    @Column(nullable = false, length = 50)
+    @Enumerated(EnumType.STRING)
+    private UserTier tier = UserTier.RETAIL;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt = Instant.now();
 
@@ -57,16 +61,22 @@ public class UserAccount {
     }
 
     public UserAccount(String username, String email, String passwordHash, Set<UserAuthority> authorities) {
-        this(username, email, passwordHash, "default", false, authorities);
+        this(username, email, passwordHash, "default", false, UserTier.RETAIL, authorities);
     }
 
     public UserAccount(String username, String email, String passwordHash, String desk, boolean canTrade,
                        Set<UserAuthority> authorities) {
+        this(username, email, passwordHash, desk, canTrade, UserTier.RETAIL, authorities);
+    }
+
+    public UserAccount(String username, String email, String passwordHash, String desk, boolean canTrade,
+                       UserTier tier, Set<UserAuthority> authorities) {
         this.username = username;
         this.email = email;
         this.passwordHash = passwordHash;
         this.desk = desk;
         this.canTrade = canTrade;
+        this.tier = tier == null ? UserTier.RETAIL : tier;
         this.authorities = new HashSet<>(authorities);
     }
 
@@ -98,6 +108,10 @@ public class UserAccount {
         return canTrade;
     }
 
+    public UserTier getTier() {
+        return tier == null ? UserTier.RETAIL : tier;
+    }
+
     public Instant getCreatedAt() {
         return createdAt;
     }
@@ -109,6 +123,10 @@ public class UserAccount {
     public void updateTradingIdentity(String desk, boolean canTrade) {
         this.desk = desk;
         this.canTrade = canTrade;
+    }
+
+    public void updateTier(UserTier tier) {
+        this.tier = tier == null ? UserTier.RETAIL : tier;
     }
 
     public void updateAccount(String username, String email, boolean enabled, Set<UserAuthority> authorities) {

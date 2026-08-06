@@ -52,6 +52,11 @@ class AuthenticationApplicationTests {
     @Autowired
     private PasswordEncoder passwordEncoder;
 
+    @org.junit.jupiter.api.BeforeEach
+    void setUp() {
+        userAccountRepository.deleteAll();
+    }
+
     @Test
     void exposesHealthAndOpenIdConfiguration() throws Exception {
         HttpClient client = HttpClient.newHttpClient();
@@ -206,6 +211,35 @@ class AuthenticationApplicationTests {
                 .doesNotContain("Managed12345!")
                 .doesNotContain("Managed67890!")
                 .doesNotContain("passwordHash");
+    }
+
+    @Test
+    void updatesUserTierViaAdminApi() throws Exception {
+        String suffix = UUID.randomUUID().toString();
+        String adminUsername = "admin-" + suffix;
+        saveUser(adminUsername, adminUsername + "@example.test", "Admin12345!", "ops", true,
+                Set.of(UserAuthority.ROLE_USER, UserAuthority.ROLE_ADMIN));
+
+        HttpClient client = loggedInClient(adminUsername, "Admin12345!");
+
+        String targetUsername = "institutional-user-" + suffix;
+        saveUser(targetUsername, targetUsername + "@example.test", "Trader12345!", "desk-hft", true,
+                Set.of(UserAuthority.ROLE_USER));
+
+        UserAccount account = userAccountRepository.findByUsernameIgnoreCase(targetUsername).orElseThrow();
+        assertThat(account.getTier()).isEqualTo(com.emporia.authentication.user.UserTier.RETAIL);
+
+        HttpResponse<String> response = send(client, "/admin/users/" + account.getId() + "/tier", "PUT", """
+                {
+                  "tier": "INSTITUTIONAL"
+                }
+                """);
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).contains("\"tier\":\"INSTITUTIONAL\"");
+
+        UserAccount updated = userAccountRepository.findByUsernameIgnoreCase(targetUsername).orElseThrow();
+        assertThat(updated.getTier()).isEqualTo(com.emporia.authentication.user.UserTier.INSTITUTIONAL);
     }
 
     @Test

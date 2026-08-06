@@ -70,49 +70,67 @@ public class TradingOrder {
         validateInvariants();
     }
 
-    public synchronized void modify(BigDecimal newQuantity, BigDecimal newLimitPrice) {
+    public TradingOrder(UUID id, String userSubject, String deskId, ListingSnapshot listing, OrderSide side,
+                 OrderType type, long quantityScaled, long limitPriceScaled, String destination,
+                 String originatorReference, UUID parentOrderId, UUID rootOrderId, String executionParameters) {
+        this(id, userSubject, deskId, listing, side, type,
+                com.emporia.events.math.FixedPointMath.toBigDecimal(quantityScaled),
+                type == OrderType.MARKET || limitPriceScaled == 0L ? null : com.emporia.events.math.FixedPointMath.toBigDecimal(limitPriceScaled),
+                destination, originatorReference, parentOrderId, rootOrderId, executionParameters);
+    }
+
+    public synchronized void modify(long newQuantityScaled, long newLimitPriceScaled) {
         require(status == OrderStatus.LIVE || status == OrderStatus.PARTIALLY_FILLED,
                 "Only active orders can be modified");
         require(targetStatus != OrderStatus.CANCELLED,
                 "Orders pending cancellation cannot be modified");
-        validateQuantity(newQuantity);
-        require(newQuantity.compareTo(tradedQuantity) > 0,
+        validateQuantityScaled(newQuantityScaled);
+        long currentTradedQtyScaled = com.emporia.events.math.FixedPointMath.toScaledLong(tradedQuantity);
+        require(newQuantityScaled > currentTradedQtyScaled,
                 "Modified quantity must be greater than the quantity already traded");
-        validatePrice(newLimitPrice);
-        quantity = newQuantity;
-        limitPrice = newLimitPrice;
-        remainingQuantity = newQuantity.subtract(tradedQuantity);
+        validatePriceScaled(type == OrderType.MARKET ? null : newLimitPriceScaled);
+
+        this.quantity = com.emporia.events.math.FixedPointMath.toBigDecimal(newQuantityScaled);
+        this.limitPrice = type == OrderType.MARKET || newLimitPriceScaled == 0L ? null : com.emporia.events.math.FixedPointMath.toBigDecimal(newLimitPriceScaled);
+        this.remainingQuantity = com.emporia.events.math.FixedPointMath.toBigDecimal(newQuantityScaled - currentTradedQtyScaled);
         updatedAt = DomainClock.now();
         validateInvariants();
     }
 
-    public synchronized void applyFill(BigDecimal fillQuantity, BigDecimal fillPrice) {
+    public synchronized void modify(BigDecimal newQuantity, BigDecimal newLimitPrice) {
+        long newQtyScaled = com.emporia.events.math.FixedPointMath.toScaledLong(newQuantity);
+        long newPriceScaled = newLimitPrice == null ? 0L : com.emporia.events.math.FixedPointMath.toScaledLong(newLimitPrice);
+        modify(newQtyScaled, newPriceScaled);
+    }
+
+    public synchronized void applyFill(long fillQuantityScaled, long fillPriceScaled) {
         require(status == OrderStatus.LIVE || status == OrderStatus.PARTIALLY_FILLED
                         || status == OrderStatus.CANCELLED,
                 "Only active or cancelled orders can receive fills");
-        require(fillQuantity != null && fillQuantity.signum() > 0,
-                "Fill quantity must be greater than zero");
-        require(fillQuantity.remainder(listing.getSizeIncrement()).signum() == 0,
+        require(fillQuantityScaled > 0L, "Fill quantity must be greater than zero");
+        long incrementScaled = listing == null ? 0L : listing.getSizeIncrementScaled();
+        require(incrementScaled > 0L && fillQuantityScaled % incrementScaled == 0L,
                 "Fill quantity must align with the listing size increment");
-        require(fillQuantity.compareTo(remainingQuantity) <= 0,
-                "Fill quantity cannot exceed remaining quantity");
-        require(fillPrice != null && fillPrice.signum() > 0,
-                "Fill price must be greater than zero");
+        long remQtyScaled = com.emporia.events.math.FixedPointMath.toScaledLong(remainingQuantity);
+        require(fillQuantityScaled <= remQtyScaled, "Fill quantity cannot exceed remaining quantity");
+        require(fillPriceScaled > 0L, "Fill price must be greater than zero");
 
         long currentTradedQtyScaled = com.emporia.events.math.FixedPointMath.toScaledLong(tradedQuantity);
         long currentAvgPriceScaled = com.emporia.events.math.FixedPointMath.toScaledLong(averageTradePrice);
-        long fillQtyScaled = com.emporia.events.math.FixedPointMath.toScaledLong(fillQuantity);
-        long fillPriceScaled = com.emporia.events.math.FixedPointMath.toScaledLong(fillPrice);
 
         long newAvgPriceScaled = com.emporia.events.math.FixedPointMath.calculateWeightedAveragePrice(
-                currentTradedQtyScaled, currentAvgPriceScaled, fillQtyScaled, fillPriceScaled
+                currentTradedQtyScaled, currentAvgPriceScaled, fillQuantityScaled, fillPriceScaled
         );
 
-        BigDecimal newTradedQuantity = tradedQuantity.add(fillQuantity);
-        tradedQuantity = newTradedQuantity;
-        remainingQuantity = quantity.subtract(newTradedQuantity);
-        averageTradePrice = com.emporia.events.math.FixedPointMath.toBigDecimal(newAvgPriceScaled);
-        if (remainingQuantity.signum() == 0) {
+        long newTradedQtyScaled = currentTradedQtyScaled + fillQuantityScaled;
+        long totalQtyScaled = com.emporia.events.math.FixedPointMath.toScaledLong(quantity);
+        long newRemQtyScaled = totalQtyScaled - newTradedQtyScaled;
+
+        this.tradedQuantity = com.emporia.events.math.FixedPointMath.toBigDecimal(newTradedQtyScaled);
+        this.remainingQuantity = com.emporia.events.math.FixedPointMath.toBigDecimal(newRemQtyScaled);
+        this.averageTradePrice = com.emporia.events.math.FixedPointMath.toBigDecimal(newAvgPriceScaled);
+
+        if (newRemQtyScaled == 0L) {
             status = OrderStatus.FILLED;
             targetStatus = OrderStatus.FILLED;
         } else if (status != OrderStatus.CANCELLED) {
@@ -121,6 +139,13 @@ public class TradingOrder {
         }
         updatedAt = DomainClock.now();
         validateInvariants();
+    }
+
+    public synchronized void applyFill(BigDecimal fillQuantity, BigDecimal fillPrice) {
+        require(fillQuantity != null && fillQuantity.signum() > 0, "Fill quantity must be greater than zero");
+        require(fillPrice != null && fillPrice.signum() > 0, "Fill price must be greater than zero");
+        applyFill(com.emporia.events.math.FixedPointMath.toScaledLong(fillQuantity),
+                  com.emporia.events.math.FixedPointMath.toScaledLong(fillPrice));
     }
 
     public synchronized void requestCancel() {
@@ -225,27 +250,29 @@ public class TradingOrder {
     }
 
     private void validateQuantity(BigDecimal candidate) {
-        require(candidate != null && candidate.signum() > 0,
-                "Quantity must be greater than zero");
-        BigDecimal increment = listing == null ? null : listing.getSizeIncrement();
-        require(increment != null && increment.signum() > 0,
-                "Listing size increment must be greater than zero");
-        require(candidate.remainder(increment).signum() == 0,
-                "Quantity must align with the listing size increment");
+        validateQuantityScaled(com.emporia.events.math.FixedPointMath.toScaledLong(candidate));
+    }
+
+    private void validateQuantityScaled(long candidateScaled) {
+        require(candidateScaled > 0L, "Quantity must be greater than zero");
+        long incrementScaled = listing == null ? 0L : listing.getSizeIncrementScaled();
+        require(incrementScaled > 0L, "Listing size increment must be greater than zero");
+        require(candidateScaled % incrementScaled == 0L, "Quantity must align with the listing size increment");
     }
 
     private void validatePrice(BigDecimal candidate) {
-        BigDecimal tickSize = listing == null ? null : listing.getTickSize();
-        require(tickSize != null && tickSize.signum() > 0,
-                "Listing tick size must be greater than zero");
+        validatePriceScaled(candidate == null ? null : com.emporia.events.math.FixedPointMath.toScaledLong(candidate));
+    }
+
+    private void validatePriceScaled(Long candidateScaled) {
+        long tickSizeScaled = listing == null ? 0L : listing.getTickSizeScaled();
+        require(tickSizeScaled > 0L, "Listing tick size must be greater than zero");
         if (type == OrderType.MARKET) {
-            require(candidate == null, "Market orders cannot have a limit price");
+            require(candidateScaled == null || candidateScaled == 0L, "Market orders cannot have a limit price");
             return;
         }
-        require(candidate != null && candidate.signum() > 0,
-                "Limit orders require a positive limit price");
-        require(candidate.remainder(tickSize).signum() == 0,
-                "Limit price must align with the listing tick size");
+        require(candidateScaled != null && candidateScaled > 0L, "Limit orders require a positive limit price");
+        require(candidateScaled % tickSizeScaled == 0L, "Limit price must align with the listing tick size");
     }
 
     private static void require(boolean condition, String message) {

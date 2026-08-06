@@ -171,6 +171,17 @@ class GatewayRouteIntegrationTest {
     }
 
     @Test
+    void appliesInstitutionalTierRateLimitingWithHigherBurstCapacity() throws Exception {
+        String token = accessToken("institutional-trader", Map.of("tier", "institutional"));
+
+        HttpResponse<String> first = send("/api/orders/cancel-all", null, token, "POST");
+        HttpResponse<String> second = send("/api/orders/cancel-all", null, token, "POST");
+
+        assertThat(first.statusCode()).isEqualTo(200);
+        assertThat(second.statusCode()).isEqualTo(200);
+    }
+
+    @Test
     void opensCircuitBreakerAfterRepeatedOrderUpstreamFailures() throws Exception {
         ORDER_FAILURE_CALLS.set(0);
         HttpResponse<String> first = send("/api/orders/fail-circuit", null, accessToken("circuit-breaker-user-1"), "POST");

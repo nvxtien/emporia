@@ -63,6 +63,7 @@ public class SecurityConfig {
                     .claim("preferred_username", account.getUsername())
                     .claim("desk", account.getDesk())
                     .claim("can_trade", account.canTrade())
+                    .claim("tier", account.getTier().name().toLowerCase(java.util.Locale.ROOT))
                     .claim("authorities", account.getAuthorities().stream().map(Enum::name).sorted().toList()));
         };
     }

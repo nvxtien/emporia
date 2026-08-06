@@ -16,7 +16,7 @@ done
 
 echo "==> Exchange Core Single-Writer RingBuffer Micro-Benchmark"
 echo "    Engine: LMAX Disruptor 64K RingBuffer"
-echo "    Arithmetic: Fixed-Point Primitive long ($10^6$ scale)"
+echo "    Arithmetic: Fixed-Point Primitive long (10^6 scale)"
 echo "    Clock: Monotonic System.nanoTime() (Sub-10ns zero syscall)"
 echo "    JIT Warmup: 2,048 startup iterations"
 echo

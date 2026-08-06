@@ -32,10 +32,29 @@ public class ListingDetails {
         this.marketSymbol = listing.marketSymbol(); this.exchangeMic = listing.exchangeMic(); this.exchangeName = listing.exchangeName();
         this.countryCode = listing.countryCode(); this.currency = listing.currency(); this.tickSize = listing.tickSize();
         this.sizeIncrement = listing.sizeIncrement(); this.referencePrice = listing.referencePrice(); this.previousClose = listing.previousClose();
+        this.tickSizeScaled = listing.tickSizeScaled();
+        this.sizeIncrementScaled = listing.sizeIncrementScaled();
+    }
+
+    private transient long tickSizeScaled;
+    private transient long sizeIncrementScaled;
+
+    public long getTickSizeScaled() {
+        if (tickSizeScaled == 0L && tickSize != null) {
+            tickSizeScaled = com.emporia.events.math.FixedPointMath.toScaledLong(tickSize);
+        }
+        return tickSizeScaled;
+    }
+
+    public long getSizeIncrementScaled() {
+        if (sizeIncrementScaled == 0L && sizeIncrement != null) {
+            sizeIncrementScaled = com.emporia.events.math.FixedPointMath.toScaledLong(sizeIncrement);
+        }
+        return sizeIncrementScaled;
     }
 
     ListingSnapshot snapshot() {
         return new ListingSnapshot(id, version, symbol, name, marketSymbol, exchangeMic, exchangeName, countryCode,
-                currency, tickSize, sizeIncrement, referencePrice, previousClose);
+                currency, tickSize, sizeIncrement, referencePrice, previousClose, getTickSizeScaled(), getSizeIncrementScaled());
     }
 }

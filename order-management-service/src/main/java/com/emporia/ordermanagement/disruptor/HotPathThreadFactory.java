@@ -22,16 +22,22 @@ final class HotPathThreadFactory implements ThreadFactory {
 
     @Override
     public Thread newThread(Runnable runnable) {
-        Thread thread = new Thread(runnable, threadNamePrefix + '-' + index.incrementAndGet());
+        Thread thread = new Thread(() -> {
+            logPlacementHints();
+            runnable.run();
+        }, threadNamePrefix + '-' + index.incrementAndGet());
         thread.setDaemon(true);
+        thread.setPriority(Thread.MAX_PRIORITY);
         return thread;
     }
 
     void logPlacementHints() {
         if (cpuSetHint.isBlank() && numaNodeHint.isBlank()) {
-            log.info("OMS hot path thread started without CPU/NUMA placement hints; use deployment-level pinning for isolation");
+            log.info("OMS hot path thread '{}' started without CPU/NUMA placement hints; use launch-trading-core.sh (taskset/numactl) for bare-metal isolation",
+                    Thread.currentThread().getName());
             return;
         }
-        log.info("OMS hot path thread placement hints: cpu-set='{}' numa-node='{}'", cpuSetHint, numaNodeHint);
+        log.info("OMS hot path thread '{}' active placement hints: cpu-set='{}' numa-node='{}'",
+                Thread.currentThread().getName(), cpuSetHint, numaNodeHint);
     }
 }

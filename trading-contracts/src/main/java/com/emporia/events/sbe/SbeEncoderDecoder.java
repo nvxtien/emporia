@@ -167,8 +167,8 @@ public final class SbeEncoderDecoder {
         putUuid(buf, command.orderId());
         buf.put((byte) (command.commandType() == null ? 0 : command.commandType().ordinal()));
         buf.putLong(absentOrEpochMillis(command.occurredAt()));
-        buf.putLong(command.quantity() == null ? 0L : FixedPointMath.toScaledLong(command.quantity()));
-        buf.putLong(command.price() == null ? 0L : FixedPointMath.toScaledLong(command.price()));
+        buf.putLong(command.quantity() == null ? Long.MIN_VALUE : FixedPointMath.toScaledLong(command.quantity()));
+        buf.putLong(command.price() == null ? Long.MIN_VALUE : FixedPointMath.toScaledLong(command.price()));
         putVarString(buf, deskIdBytes);
         putVarString(buf, refBytes);
         putVarString(buf, venueBytes);
@@ -195,8 +195,8 @@ public final class SbeEncoderDecoder {
         Instant occurredAt = instantOrAbsent(epochMs);
         long qtyScaled = buf.getLong();
         long priceScaled = buf.getLong();
-        BigDecimal quantity = qtyScaled == 0L ? null : FixedPointMath.toBigDecimal(qtyScaled);
-        BigDecimal price = priceScaled == 0L ? null : FixedPointMath.toBigDecimal(priceScaled);
+        BigDecimal quantity = (qtyScaled == Long.MIN_VALUE || qtyScaled == 0L) ? null : FixedPointMath.toBigDecimal(qtyScaled);
+        BigDecimal price = (priceScaled == Long.MIN_VALUE || priceScaled == 0L) ? null : FixedPointMath.toBigDecimal(priceScaled);
         String deskId = getVarString(buf);
         String executionReference = getVarString(buf);
         String venue = getVarString(buf);
@@ -331,8 +331,8 @@ public final class SbeEncoderDecoder {
         buf.put((byte) (command.orderType() == null ? 0xFF : command.orderType().ordinal()));
         buf.putLong(absentOrEpochMillis(command.requestedAt()));
         buf.putLong(command.expectedVersion() == null ? Long.MIN_VALUE : command.expectedVersion());
-        buf.putLong(FixedPointMath.toScaledLong(command.quantity()));
-        buf.putLong(FixedPointMath.toScaledLong(command.limitPrice()));
+        buf.putLong(command.quantity() == null ? Long.MIN_VALUE : FixedPointMath.toScaledLong(command.quantity()));
+        buf.putLong(command.limitPrice() == null ? Long.MIN_VALUE : FixedPointMath.toScaledLong(command.limitPrice()));
         putVarString(buf, userSubjectBytes);
         putVarString(buf, deskIdBytes);
         putVarString(buf, destinationBytes);
@@ -381,7 +381,7 @@ public final class SbeEncoderDecoder {
     }
 
     private static BigDecimal scaled(long value) {
-        return value == 0 ? null : FixedPointMath.toBigDecimal(value);
+        return (value == Long.MIN_VALUE || value == 0L) ? null : FixedPointMath.toBigDecimal(value);
     }
 
     private static String writeParameters(Map<String, Object> parameters) {

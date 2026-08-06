@@ -107,9 +107,13 @@ public class DisruptorOrderPipeline {
             }
         }
 
-        WaitStrategy waitStrategy = "busyspin".equalsIgnoreCase(waitStrategyName)
-                ? new BusySpinWaitStrategy()
-                : new YieldingWaitStrategy();
+        WaitStrategy waitStrategy = switch (waitStrategyName.toLowerCase()) {
+            case "busyspin" -> new BusySpinWaitStrategy();
+            case "sleeping" -> new com.lmax.disruptor.SleepingWaitStrategy();
+            case "blocking" -> new com.lmax.disruptor.BlockingWaitStrategy();
+            case "lite-blocking" -> new com.lmax.disruptor.LiteBlockingWaitStrategy();
+            default -> new YieldingWaitStrategy();
+        };
         HotPathThreadFactory threadFactory = new HotPathThreadFactory("oms-hotpath", cpuSetHint, numaNodeHint);
 
         this.disruptor = new Disruptor<>(
@@ -184,7 +188,13 @@ public class DisruptorOrderPipeline {
                     "OMS hot path overloaded; command rejected deterministically");
         }
         CompletableFuture<ProcessingOutcome> future = new CompletableFuture<>();
-        long sequence = ringBuffer.next();
+        long sequence;
+        try {
+            sequence = ringBuffer.tryNext();
+        } catch (com.lmax.disruptor.InsufficientCapacityException e) {
+            return rejected(429, "overload",
+                    "OMS hot path overloaded; command rejected deterministically");
+        }
         try {
             OrderRingEvent event = ringBuffer.get(sequence);
             event.reset();
