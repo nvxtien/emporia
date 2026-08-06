@@ -406,7 +406,7 @@ seconds.
 | `EXECUTION_FILL_DELAY` | `100ms` | Simulated fill delay |
 | `FIX_EXECUTION_VENUES` | empty | FIX session definitions by MIC |
 | `EXCHANGE_CORE_EXCHANGE_ID` | `emporia-simulation` | Exchange-core snapshot namespace |
-| `EXCHANGE_CORE_STORAGE_DIRECTORY` | `target/exchange-core-simulation` | Exchange-core snapshots and Emporia latest-checkpoint manifest |
+| `EXCHANGE_CORE_STORAGE_DIRECTORY` | `.local-run/exchange-core-simulation` | Exchange-core snapshots and Emporia latest-checkpoint manifest |
 | `EXCHANGE_CORE_SYMBOL_PARTITIONS` | `2` | Power-of-two exchange-core symbol partitions |
 | `STRATEGY_TIME_COMPRESSION` | `60` | Strategy schedule acceleration |
 | `VWAP_DEFAULT_BUCKETS` | `10` | Default number of VWAP buckets |

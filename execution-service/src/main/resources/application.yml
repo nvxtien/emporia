@@ -77,7 +77,16 @@ emporia:
       max-retries: ${EMPORIA_SOR_MAX_RETRIES:3}
     exchange-core:
       exchange-id: ${EXCHANGE_CORE_EXCHANGE_ID:emporia-simulation}
-      storage-directory: ${EXCHANGE_CORE_STORAGE_DIRECTORY:target/exchange-core-simulation}
+      # Deliberately outside target/. This is live venue state - the order book
+      # and DMA lifecycle the engine recovers from - and target/ belongs to the
+      # build. With the default under target/, any `mvn clean` while the service
+      # was running deleted the directory beneath it, after which every
+      # checkpoint failed silently: orders still returned 201 because they had
+      # genuinely reached the venue, so only the log showed anything wrong. A
+      # push does it too, since the pre-push hook runs `mvn clean verify`.
+      # No "..": Spring's Path converter normalises a traversing path to null
+      # and refuses to bind it.
+      storage-directory: ${EXCHANGE_CORE_STORAGE_DIRECTORY:.local-run/exchange-core-simulation}
       symbol-partitions: ${EXCHANGE_CORE_SYMBOL_PARTITIONS:2}
       # Set to full-equity-risk to enable balance tracking and portfolio snapshots.
       # Requires EXCHANGE_CORE_PORTFOLIO_URL to point at the running portfolio-service.
