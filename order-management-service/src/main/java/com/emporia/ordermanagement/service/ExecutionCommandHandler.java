@@ -3,12 +3,15 @@ package com.emporia.ordermanagement.service;
 import com.emporia.events.TradingEvents.ExecutionCommand;
 import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderStatus;
+import com.emporia.events.KafkaRoutingKeys;
 import com.emporia.ordermanagement.model.Execution;
 import com.emporia.ordermanagement.model.OrderEvent;
+import com.emporia.ordermanagement.model.OrderOutboxRecord;
 import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.ExecutionRepository;
 import com.emporia.ordermanagement.repository.OrderEventRepository;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
@@ -34,10 +37,12 @@ class ExecutionCommandHandler {
     private final OrderMetrics metrics;
     private final OrderStateCache cache;
     private final AsyncDbWriter asyncDbWriter;
+    private final String ordersTopic;
 
     ExecutionCommandHandler(TradingOrderRepository orders, ExecutionRepository executions,
                             OrderEventRepository events, ObjectMapper objectMapper, OrderMetrics metrics,
-                            OrderStateCache cache, AsyncDbWriter asyncDbWriter) {
+                            OrderStateCache cache, AsyncDbWriter asyncDbWriter,
+                            @Value("${emporia.kafka.orders-topic:emporia.orders.v1}") String ordersTopic) {
         this.orders = orders;
         this.executions = executions;
         this.events = events;
@@ -45,6 +50,7 @@ class ExecutionCommandHandler {
         this.metrics = metrics;
         this.cache = cache;
         this.asyncDbWriter = asyncDbWriter;
+        this.ordersTopic = ordersTopic;
     }
 
     /**
@@ -71,7 +77,22 @@ class ExecutionCommandHandler {
             case CANCEL -> confirmCancel(order, command, result);
             default -> throw new IllegalArgumentException("Unsupported execution command");
         }
-        return List.copyOf(result);
+        List<OrderDomainEvent> events = List.copyOf(result);
+        enqueueOutbox(events);
+        return events;
+    }
+
+    /**
+     * Same durability boundary as OrderCommandHandler.enqueueOutbox, for the
+     * fill/reject/cancel side: a rollup can touch several ancestors in one
+     * call, and every one of them needs to survive a crash between here and
+     * the outbox flush, not just the order the venue update was about.
+     */
+    private void enqueueOutbox(List<OrderDomainEvent> events) {
+        for (OrderDomainEvent event : events) {
+            asyncDbWriter.enqueue(new OrderOutboxRecord(ordersTopic, KafkaRoutingKeys.orderEvent(event),
+                    OrderOutboxRecord.PayloadType.ORDER_EVENT, json(event)));
+        }
     }
 
     private void applyFill(TradingOrder order, ExecutionCommand command, List<OrderDomainEvent> result) {

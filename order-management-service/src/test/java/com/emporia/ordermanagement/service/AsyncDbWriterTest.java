@@ -5,9 +5,11 @@ import com.emporia.events.TradingEvents.OrderCommandResult;
 import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.ordermanagement.model.OrderEvent;
+import com.emporia.ordermanagement.model.OrderOutboxRecord;
 import com.emporia.ordermanagement.model.ProcessedCommand;
 import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.OrderEventRepository;
+import com.emporia.ordermanagement.repository.OrderOutboxRepository;
 import com.emporia.ordermanagement.repository.ProcessedCommandRepository;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,12 +22,15 @@ import java.util.UUID;
 import static com.emporia.events.TradingEvents.SCHEMA_VERSION;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 class AsyncDbWriterTest {
     private final TradingOrderRepository orders = mock(TradingOrderRepository.class);
     private final OrderEventRepository events = mock(OrderEventRepository.class);
     private final ProcessedCommandRepository processed = mock(ProcessedCommandRepository.class);
+    private final OrderOutboxRepository outbox = mock(OrderOutboxRepository.class);
     private AsyncDbWriter writer;
 
     @BeforeEach
@@ -54,5 +59,35 @@ class AsyncDbWriterTest {
         verify(orders).saveAll(anyList());
         verify(events).saveAll(anyList());
         verify(processed).saveAll(anyList());
+    }
+
+    @Test
+    void enqueuesAndFlushesOutboxRecordsInBatch() {
+        AsyncDbWriter writerWithOutbox = new AsyncDbWriter(orders, events, processed, null, outbox, null, null, null);
+        writerWithOutbox.enqueue(new OrderOutboxRecord("orders-topic", "order-1",
+                OrderOutboxRecord.PayloadType.ORDER_EVENT, "{}"));
+
+        writerWithOutbox.flush();
+
+        verify(outbox).saveAll(anyList());
+    }
+
+    @Test
+    void reclaimWaitsUntilTheOutboxQueueDrainsTooBeforeCompactingTheLog() {
+        MemoryMappedWalLogger wal = mock(MemoryMappedWalLogger.class);
+        org.mockito.Mockito.when(wal.isEnabled()).thenReturn(true);
+        AsyncDbWriter writerWithWal = new AsyncDbWriter(orders, events, processed, null, outbox, null, wal, null);
+        // One more than a single flush batch, so one outbox record is still
+        // queued when reclaimWriteAheadLog runs its emptiness check.
+        for (int i = 0; i < 501; i++) {
+            writerWithWal.enqueue(new OrderOutboxRecord("orders-topic", "order-" + i,
+                    OrderOutboxRecord.PayloadType.ORDER_EVENT, "{}"));
+        }
+
+        writerWithWal.flush();
+        verify(wal, never()).compactToSafePoint();
+
+        writerWithWal.flush();
+        verify(wal, times(1)).compactToSafePoint();
     }
 }

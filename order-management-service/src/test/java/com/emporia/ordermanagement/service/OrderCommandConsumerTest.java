@@ -4,15 +4,10 @@ import com.emporia.events.TradingEvents.CommandType;
 import com.emporia.events.TradingEvents.ListingSnapshot;
 import com.emporia.events.TradingEvents.OrderCommand;
 import com.emporia.events.TradingEvents.OrderCommandResult;
-import com.emporia.events.TradingEvents.OrderDomainEvent;
-import com.emporia.events.TradingEvents.OrderSide;
-import com.emporia.events.TradingEvents.OrderStatus;
-import com.emporia.events.TradingEvents.OrderType;
+import com.emporia.ordermanagement.disruptor.DisruptorOrderPipeline;
 import com.emporia.ordermanagement.dto.ProcessingOutcome;
 import com.emporia.ordermanagement.model.OrderInputEvent;
-import com.emporia.ordermanagement.repository.OrderInputEventRepository;
 import org.junit.jupiter.api.Test;
-import org.springframework.kafka.core.KafkaTemplate;
 import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
@@ -25,7 +20,6 @@ import java.util.concurrent.CompletableFuture;
 import static com.emporia.events.TradingEvents.SCHEMA_VERSION;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -33,39 +27,28 @@ import static org.mockito.Mockito.when;
 class OrderCommandConsumerTest {
 
     @Test
-    void consumeProcessesCommandAndPublishesEventsAndResultToKafka() throws Exception {
-        OrderCommandHandler handler = mock(OrderCommandHandler.class);
+    void consumeLogsTheCommandThenHandsItToTheDisruptorPipeline() throws Exception {
+        DisruptorOrderPipeline disruptorPipeline = mock(DisruptorOrderPipeline.class);
         AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
-        @SuppressWarnings("unchecked")
-        KafkaTemplate<String, Object> kafka = mock(KafkaTemplate.class);
-        OrderCommandConsumer consumer = new OrderCommandConsumer(handler, asyncDbWriter, kafka, new ObjectMapper(), "results-topic", "orders-topic");
+        OrderCommandConsumer consumer = new OrderCommandConsumer(disruptorPipeline, asyncDbWriter, new ObjectMapper());
 
         UUID commandId = UUID.randomUUID();
         UUID orderId = UUID.randomUUID();
         OrderCommand command = new OrderCommand(
                 SCHEMA_VERSION, commandId, CommandType.CREATE,
                 "trader", Instant.now(), orderId, null, listing(),
-                OrderSide.BUY, OrderType.LIMIT,
+                com.emporia.events.TradingEvents.OrderSide.BUY, com.emporia.events.TradingEvents.OrderType.LIMIT,
                 new BigDecimal("10"), new BigDecimal("100"), "DMA", "ref", null, Map.of()
         );
 
-        OrderDomainEvent event = new OrderDomainEvent(
-                SCHEMA_VERSION, UUID.randomUUID(), commandId, orderId,
-                "trader", "trader", "CREATED", 1L, OrderStatus.LIVE, Instant.now(), "{}"
-        );
-        OrderCommandResult result = new OrderCommandResult(
-                SCHEMA_VERSION, commandId, true, 201, null, "{}"
-        );
-        ProcessingOutcome outcome = new ProcessingOutcome(result, List.of(event));
-
-        when(handler.handle(command)).thenReturn(outcome);
-        when(kafka.send(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(null));
+        OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, commandId, true, 201, null, "{}");
+        ProcessingOutcome outcome = new ProcessingOutcome(result, List.of());
+        when(disruptorPipeline.submit(command)).thenReturn(CompletableFuture.completedFuture(outcome));
 
         assertThatCode(() -> consumer.consume(command)).doesNotThrowAnyException();
 
         verify(asyncDbWriter).enqueue(any(OrderInputEvent.class));
-        verify(kafka).send(eq("orders-topic"), eq(orderId.toString()), eq(event));
-        verify(kafka).send(eq("results-topic"), eq(commandId.toString()), eq(result));
+        verify(disruptorPipeline).submit(command);
     }
 
     private static ListingSnapshot listing() {

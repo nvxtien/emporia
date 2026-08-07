@@ -4,11 +4,9 @@ import com.emporia.events.TradingEvents.CommandType;
 import com.emporia.events.TradingEvents.CancelAllView;
 import com.emporia.events.TradingEvents.ListingSnapshot;
 import com.emporia.events.TradingEvents.OrderCommand;
-import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.events.TradingEvents.OrderView;
-import com.emporia.events.KafkaRoutingKeys;
 import com.emporia.events.time.DomainClock;
 import com.emporia.ordermanagement.disruptor.HotPathRejectedException;
 import com.emporia.ordermanagement.client.StaticDataClient;
@@ -20,10 +18,8 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -66,27 +62,18 @@ public class OrderCommandController {
 
     private final StaticDataClient staticData;
     private final com.emporia.ordermanagement.disruptor.DisruptorOrderPipeline disruptorPipeline;
-    private final KafkaTemplate<String, Object> kafka;
     private final ObjectMapper objectMapper;
     private final ObservationRegistry observations;
-    private final String ordersTopic;
-    private final String resultsTopic;
 
     public OrderCommandController(StaticDataClient staticData,
                                   OrderCommandHandler handler,
                                   com.emporia.ordermanagement.disruptor.DisruptorOrderPipeline disruptorPipeline,
-                                  KafkaTemplate<String, Object> kafka,
                                   ObjectMapper objectMapper,
-                                  ObservationRegistry observations,
-                                  @Value("${emporia.kafka.orders-topic:emporia.orders.v1}") String ordersTopic,
-                                  @Value("${emporia.kafka.results-topic:emporia.order.results.v1}") String resultsTopic) {
+                                  ObservationRegistry observations) {
         this.staticData = staticData;
         this.disruptorPipeline = disruptorPipeline;
-        this.kafka = kafka;
         this.objectMapper = objectMapper;
         this.observations = observations;
-        this.ordersTopic = ordersTopic;
-        this.resultsTopic = resultsTopic;
     }
 
     private final java.util.concurrent.ConcurrentHashMap<Class<?>, tools.jackson.databind.ObjectReader> jsonReaders = new java.util.concurrent.ConcurrentHashMap<>();
@@ -113,7 +100,6 @@ public class OrderCommandController {
                     request.parentOrderId(), request.executionParameters() == null ? Map.of() : request.executionParameters());
 
             ProcessingOutcome outcome = await(command);
-            publishAsync(outcome, command);
             return read(outcome.result().payload(), OrderView.class);
         } catch (RuntimeException exception) {
             error = exception;
@@ -137,7 +123,6 @@ public class OrderCommandController {
                     request.quantity(), request.limitPrice(), null, null, null, Map.of());
 
             ProcessingOutcome outcome = await(command);
-            publishAsync(outcome, command);
             return read(outcome.result().payload(), OrderView.class);
         } catch (RuntimeException exception) {
             error = exception;
@@ -160,7 +145,6 @@ public class OrderCommandController {
                     null, null, null, null, null, Map.of());
 
             ProcessingOutcome outcome = await(command);
-            publishAsync(outcome, command);
             return read(outcome.result().payload(), OrderView.class);
         } catch (RuntimeException exception) {
             error = exception;
@@ -183,7 +167,6 @@ public class OrderCommandController {
                     null, null, null, null, null, Map.of());
 
             ProcessingOutcome outcome = await(command);
-            publishAsync(outcome, command);
             return read(outcome.result().payload(), CancelAllView.class);
         } catch (RuntimeException exception) {
             error = exception;
@@ -203,20 +186,6 @@ public class OrderCommandController {
             }
             throw exception;
         }
-    }
-
-    /**
-     * Non-blocking asynchronous event publishing to Kafka for downstream consumers
-     * (execution-service routing, audit logging, portfolio replicas).
-     */
-    private void publishAsync(ProcessingOutcome outcome, OrderCommand command) {
-        if (!outcome.result().success()) {
-            return;
-        }
-        for (OrderDomainEvent event : outcome.events()) {
-                kafka.send(ordersTopic, KafkaRoutingKeys.orderEvent(event), event);
-        }
-            kafka.send(resultsTopic, KafkaRoutingKeys.orderResult(command), outcome.result());
     }
 
     private UUID commandId(String idempotencyKey, Jwt jwt) {

@@ -9,6 +9,7 @@ import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.ordermanagement.dto.ProcessingOutcome;
 import com.emporia.ordermanagement.model.OrderEvent;
+import com.emporia.ordermanagement.model.OrderOutboxRecord;
 import com.emporia.ordermanagement.model.ProcessedCommand;
 import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.OrderEventRepository;
@@ -35,6 +36,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -52,7 +54,8 @@ class OrderCommandHandlerTest {
     private final OrderStateCache cache = new OrderStateCache(orders, processed, 1000, 1000);
     private final AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
     private final OrderCommandHandler handler =
-            new OrderCommandHandler(orders, events, processed, new ObjectMapper(), observations, metrics, cache, asyncDbWriter);
+            new OrderCommandHandler(orders, events, processed, new ObjectMapper(), observations, metrics, cache, asyncDbWriter,
+                    "orders-topic", "results-topic");
 
     /**
      * Wiring a meter handler turns observations into timers, so they can be
@@ -95,6 +98,8 @@ class OrderCommandHandlerTest {
         assertThat(outcome.events()).hasSize(1);
         assertThat(outcome.events().getFirst().eventType()).isEqualTo("CREATED");
         verify(asyncDbWriter).enqueue(any(ProcessedCommand.class));
+        // One outbox row for the CREATED event, one for the result.
+        verify(asyncDbWriter, times(2)).enqueue(any(OrderOutboxRecord.class));
     }
 
     @Test
@@ -157,6 +162,7 @@ class OrderCommandHandlerTest {
         assertThat(outcome.result().success()).isFalse();
         assertThat(outcome.result().status()).isEqualTo(400);
         verify(orders, never()).save(any());
+        verify(asyncDbWriter, never()).enqueue(any(OrderOutboxRecord.class));
     }
 
     @Test
@@ -291,6 +297,7 @@ class OrderCommandHandlerTest {
         assertThat(outcome.result().success()).isTrue();
         assertThat(outcome.result().status()).isEqualTo(200);
         assertThat(outcome.events().getFirst().eventType()).isEqualTo("MODIFIED");
+        verify(asyncDbWriter, times(2)).enqueue(any(OrderOutboxRecord.class));
     }
 
     @Test
@@ -379,6 +386,7 @@ class OrderCommandHandlerTest {
         assertThat(outcome.events()).hasSize(1);
         assertThat(outcome.events().getFirst().eventType()).isEqualTo("CANCEL_REQUESTED");
         assertThat(order.getTargetStatus()).isEqualTo(OrderStatus.CANCELLED);
+        verify(asyncDbWriter, times(2)).enqueue(any(OrderOutboxRecord.class));
     }
 
     @Test
@@ -432,6 +440,8 @@ class OrderCommandHandlerTest {
         assertThat(outcome.events()).hasSize(2);
         assertThat(first.getTargetStatus()).isEqualTo(OrderStatus.CANCELLED);
         assertThat(second.getTargetStatus()).isEqualTo(OrderStatus.CANCELLED);
+        // Two child CANCEL_REQUESTED events, plus one for the result.
+        verify(asyncDbWriter, times(3)).enqueue(any(OrderOutboxRecord.class));
     }
 
     @Test
@@ -504,6 +514,7 @@ class OrderCommandHandlerTest {
 
         assertThat(replayed.result()).isEqualTo(first.result());
         verify(orders, never()).existsById(any());
+        verify(asyncDbWriter, never()).enqueue(any(OrderOutboxRecord.class));
     }
 
     // -------------------------------------------------------------------------

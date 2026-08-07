@@ -758,7 +758,8 @@ class TradingOrderPropertyTest {
             }).when(asyncDbWriter).enqueue(org.mockito.Mockito.any(ProcessedCommand.class));
 
             handler = new OrderCommandHandler(orders, events, processed, new ObjectMapper(),
-                    io.micrometer.observation.ObservationRegistry.NOOP, metrics, cache, asyncDbWriter);
+                    io.micrometer.observation.ObservationRegistry.NOOP, metrics, cache, asyncDbWriter,
+                    "orders-topic", "results-topic");
         }
 
         private static <T> T repository(Class<T> repositoryType, RepositoryMethod method) {

@@ -8,6 +8,7 @@ import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.ordermanagement.model.Execution;
 import com.emporia.ordermanagement.model.OrderEvent;
+import com.emporia.ordermanagement.model.OrderOutboxRecord;
 import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.ExecutionRepository;
 import com.emporia.ordermanagement.repository.OrderEventRepository;
@@ -31,6 +32,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -43,7 +45,8 @@ class ExecutionCommandHandlerTest {
     private final OrderStateCache cache = new OrderStateCache(orders, processed, 1000, 1000);
     private final AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
     private final ExecutionCommandHandler handler =
-            new ExecutionCommandHandler(orders, executions, events, new ObjectMapper(), metrics, cache, asyncDbWriter);
+            new ExecutionCommandHandler(orders, executions, events, new ObjectMapper(), metrics, cache, asyncDbWriter,
+                    "orders-topic");
 
     @Test
     void recordsAPartialFillAndPublishesTheNewOrderState() {
@@ -69,6 +72,7 @@ class ExecutionCommandHandlerTest {
         assertThat(persisted.getValue().getExecutionReference()).isEqualTo("venue-fill-1");
         assertThat(persisted.getValue().getVenue()).isEqualTo("XNAS");
         verify(asyncDbWriter).enqueue(order);
+        verify(asyncDbWriter, times(1)).enqueue(any(OrderOutboxRecord.class));
     }
 
     @Test
@@ -86,6 +90,7 @@ class ExecutionCommandHandlerTest {
         assertThat(order.getErrorMessage()).isEqualTo("Venue is closed");
         assertThat(event.eventType()).isEqualTo("REJECTED");
         verify(executions, never()).save(any());
+        verify(asyncDbWriter, times(1)).enqueue(any(OrderOutboxRecord.class));
     }
 
     @Test
@@ -112,6 +117,8 @@ class ExecutionCommandHandlerTest {
         assertThat(order.getStatus()).isEqualTo(OrderStatus.CANCELLED);
         assertThat(order.getTradedQuantity()).isEqualByComparingTo("1");
         verify(asyncDbWriter).enqueue(order);
+        // The duplicate reference produced no event and no outbox row; only the late fill did.
+        verify(asyncDbWriter, times(1)).enqueue(any(OrderOutboxRecord.class));
     }
 
     @Test
@@ -149,6 +156,7 @@ class ExecutionCommandHandlerTest {
         verify(executions, org.mockito.Mockito.times(2)).save(persisted.capture());
         assertThat(persisted.getAllValues()).extracting(Execution::getOrder)
                 .containsExactly(child, parent);
+        verify(asyncDbWriter, times(2)).enqueue(any(OrderOutboxRecord.class));
     }
 
     @Test
@@ -171,6 +179,8 @@ class ExecutionCommandHandlerTest {
         assertThat(order.getStatus()).isEqualTo(OrderStatus.CANCELLED);
         assertThat(order.getTradedQuantity()).isEqualByComparingTo("4");
         assertThat(order.getRemainingQuantity()).isEqualByComparingTo("6");
+        // One outbox row for the partial fill, one for the cancel confirmation.
+        verify(asyncDbWriter, times(2)).enqueue(any(OrderOutboxRecord.class));
     }
 
     @Test
@@ -204,6 +214,8 @@ class ExecutionCommandHandlerTest {
         // CANCEL on terminal order returns empty
         var cancelResult = handler.handle(command(order, ExecutionCommandType.CANCEL, "cnl-term", null, null, "venue cancel"));
         assertThat(cancelResult).isEmpty();
+
+        verify(asyncDbWriter, never()).enqueue(any(OrderOutboxRecord.class));
     }
 
     @Test
@@ -224,6 +236,7 @@ class ExecutionCommandHandlerTest {
         var result = handler.handle(command(parent, ExecutionCommandType.CANCEL, "strategy-cancel-1", null, null, null));
         assertThat(result).isEmpty();
         assertThat(parent.getStatus()).isEqualTo(OrderStatus.LIVE);
+        verify(asyncDbWriter, never()).enqueue(any(OrderOutboxRecord.class));
     }
 
     private static TradingOrder order() {
