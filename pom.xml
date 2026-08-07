@@ -29,7 +29,19 @@
           version for this artifact; repo1 maven-metadata.xml is authoritative.
         -->
         <datasource-micrometer.version>2.2.1</datasource-micrometer.version>
+        <jqwik.version>1.10.1</jqwik.version>
     </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>net.jqwik</groupId>
+                <artifactId>jqwik</artifactId>
+                <version>${jqwik.version}</version>
+                <scope>test</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <modules>
         <module>trading-contracts</module>
