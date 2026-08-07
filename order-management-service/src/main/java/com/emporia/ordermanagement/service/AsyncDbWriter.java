@@ -1,6 +1,7 @@
 package com.emporia.ordermanagement.service;
 
 import com.emporia.ordermanagement.model.OrderEvent;
+import com.emporia.ordermanagement.model.OrderOutboxRecord;
 import com.emporia.ordermanagement.model.ProcessedCommand;
 import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.OrderEventRepository;
@@ -33,6 +34,7 @@ public class AsyncDbWriter {
     private final OrderEventRepository events;
     private final ProcessedCommandRepository processed;
     private final com.emporia.ordermanagement.repository.OrderInputEventRepository inputEvents;
+    private final com.emporia.ordermanagement.repository.OrderOutboxRepository outbox;
     private final JdbcTemplate jdbcTemplate;
     /** Rewound once its records are persisted; null when running without a log. */
     private final MemoryMappedWalLogger wal;
@@ -41,17 +43,19 @@ public class AsyncDbWriter {
     private final ConcurrentLinkedQueue<OrderEvent> eventQueue = new ConcurrentLinkedQueue<>();
     private final ConcurrentLinkedQueue<ProcessedCommand> processedQueue = new ConcurrentLinkedQueue<>();
     private final ConcurrentLinkedQueue<com.emporia.ordermanagement.model.OrderInputEvent> inputEventQueue = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<OrderOutboxRecord> outboxQueue = new ConcurrentLinkedQueue<>();
 
     // Pre-allocated reusable batch buffers per thread / flush iteration
     private final TradingOrder[] orderBatchBuffer = new TradingOrder[BATCH_SIZE];
     private final OrderEvent[] eventBatchBuffer = new OrderEvent[BATCH_SIZE];
     private final ProcessedCommand[] processedBatchBuffer = new ProcessedCommand[BATCH_SIZE];
     private final com.emporia.ordermanagement.model.OrderInputEvent[] inputEventBatchBuffer = new com.emporia.ordermanagement.model.OrderInputEvent[BATCH_SIZE];
+    private final OrderOutboxRecord[] outboxBatchBuffer = new OrderOutboxRecord[BATCH_SIZE];
 
     private final org.springframework.transaction.support.TransactionTemplate transactionTemplate;
 
     public AsyncDbWriter(TradingOrderRepository orders, OrderEventRepository events, ProcessedCommandRepository processed) {
-        this(orders, events, processed, null, null, null, null);
+        this(orders, events, processed, null, null, null, null, null);
     }
 
     // Marks the constructor Spring injects through. Without it there are two
@@ -64,6 +68,7 @@ public class AsyncDbWriter {
     public AsyncDbWriter(TradingOrderRepository orders, OrderEventRepository events,
                          ProcessedCommandRepository processed,
                          com.emporia.ordermanagement.repository.OrderInputEventRepository inputEvents,
+                         com.emporia.ordermanagement.repository.OrderOutboxRepository outbox,
                          JdbcTemplate jdbcTemplate,
                          MemoryMappedWalLogger wal,
                          org.springframework.transaction.support.TransactionTemplate transactionTemplate) {
@@ -71,6 +76,7 @@ public class AsyncDbWriter {
         this.events = events;
         this.processed = processed;
         this.inputEvents = inputEvents;
+        this.outbox = outbox;
         this.jdbcTemplate = jdbcTemplate;
         this.wal = wal;
         this.transactionTemplate = transactionTemplate;
@@ -92,6 +98,10 @@ public class AsyncDbWriter {
         if (inputEvent != null) inputEventQueue.add(inputEvent);
     }
 
+    public void enqueue(OrderOutboxRecord outboxRecord) {
+        if (outboxRecord != null) outboxQueue.add(outboxRecord);
+    }
+
     // Configurable so scripts/perf/wal-recovery-check.sh can widen it well
     // beyond HTTP round-trip time, guaranteeing a burst lands mid-window rather
     // than racing a 10ms flush that a single curl process cannot beat.
@@ -109,6 +119,7 @@ public class AsyncDbWriter {
         flushEvents();
         flushProcessed();
         flushInputEvents();
+        flushOutbox();
 
         reclaimWriteAheadLog();
     }
@@ -125,7 +136,8 @@ public class AsyncDbWriter {
     private void reclaimWriteAheadLog() {
         if (wal == null || !wal.isEnabled()) return;
         if (!orderQueue.isEmpty() || !eventQueue.isEmpty()
-                || !processedQueue.isEmpty() || !inputEventQueue.isEmpty()) {
+                || !processedQueue.isEmpty() || !inputEventQueue.isEmpty()
+                || !outboxQueue.isEmpty()) {
             return;
         }
         wal.compactToSafePoint();
@@ -330,6 +342,41 @@ public class AsyncDbWriter {
             ps.setInt(5, i.getSchemaVersion());
             ps.setString(6, i.getPayload());
             ps.setTimestamp(7, i.getReceivedAt() == null ? null : Timestamp.from(i.getReceivedAt()));
+        });
+    }
+
+    private void flushOutbox() {
+        if (outboxQueue.isEmpty()) return;
+        int count = 0;
+        while (count < BATCH_SIZE) {
+            OrderOutboxRecord record = outboxQueue.poll();
+            if (record == null) break;
+            outboxBatchBuffer[count] = record;
+            count++;
+        }
+        if (count > 0) {
+            List<OrderOutboxRecord> batch = Arrays.asList(outboxBatchBuffer).subList(0, count);
+            if (jdbcTemplate != null) {
+                flushOutboxJdbc(batch);
+            } else if (outbox != null) {
+                outbox.saveAll(batch);
+            }
+            Arrays.fill(outboxBatchBuffer, 0, count, null);
+        }
+    }
+
+    private void flushOutboxJdbc(List<OrderOutboxRecord> batch) {
+        String sql = """
+            INSERT INTO emporia_order_data.order_outbox (
+                topic, routing_key, payload_type, payload, status, attempt_count, created_at
+            ) VALUES (?, ?, ?, ?, 'PENDING', 0, ?)
+            """;
+        jdbcTemplate.batchUpdate(sql, batch, batch.size(), (PreparedStatement ps, OrderOutboxRecord r) -> {
+            ps.setString(1, r.getTopic());
+            ps.setString(2, r.getRoutingKey());
+            ps.setString(3, r.getPayloadType() == null ? null : r.getPayloadType().name());
+            ps.setString(4, r.getPayload());
+            ps.setTimestamp(5, r.getCreatedAt() == null ? null : Timestamp.from(r.getCreatedAt()));
         });
     }
 }

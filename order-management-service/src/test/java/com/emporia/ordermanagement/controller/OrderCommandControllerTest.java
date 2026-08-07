@@ -21,7 +21,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import com.emporia.ordermanagement.service.MemoryMappedWalLogger;
 import org.mockito.ArgumentCaptor;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.server.ResponseStatusException;
 import tools.jackson.databind.ObjectMapper;
@@ -31,13 +30,11 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
 
 import static com.emporia.events.TradingEvents.SCHEMA_VERSION;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -45,8 +42,6 @@ import static org.mockito.Mockito.when;
 class OrderCommandControllerTest {
     private final StaticDataClient staticData = mock(StaticDataClient.class);
     private final OrderCommandHandler handler = mock(OrderCommandHandler.class);
-    @SuppressWarnings("unchecked")
-    private final KafkaTemplate<String, Object> kafka = mock(KafkaTemplate.class);
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final MeterRegistry meters = new SimpleMeterRegistry();
     private final ObservationRegistry observations = ObservationRegistry.create();
@@ -57,10 +52,9 @@ class OrderCommandControllerTest {
     void setUp() {
         observations.observationConfig()
                 .observationHandler(new DefaultMeterObservationHandler(meters));
-        when(kafka.send(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(null));
         disruptorPipeline = new DisruptorOrderPipeline(handler, meters, new MemoryMappedWalLogger(null, 1), null, "yielding", 0, 0, "", "");
         disruptorPipeline.start();
-        controller = new OrderCommandController(staticData, handler, disruptorPipeline, kafka, objectMapper, observations, "orders-topic", "results-topic");
+        controller = new OrderCommandController(staticData, handler, disruptorPipeline, objectMapper, observations);
     }
 
     @org.junit.jupiter.api.AfterEach
@@ -71,7 +65,7 @@ class OrderCommandControllerTest {
     }
 
     @Test
-    void createOrderExecutesInProcessAndPublishesAsyncEvents() throws Exception {
+    void createOrderExecutesInProcess() throws Exception {
         Jwt jwt = jwt("trader-1", true, "DESK-A");
         ListingSnapshot listing = listing();
         when(staticData.get(1L, "Bearer token")).thenReturn(listing);
@@ -97,10 +91,6 @@ class OrderCommandControllerTest {
         OrderCommand command = captor.getValue();
         assertThat(command.userSubject()).isEqualTo("trader-1");
         assertThat(command.deskId()).isEqualTo("DESK-A");
-
-        // Verify async non-blocking publishing to Kafka
-        verify(kafka).send(eq("orders-topic"), eq(orderId.toString()), eq(domainEvent));
-        verify(kafka).send(eq("results-topic"), eq(command.commandId().toString()), eq(resultRecord));
     }
 
     @Test
