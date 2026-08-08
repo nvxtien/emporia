@@ -84,29 +84,4 @@ class OrderCommandReplayHarnessTest {
         assertThat(harness.replayWriteAheadLog()).isEmpty();
         verifyNoInteractions(handler);
     }
-
-    @Test
-    void replaysWriteAheadLogAndPublishesEventsToKafkaWhenKafkaTemplatePresent() throws Exception {
-        String path = java.nio.file.Files.createTempDirectory("wal-replay-kafka")
-                .resolve("replay-kafka.log").toString();
-        OrderCommand pending = TestCommands.command(UUID.randomUUID());
-        try (MemoryMappedWalLogger writer = new MemoryMappedWalLogger(path, 1)) {
-            writer.append(com.emporia.events.sbe.SbeEncoderDecoder.encodeOrderCommand(pending));
-        }
-
-        OrderCommandHandler handler = mock(OrderCommandHandler.class);
-        org.springframework.kafka.core.KafkaTemplate<String, Object> kafka = mock(org.springframework.kafka.core.KafkaTemplate.class);
-        com.emporia.ordermanagement.dto.ProcessingOutcome outcome = TestCommands.outcome(pending.commandId());
-        when(handler.handle(org.mockito.ArgumentMatchers.any())).thenReturn(outcome);
-
-        try (MemoryMappedWalLogger recovered = new MemoryMappedWalLogger(path, 1)) {
-            OrderCommandReplayHarness harness = new OrderCommandReplayHarness(
-                    mock(OrderInputEventRepository.class), handler, new ObjectMapper(), recovered,
-                    kafka, "orders-topic", "results-topic");
-
-            List<com.emporia.ordermanagement.dto.ProcessingOutcome> results = harness.replayWriteAheadLog();
-            assertThat(results).hasSize(1);
-            verify(kafka, org.mockito.Mockito.atLeastOnce()).send(org.mockito.ArgumentMatchers.eq("results-topic"), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.eq(outcome.result()));
-        }
-    }
 }

@@ -368,14 +368,14 @@ public class AsyncDbWriter {
     private void flushOutboxJdbc(List<OrderOutboxRecord> batch) {
         String sql = """
             INSERT INTO emporia_order_data.order_outbox (
-                topic, routing_key, payload_type, payload, status, attempt_count, created_at
-            ) VALUES (?, ?, ?, ?, 'PENDING', 0, ?)
+                topic, routing_key, payload_type, payload, created_at
+            ) VALUES (?, ?, ?, ?, ?)
             """;
         jdbcTemplate.batchUpdate(sql, batch, batch.size(), (PreparedStatement ps, OrderOutboxRecord r) -> {
             ps.setString(1, r.getTopic());
             ps.setString(2, r.getRoutingKey());
             ps.setString(3, r.getPayloadType() == null ? null : r.getPayloadType().name());
-            ps.setString(4, r.getPayload());
+            ps.setBytes(4, r.getPayload());
             ps.setTimestamp(5, r.getCreatedAt() == null ? null : Timestamp.from(r.getCreatedAt()));
         });
     }

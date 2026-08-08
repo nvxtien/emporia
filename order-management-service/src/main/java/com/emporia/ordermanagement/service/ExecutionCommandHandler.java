@@ -4,6 +4,7 @@ import com.emporia.events.TradingEvents.ExecutionCommand;
 import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.KafkaRoutingKeys;
+import com.emporia.events.sbe.SbeEncoderDecoder;
 import com.emporia.ordermanagement.model.Execution;
 import com.emporia.ordermanagement.model.OrderEvent;
 import com.emporia.ordermanagement.model.OrderOutboxRecord;
@@ -91,7 +92,7 @@ class ExecutionCommandHandler {
     private void enqueueOutbox(List<OrderDomainEvent> events) {
         for (OrderDomainEvent event : events) {
             asyncDbWriter.enqueue(new OrderOutboxRecord(ordersTopic, KafkaRoutingKeys.orderEvent(event),
-                    OrderOutboxRecord.PayloadType.ORDER_EVENT, json(event)));
+                    OrderOutboxRecord.PayloadType.ORDER_EVENT, SbeEncoderDecoder.encodeOrderDomainEvent(event)));
         }
     }
 

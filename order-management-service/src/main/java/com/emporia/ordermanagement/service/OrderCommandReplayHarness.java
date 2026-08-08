@@ -10,14 +10,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.ObjectMapper;
 
-import com.emporia.events.TradingEvents.OrderDomainEvent;
-import com.emporia.events.KafkaRoutingKeys;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.stereotype.Service;
-import tools.jackson.databind.ObjectMapper;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Comparator;
@@ -25,33 +17,20 @@ import java.util.Comparator;
 @Service
 public class OrderCommandReplayHarness {
     private static final Logger log = LoggerFactory.getLogger(OrderCommandReplayHarness.class);
+    private static final Comparator<OrderInputEvent> BY_SEQUENCE_ID =
+            Comparator.comparingLong(OrderInputEvent::getSequenceId);
 
     private final OrderInputEventRepository inputEvents;
     private final OrderCommandHandler handler;
     private final ObjectMapper objectMapper;
     private final MemoryMappedWalLogger wal;
-    private final KafkaTemplate<String, Object> kafka;
-    private final String ordersTopic;
-    private final String resultsTopic;
 
     OrderCommandReplayHarness(OrderInputEventRepository inputEvents, OrderCommandHandler handler,
                               ObjectMapper objectMapper, MemoryMappedWalLogger wal) {
-        this(inputEvents, handler, objectMapper, wal, null, "emporia.orders.v1", "emporia.order.results.v1");
-    }
-
-    @Autowired
-    public OrderCommandReplayHarness(OrderInputEventRepository inputEvents, OrderCommandHandler handler,
-                                      ObjectMapper objectMapper, MemoryMappedWalLogger wal,
-                                      @Autowired(required = false) KafkaTemplate<String, Object> kafka,
-                                      @Value("${emporia.kafka.orders-topic:emporia.orders.v1}") String ordersTopic,
-                                      @Value("${emporia.kafka.results-topic:emporia.order.results.v1}") String resultsTopic) {
         this.inputEvents = inputEvents;
         this.handler = handler;
         this.objectMapper = objectMapper;
         this.wal = wal;
-        this.kafka = kafka;
-        this.ordersTopic = ordersTopic;
-        this.resultsTopic = resultsTopic;
     }
 
     /**
@@ -83,13 +62,6 @@ public class OrderCommandReplayHarness {
                 OrderCommand decodedCommand = SbeEncoderDecoder.decodeOrderCommand(record);
                 ProcessingOutcome outcome = handler.handle(decodedCommand);
                 outcomes.add(outcome);
-
-                if (kafka != null && outcome != null && outcome.result() != null && outcome.result().success()) {
-                    for (OrderDomainEvent event : outcome.events()) {
-                        kafka.send(ordersTopic, KafkaRoutingKeys.orderEvent(event), event);
-                    }
-                    kafka.send(resultsTopic, KafkaRoutingKeys.orderResult(decodedCommand), outcome.result());
-                }
             } catch (RuntimeException unreplayable) {
                 failed++;
                 log.error("Could not replay a write-ahead log record of {} bytes; "
@@ -104,7 +76,7 @@ public class OrderCommandReplayHarness {
 
     List<ProcessingOutcome> replayAll() {
         return inputEvents.findAllByOrderBySequenceIdAsc().stream()
-                .sorted(Comparator.comparingLong(OrderInputEvent::getSequenceId))
+                .sorted(BY_SEQUENCE_ID)
                 .map(this::replay)
                 .toList();
     }
