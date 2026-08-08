@@ -31,9 +31,14 @@ BOOTSTRAP_ADMIN_USERNAME="${BOOTSTRAP_ADMIN_USERNAME:-admin}"
 echo "==> Starting per-service PostgreSQL containers and Kafka (Docker)"
 docker compose up -d
 for c in authentication-postgres static-data-postgres user-preferences-postgres \
-         order-management-postgres execution-postgres portfolio-postgres kafka; do
+         order-management-postgres execution-postgres portfolio-postgres kafka kafka-connect; do
     wait_docker_healthy "$c" docker-compose.yml
 done
+
+# CDC-drains order_outbox once order-management-service starts writing to it -
+# must be registered before the app starts, so nothing it writes is missed.
+echo "==> Registering the order_outbox CDC connector"
+"$repo_root/scripts/register-outbox-connector.sh"
 
 # clean is required: the protobuf-maven-plugin has produced inconsistent
 # incremental builds against a stale target/ from an earlier run.

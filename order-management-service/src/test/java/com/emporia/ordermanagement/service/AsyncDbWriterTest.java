@@ -65,7 +65,7 @@ class AsyncDbWriterTest {
     void enqueuesAndFlushesOutboxRecordsInBatch() {
         AsyncDbWriter writerWithOutbox = new AsyncDbWriter(orders, events, processed, null, outbox, null, null, null);
         writerWithOutbox.enqueue(new OrderOutboxRecord("orders-topic", "order-1",
-                OrderOutboxRecord.PayloadType.ORDER_EVENT, "{}"));
+                OrderOutboxRecord.PayloadType.ORDER_EVENT, "{}".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
 
         writerWithOutbox.flush();
 
@@ -81,7 +81,7 @@ class AsyncDbWriterTest {
         // queued when reclaimWriteAheadLog runs its emptiness check.
         for (int i = 0; i < 501; i++) {
             writerWithWal.enqueue(new OrderOutboxRecord("orders-topic", "order-" + i,
-                    OrderOutboxRecord.PayloadType.ORDER_EVENT, "{}"));
+                    OrderOutboxRecord.PayloadType.ORDER_EVENT, "{}".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
         }
 
         writerWithWal.flush();

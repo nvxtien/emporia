@@ -8,6 +8,7 @@ import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.events.risk.OrderRiskChecks;
 import com.emporia.events.KafkaRoutingKeys;
+import com.emporia.events.sbe.SbeEncoderDecoder;
 import com.emporia.ordermanagement.dto.ProcessingOutcome;
 import com.emporia.ordermanagement.model.OrderEvent;
 import com.emporia.ordermanagement.model.OrderOutboxRecord;
@@ -120,10 +121,10 @@ public class OrderCommandHandler {
         if (!outcome.result().success()) return;
         for (OrderDomainEvent event : outcome.events()) {
             asyncDbWriter.enqueue(new OrderOutboxRecord(ordersTopic, KafkaRoutingKeys.orderEvent(event),
-                    OrderOutboxRecord.PayloadType.ORDER_EVENT, json(event)));
+                    OrderOutboxRecord.PayloadType.ORDER_EVENT, SbeEncoderDecoder.encodeOrderDomainEvent(event)));
         }
         asyncDbWriter.enqueue(new OrderOutboxRecord(resultsTopic, KafkaRoutingKeys.orderResult(command),
-                OrderOutboxRecord.PayloadType.ORDER_RESULT, json(outcome.result())));
+                OrderOutboxRecord.PayloadType.ORDER_RESULT, SbeEncoderDecoder.encodeOrderCommandResult(outcome.result())));
     }
 
     private ProcessingOutcome create(OrderCommand command) {

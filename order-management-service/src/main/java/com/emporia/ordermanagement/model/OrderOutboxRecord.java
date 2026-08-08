@@ -13,14 +13,18 @@ import lombok.Getter;
 
 import java.time.Instant;
 
+/**
+ * A row Debezium's outbox event router CDC-drains from Postgres's own WAL
+ * into Kafka - not polled and status-tracked by the app itself. {@code payload}
+ * is pre-encoded SBE bytes, byte-identical to what should land on the topic,
+ * so the connector's pass-through needs no header/type-mapping trickery.
+ */
 @Entity
 @Table(name = "order_outbox")
 @Getter
 public class OrderOutboxRecord {
 
     public enum PayloadType { ORDER_EVENT, ORDER_RESULT }
-
-    public enum Status { PENDING, PUBLISHED }
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -33,41 +37,19 @@ public class OrderOutboxRecord {
     @Enumerated(EnumType.STRING)
     @Column(name = "payload_type", nullable = false, length = 20)
     private PayloadType payloadType;
-    @Column(columnDefinition = "text", nullable = false)
-    private String payload;
-    @Enumerated(EnumType.STRING)
-    @Column(nullable = false, length = 10)
-    private Status status;
-    @Column(name = "attempt_count", nullable = false)
-    private int attemptCount;
-    @Column(name = "last_error", length = 2000)
-    private String lastError;
+    @Column(columnDefinition = "bytea", nullable = false)
+    private byte[] payload;
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
-    @Column(name = "published_at")
-    private Instant publishedAt;
 
     protected OrderOutboxRecord() {
     }
 
-    public OrderOutboxRecord(String topic, String routingKey, PayloadType payloadType, String payload) {
+    public OrderOutboxRecord(String topic, String routingKey, PayloadType payloadType, byte[] payload) {
         this.topic = topic;
         this.routingKey = routingKey;
         this.payloadType = payloadType;
         this.payload = payload;
-        this.status = Status.PENDING;
-        this.attemptCount = 0;
         this.createdAt = DomainClock.now();
-    }
-
-    public void markPublished(Instant publishedAt) {
-        this.status = Status.PUBLISHED;
-        this.publishedAt = publishedAt;
-        this.lastError = null;
-    }
-
-    public void markFailed(String error) {
-        this.attemptCount++;
-        this.lastError = error;
     }
 }
