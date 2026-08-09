@@ -8,6 +8,7 @@ import org.agrona.BufferUtil;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
@@ -63,6 +64,34 @@ public class AeronMarketDataPublisher implements AutoCloseable {
             new UnsafeBuffer(BufferUtil.allocateDirectAligned(FRAME_LENGTH, 64)));
 
     private final AtomicBoolean closed = new AtomicBoolean(false);
+
+    // DO NOT DELETE. This is the only constructor Spring uses in production:
+    // it is selected whenever emporia.market-data.aeron.enabled=true (the
+    // @ConditionalOnProperty on the class), which is what actually connects
+    // to a real Aeron Media Driver. It looks "unused" under a plain grep for
+    // `new AeronMarketDataPublisher(` because Spring calls it via reflection
+    // during component scanning, not from application code. Deleting it does
+    // not remove the feature - it silently downgrades every environment that
+    // enables the flag to a bean with a null `publication`, which then NPEs
+    // on the first publishQuote() call. If the Aeron IPC market-data path is
+    // ever intentionally retired, remove it end-to-end instead: this
+    // constructor, AeronFallbackConfiguration, the emporia.market-data.aeron.*
+    // properties, and the HFT docs that describe it - not just this method.
+    AeronMarketDataPublisher(
+            @Value("${emporia.market-data.aeron.channel:aeron:ipc}") String channel,
+            @Value("${emporia.market-data.aeron.stream-id:1001}") int streamId,
+            @Value("${emporia.market-data.aeron.driver-dir:#{null}}") String driverDir) {
+        this.channel = channel;
+        this.streamId = streamId;
+
+        Aeron.Context ctx = new Aeron.Context();
+        if (driverDir != null && !driverDir.isBlank()) {
+            ctx.aeronDirectoryName(driverDir);
+        }
+        this.aeron = Aeron.connect(ctx);
+        this.publication = aeron.addPublication(channel, streamId);
+        log.info("Aeron market-data publisher connected: channel={} streamId={}", channel, streamId);
+    }
 
     /**
      * No-arg constructor for no-op subclasses (e.g. test/simulated environments).
