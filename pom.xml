@@ -44,6 +44,7 @@
     </dependencyManagement>
 
     <modules>
+        <module>authentication</module>
         <module>trading-contracts</module>
         <module>fix-simulator-contracts</module>
         <module>fix-market-simulator</module>
@@ -53,6 +54,7 @@
         <module>order-management-service</module>
         <module>execution-service</module>
         <module>portfolio-service</module>
+        <module>gateway</module>
     </modules>
 
     <build>
