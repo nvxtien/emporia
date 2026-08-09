@@ -16,6 +16,13 @@ scrape_configs:
     static_configs:
       - targets: ['kafka-exporter:9308']
 
+  # order-outbox Debezium connector's own RUNNING/FAILED state - see
+  # deploy/otel/kafka-connect-status-exporter.py. Docker-only service, so one
+  # target regardless of host-JVM vs full-Docker service deployment mode.
+  - job_name: kafka-connect-exporter
+    static_configs:
+      - targets: ['kafka-connect-exporter:9405']
+
   # Each target carries an explicit `service` label. Kafka client metrics
   # identify a consumer only by client_id, so without this there is no way to
   # group application-side panels by service.

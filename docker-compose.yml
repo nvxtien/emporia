@@ -148,6 +148,23 @@ services:
       retries: 20
       start_period: 10s
 
+  # kafka-connect exposes connector/task state only via its REST API (no
+  # built-in Prometheus endpoint, JMX needs a javaagent jar this repo doesn't
+  # carry) - this polls that REST API so a FAILED order-outbox-connector task
+  # actually surfaces as a metric/alert instead of only being visible to
+  # someone who thinks to curl it.
+  kafka-connect-exporter:
+    image: python:3.12-slim
+    container_name: emporia-kafka-connect-exporter
+    command: ["python3", "/exporter/kafka-connect-status-exporter.py"]
+    volumes:
+      - ./deploy/otel/kafka-connect-status-exporter.py:/exporter/kafka-connect-status-exporter.py:ro
+    ports:
+      - "9405:9405"
+    depends_on:
+      kafka-connect:
+        condition: service_healthy
+
   # --- Observability (REWORK_NOTE Phase 1_1) -------------------------------
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.116.1

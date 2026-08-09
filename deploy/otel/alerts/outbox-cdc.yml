@@ -1,0 +1,32 @@
+groups:
+  - name: emporia-outbox-cdc
+    rules:
+      - alert: EmporiaOutboxConnectorDown
+        expr: emporia_outbox_connector_up == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: order-management-service
+        annotations:
+          summary: order-outbox Debezium connector is not RUNNING
+          description: The order-outbox-connector has not reported state RUNNING for 2 minutes - order/execution events are not being CDC-relayed to Kafka.
+
+      - alert: EmporiaOutboxConnectorTaskDown
+        expr: emporia_outbox_connector_task_up == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: order-management-service
+        annotations:
+          summary: order-outbox Debezium connector task is not RUNNING
+          description: The order-outbox-connector's task has failed or stopped (e.g. errors.tolerance exhausted, or a Postgres/Kafka connectivity issue) - delivery has stalled.
+
+      - alert: EmporiaOutboxConnectorScrapeFailing
+        expr: emporia_outbox_connector_scrape_ok == 0
+        for: 3m
+        labels:
+          severity: warning
+          service: order-management-service
+        annotations:
+          summary: Cannot reach the Kafka Connect REST API to check order-outbox-connector status
+          description: kafka-connect-exporter has been unable to poll kafka-connect:8083 for 3 minutes - either Connect itself is down or unreachable.
