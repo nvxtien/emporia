@@ -9,7 +9,7 @@
 
 > 📖 **Comprehensive Platform Documentation & Architectural Specifications are published on the [Emporia GitHub Wiki](https://github.com/nvxtien/emporia/wiki)!**
 
-Emporia is an enterprise-grade, distributed stock trading platform built with **Java 21**, **Spring Boot 4.0.7**, **React 19**, **Apache Kafka**, **gRPC**, and **PostgreSQL**. Its deployable boundaries strictly follow business capabilities: static data, user preferences, market data, order command handling, and order management are independent services, with execution routing isolated behind its own service.
+Emporia is an enterprise-grade, distributed stock trading platform built with **Java 21**, **Spring Boot 4.0.7**, **React 19**, **Apache Kafka**, **gRPC**, and **PostgreSQL**. Its deployable boundaries strictly follow business capabilities: static data, user preferences, market data, and order management are independent services, with execution routing isolated behind its own service.
 
 ---
 
@@ -21,7 +21,6 @@ For in-depth architectural guides, domain design patterns, microservice deep div
 |---|---|
 | 📖 **[Trading Terminology Glossary](https://github.com/nvxtien/emporia/wiki/Trading-Terminology-Glossary)** | Financial terms: Order types (Limit, Market, Stop, TIF), BBO/NBBO, SOR, VWAP, P&L. |
 | 📐 **[Architecture & Order Flow](https://github.com/nvxtien/emporia/wiki/Architecture-and-Order-Flow)** | System architecture flow, port matrix, REST vs. Kafka EDA, database ownership. |
-| 📨 **[Order Command Service](https://github.com/nvxtien/emporia/wiki/Order-Command-Service)** | REST intake, listing snapshot validation, `KafkaCommandGateway` result correlation. |
 | ⚙️ **[Order Management Service](https://github.com/nvxtien/emporia/wiki/Order-Management-Service)** | State machine authority, `OrderCommandHandler`, `ExecutionCommandHandler`, idempotency. |
 | 🎯 **[Execution Service](https://github.com/nvxtien/emporia/wiki/Execution-Service)** | Algorithmic routing (`DMA`, `SMART` NBBO selector, `VWAP` slicer), venue gateways. |
 | 📜 **[Order Lifecycle & Invariants](https://github.com/nvxtien/emporia/wiki/Business-Logic-Order-Lifecycle)** | State machine invariants, tick/lot size checks, late fill accounting. |
@@ -29,7 +28,7 @@ For in-depth architectural guides, domain design patterns, microservice deep div
 | 📊 **[Market Data & Pricing](https://github.com/nvxtien/emporia/wiki/Business-Logic-Market-Data-and-Pricing)** | L1/L2 order books, Price-Time priority matching, micro-price formulas. |
 | 💼 **[Portfolio & Risk Controls](https://github.com/nvxtien/emporia/wiki/Business-Logic-Portfolio-and-Risk-Management)** | Long/short positions, cost basis, Mark-to-Market P&L, fat-finger price collars. |
 | 🧩 **[Design Patterns Catalog](https://github.com/nvxtien/emporia/wiki/Design-Patterns)** | CQRS, Event-Driven Architecture, Saga, Strategy, State Machine patterns. |
-| 📦 **[Microservices Overview](https://github.com/nvxtien/emporia/wiki/Microservices-Overview)** | Deep-dive into all 9 microservices, Gateway, and OAuth2 Authorization. |
+| 📦 **[Microservices Overview](https://github.com/nvxtien/emporia/wiki/Microservices-Overview)** | Deep-dive into all 8 microservices, Gateway, and OAuth2 Authorization. |
 | ⚡ **[Exchange-Core Integration](https://github.com/nvxtien/emporia/wiki/Exchange-Core-Integration)** | Ultra-low latency LMAX Disruptor ring-buffer matching engine integration. |
 | 🧪 **[Testing & Verification](https://github.com/nvxtien/emporia/wiki/Testing-and-Verification)** | 91.95% JaCoCo coverage, Testcontainers PostgreSQL specs, Fray concurrency tests. |
 | 🛠️ **[Deployment & Operations](https://github.com/nvxtien/emporia/wiki/Deployment-and-Operations)** | Environment prerequisites, Docker Compose, Maven builds, React UI startup. |
@@ -47,9 +46,8 @@ flowchart TD
     Gateway --> Market[Market data :8084]
     Gateway -->|POST/PUT /api/orders| Orders
     Gateway -->|GET /api/orders| Orders
-    OrderCommands[Order command service :8085] -.->|optional Kafka ingress| Commands[[emporia.order.commands.v1]]
-    Execution[Execution service :8087] -->|client credentials| Auth
-    ExchangeCore[exchange-core simulation] -->|risk seed + durable snapshots| Portfolio[Portfolio service :8088]
+    Execution[Execution :8087] -->|client credentials| Auth
+    ExchangeCore[exchange-core simulation] -->|risk seed + durable snapshots| Portfolio[Portfolio :8088]
     ExchangeCore -->|bearer token| Auth
 
     Preferences -->|listing snapshots| Static
@@ -60,11 +58,10 @@ flowchart TD
     Orders -->|validate listing| Static
 
     Orders -->|async audit / distribution| OrderLog[[emporia.orders.v1]]
+    Execution -->|SMART/VWAP child CREATE| Commands[[emporia.order.commands.v1]]
     Commands --> Orders
-    Orders -->|correlated outcome for Kafka ingress| Results[[emporia.order.results.v1]]
-    Results -.-> OrderCommands
+    Orders -->|correlated result| Results[[emporia.order.results.v1]]
     OrderLog --> Execution
-    Execution -->|SMART/VWAP child CREATE| Commands
     Execution -->|FILL / REJECT / venue CANCEL| ExecutionCommands[[emporia.execution.commands.v1]]
     ExecutionCommands --> Orders
     Execution -->|recover active parents and children| Orders
@@ -81,32 +78,32 @@ flowchart TD
 
 The browser sees one `/api` surface. The gateway routes requests by path and
 HTTP method to the service that owns each business capability. Mutating order
-calls (`POST`/`PUT /api/orders/**`) go directly to `order-management-service`,
-which handles them on an in-process LMAX Disruptor and publishes Kafka events
-asynchronously for execution and audit. `order-command-service` remains an
-optional Kafka-based ingress (direct `:8085` / load tests), not the gateway hot path.
+calls (`POST`/`PUT /api/orders/**`) go directly to `order-management`, which
+handles them on an in-process LMAX Disruptor and publishes Kafka events
+asynchronously for execution and audit. The same Kafka command path also
+carries `execution`'s internally generated SMART/VWAP child orders — see
+[Kafka command path](#kafka-command-path-execution-child-orders) below.
 
 ## Service ownership
 
 | Directory | Port | Owns |
 |---|---:|---|
 | `authentication` | 9000 | OAuth2/OIDC login, users, tokens |
-| `static-data-service` | 8081 | Instruments and exchange listings |
-| `user-preferences-service` | 8083 | Per-user watchlists and persisted workspace layouts |
-| `market-data-service` | 8084 HTTP / 50551 gRPC | Simulated, Alpaca IEX, or FIX-simulator market data; venue/composite books; REST, SSE, and gRPC distribution |
-| `order-command-service` | 8085 | Optional Kafka ingress for create/modify/cancel (not used by gateway) |
-| `order-management-service` | 8086 | Order command hot path (Disruptor), lifecycle, state, history, executions, and idempotency |
-| `execution-service` | 8087 internal | DMA venue access, best-venue SMART routing, scheduled VWAP child orders, and execution reports |
-| `portfolio-service` | 8088 internal | Fully funded cash/equity balances and idempotent exchange snapshot receipts |
+| `static-data` | 8081 | Instruments and exchange listings |
+| `user-preferences` | 8083 | Per-user watchlists and persisted workspace layouts |
+| `market-data` | 8084 HTTP / 50551 gRPC | Simulated, Alpaca IEX, or FIX-simulator market data; venue/composite books; REST, SSE, and gRPC distribution |
+| `order-management` | 8086 | Order command hot path (Disruptor), lifecycle, state, history, executions, and idempotency |
+| `execution` | 8087 internal | DMA venue access, best-venue SMART routing, scheduled VWAP child orders, and execution reports |
+| `portfolio` | 8088 internal | Fully funded cash/equity balances and idempotent exchange snapshot receipts |
 | `gateway` | 8082 | Browser security boundary and routing |
 | `frontend` | 3001 | React trading workspace |
 | `trading-contracts` | not deployed | Versioned Java/Kafka contracts shared at build time |
-| `fix-simulator-contracts` | not deployed | Generated FIX-simulator protobuf/gRPC contracts, consumed by `market-data-service` and `fix-market-simulator` |
-| `fix-market-simulator` | 9876 FIX / 50051 gRPC / 8501 REST | Standalone FIX/gRPC market simulator (QuickFIX/J + Guice + Jetty), an optional data source for `market-data-service`'s `FIX_SIMULATOR_CONNECTIONS` mode |
+| `fix-simulator-contracts` | not deployed | Generated FIX-simulator protobuf/gRPC contracts, consumed by `market-data` and `fix-market-simulator` |
+| `fix-market-simulator` | 9876 FIX / 50051 gRPC / 8501 REST | Standalone FIX/gRPC market simulator (QuickFIX/J + Guice + Jetty), an optional data source for `market-data`'s `FIX_SIMULATOR_CONNECTIONS` mode |
 
 No running service reads or writes another Emporia service's PostgreSQL database
 or schema.
-When a service needs listing data, it calls `static-data-service` and forwards
+When a service needs listing data, it calls `static-data` and forwards
 a bearer token. Orders store an immutable listing snapshot instead of a
 cross-schema foreign key.
 
@@ -114,35 +111,36 @@ cross-schema foreign key.
 
 ### Gateway hot path (browser)
 
-1. Gateway forwards `POST`/`PUT /api/orders/**` to `order-management-service`.
+1. Gateway forwards `POST`/`PUT /api/orders/**` to `order-management`.
 2. OMS validates the listing snapshot, builds an `OrderCommand`, and submits it
    to the single-writer Disruptor pipeline.
 3. `OrderCommandHandler` applies the transition against the in-memory order
    cache, enqueues write-behind persistence, and returns the correlated result
    to the waiting HTTP request.
 4. OMS publishes order domain events to `emporia.orders.v1` asynchronously for
-   `execution-service` and audit consumers (Kafka is not on the request
+   `execution` and audit consumers (Kafka is not on the request
    critical path).
 
-### Optional Kafka ingress (`order-command-service`)
+### Kafka command path (execution child orders)
 
-1. A direct caller hits `order-command-service` (`:8085`), which creates a
-   versioned command with a unique `commandId` and publishes it to
-   `emporia.order.commands.v1`.
-2. `order-management-service` consumes the command, validates the transition,
-   and updates its projection via the same handler path.
+There is no external REST ingress onto this path anymore — `execution` is
+the only producer left. SMART venue splits and VWAP time slices it creates
+internally reuse the same Kafka command path and `order-management` handler
+the gateway hot path uses:
+
+1. `execution` builds a versioned child `OrderCommand` (SMART venue split or
+   VWAP time slice) and publishes it to `emporia.order.commands.v1`, keyed by
+   the parent order ID so all of one parent's children stay on one partition.
+2. `order-management` consumes the command, validates the transition, and
+   updates its projection via the same handler path as the gateway hot path.
 3. The command result is stored in `processed_order_command`. A redelivered
    Kafka command therefore returns the same result instead of applying the
    change twice.
-4. `order-management-service` publishes the state transition to
-   `emporia.orders.v1` and a correlated response to `emporia.order.results.v1`.
-5. `order-command-service` completes the waiting request. If Kafka or the order
-   processor does not answer within eight seconds, it returns a timeout or
-   service error rather than pretending the order succeeded.
+4. `order-management` publishes the state transition to `emporia.orders.v1`,
+   which `execution` consumes to track parent/child fill state.
 
-Commands on the Kafka path are keyed by order ID (or user subject for
-cancel-all). The six Kafka partitions can process independent orders in
-parallel while maintaining the order of commands for one key.
+The six Kafka partitions can process independent orders in parallel while
+maintaining the order of commands for one key.
 
 ## Execution flow
 
@@ -170,7 +168,7 @@ parallel while maintaining the order of commands for one key.
 See the [DMA, SMART, and VWAP execution guide](docs/execution/README.md) for
 strategy behavior, order examples, cancellation, recovery, and current
 boundaries. Service-level configuration is collected in
-[execution-service/README.md](execution-service/README.md).
+[execution/README.md](execution-service/README.md).
 
 Gateway routing, order-route circuit breaker and rate limiter behavior, and the
 internal service-account token policy are documented in
@@ -246,10 +244,10 @@ Run all commands from the repository root.
 3. Open `http://localhost:3001` and sign in with `admin` / `admin123` once
    the script prints "stack is up".
 
-Both scripts default `execution-service` to `EXECUTION_VENUE_MODE=exchange-core`
+Both scripts default `execution` to `EXECUTION_VENUE_MODE=exchange-core`
 with `EXCHANGE_CORE_ACCOUNTING_MODE=full-equity-risk`, and automatically seed
 a USD portfolio balance for the bootstrap admin so it can receive an
-exchange-core risk seed. `market-data-service` defaults to
+exchange-core risk seed. `market-data` defaults to
 `MARKET_DATA_PROVIDER=simulated`; export `MARKET_DATA_PROVIDER=alpaca-iex`
 plus `APCA_API_KEY_ID`/`APCA_API_SECRET_KEY` before running either script to
 use live Alpaca IEX data instead:
@@ -270,7 +268,7 @@ scripts/run-local.sh
 To instead consume incremental order books from one or more FIX simulator
 gRPC sources, export `MARKET_DATA_PROVIDER=fix-simulator` and
 `FIX_SIMULATOR_CONNECTIONS`; see the
-[market-data service runbook](market-data-service/README.md) for the
+[market-data runbook](market-data-service/README.md) for the
 connection string format and behavior.
 
 Each script logs every service to `.local-run/logs/<service>.log` and tracks
@@ -282,9 +280,9 @@ Health check every service (all default to `GET /actuator/health` without a
 token):
 
 ```bash
-for pair in "authentication:9000" "static-data-service:8081" "user-preferences-service:8083" \
-            "market-data-service:8084" "order-command-service:8085" "order-management-service:8086" \
-            "execution-service:8087" "portfolio-service:8088" "gateway:8082"; do
+for pair in "authentication:9000" "static-data:8081" "user-preferences:8083" \
+            "market-data:8084" "order-management:8086" \
+            "execution:8087" "portfolio:8088" "gateway:8082"; do
   name="${pair%%:*}"; port="${pair##*:}"
   echo "$name: $(curl -fsS http://localhost:$port/actuator/health)"
 done
@@ -322,13 +320,12 @@ supported. Kafka must already be running (`docker compose up -d kafka`), and
 tokens. Each service's own README documents its environment variables and
 `mvn spring-boot:run` / `npm run dev` command:
 [`authentication`](authentication/README.md),
-[`static-data-service`](static-data-service/README.md),
-[`user-preferences-service`](user-preferences-service/README.md),
-[`market-data-service`](market-data-service/README.md),
-[`order-command-service`](order-command-service/README.md),
-[`order-management-service`](order-management-service/README.md),
-[`execution-service`](execution-service/README.md),
-[`portfolio-service`](portfolio-service/README.md),
+[`static-data`](static-data-service/README.md),
+[`user-preferences`](user-preferences-service/README.md),
+[`market-data`](market-data-service/README.md),
+[`order-management`](order-management-service/README.md),
+[`execution`](execution-service/README.md),
+[`portfolio`](portfolio-service/README.md),
 [`gateway`](gateway/README.md), and [`frontend`](frontend/README.md).
 
 Every service supports `GET /actuator/health` without a token. Kafka is healthy
@@ -368,11 +365,11 @@ Boot service and the frontend on your host JVM against those containers.
 | Service | Host port | Database | Schema |
 |---|---:|---|---|
 | `authentication` | `5433` | `emporia_authentication` | `emporia_authentication` |
-| `static-data-service` | `5434` | `emporia_static_data` | `emporia_static_data` |
-| `user-preferences-service` | `5435` | `emporia_user_preferences` | `emporia_client_config` |
-| `order-management-service` | `5436` | `emporia_order_management` | `emporia_order_data` |
-| `execution-service` | `5437` | `emporia_execution` | `emporia_execution` |
-| `portfolio-service` | `5438` | `emporia_portfolio` | `emporia_portfolio` |
+| `static-data` | `5434` | `emporia_static_data` | `emporia_static_data` |
+| `user-preferences` | `5435` | `emporia_user_preferences` | `emporia_client_config` |
+| `order-management` | `5436` | `emporia_order_management` | `emporia_order_data` |
+| `execution` | `5437` | `emporia_execution` | `emporia_execution` |
+| `portfolio` | `5438` | `emporia_portfolio` | `emporia_portfolio` |
 
 ```bash
 scripts/run-infra-docker.sh
@@ -388,7 +385,7 @@ docker compose ps
 
 ### 2. Full-Stack Docker Container Deployment
 
-To launch all 9 microservices, API Gateway, React UI, service-owned PostgreSQL
+To launch all 8 microservices, API Gateway, React UI, service-owned PostgreSQL
 instances, and Kafka in containers, build the Maven jars first — each
 Dockerfile copies a pre-built `target/*.jar` rather than building from
 source — then run `scripts/local-deploy.sh`:
