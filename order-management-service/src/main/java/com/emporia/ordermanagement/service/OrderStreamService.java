@@ -14,8 +14,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 @Service
 public class OrderStreamService {
-    private final ConcurrentHashMap<String, CopyOnWriteArrayList<Subscription>> subscriptions =
-            new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, CopyOnWriteArrayList<Subscription>> subscriptions = new ConcurrentHashMap<>();
     private final ObjectMapper objectMapper;
 
     OrderStreamService(ObjectMapper objectMapper) {

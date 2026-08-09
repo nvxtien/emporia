@@ -26,28 +26,50 @@ import java.util.UUID;
 @Table(name = "trading_order")
 @Getter
 public class TradingOrder {
-    @Id private UUID id;
-    @Version @Column(name = "entity_version", nullable = false) private Long version;
-    @Column(name = "user_subject", nullable = false, length = 200) private String userSubject;
-    @Column(name = "desk_id", nullable = false, length = 100) private String deskId;
-    @Embedded private ListingDetails listing;
-    @Enumerated(EnumType.STRING) @Column(name = "order_side", nullable = false, length = 8) private OrderSide side;
-    @Enumerated(EnumType.STRING) @Column(name = "order_type", nullable = false, length = 16) private OrderType type;
-    @Column(nullable = false, precision = 19, scale = 6) private BigDecimal quantity;
-    @Column(name = "limit_price", precision = 19, scale = 6) private BigDecimal limitPrice;
-    @Column(name = "remaining_quantity", nullable = false, precision = 19, scale = 6) private BigDecimal remainingQuantity;
-    @Column(name = "traded_quantity", nullable = false, precision = 19, scale = 6) private BigDecimal tradedQuantity;
-    @Column(name = "average_trade_price", precision = 19, scale = 6) private BigDecimal averageTradePrice;
-    @Enumerated(EnumType.STRING) @Column(name = "order_status", nullable = false, length = 24) private OrderStatus status;
-    @Enumerated(EnumType.STRING) @Column(name = "target_status", nullable = false, length = 24) private OrderStatus targetStatus;
-    @Column(nullable = false, length = 32) private String destination;
-    @Column(name = "originator_reference", nullable = false, length = 100) private String originatorReference;
-    @Column(name = "parent_order_id") private UUID parentOrderId;
-    @Column(name = "root_order_id", nullable = false) private UUID rootOrderId;
-    @Column(name = "execution_parameters") private String executionParameters;
-    @Column(name = "error_message", length = 500) private String errorMessage;
-    @Column(name = "created_at", nullable = false) private Instant createdAt;
-    @Column(name = "updated_at", nullable = false) private Instant updatedAt;
+    @Id
+    private UUID id;
+    @Version @Column(name = "entity_version", nullable = false)
+    private Long version;
+    @Column(name = "user_subject", nullable = false, length = 200)
+    private String userSubject;
+    @Column(name = "desk_id", nullable = false, length = 100)
+    private String deskId;
+    @Embedded
+    private ListingDetails listing;
+    @Enumerated(EnumType.STRING) @Column(name = "order_side", nullable = false, length = 8)
+    private OrderSide side;
+    @Enumerated(EnumType.STRING) @Column(name = "order_type", nullable = false, length = 16)
+    private OrderType type;
+    @Column(nullable = false, precision = 19, scale = 6)
+    private BigDecimal quantity;
+    @Column(name = "limit_price", precision = 19, scale = 6)
+    private BigDecimal limitPrice;
+    @Column(name = "remaining_quantity", nullable = false, precision = 19, scale = 6)
+    private BigDecimal remainingQuantity;
+    @Column(name = "traded_quantity", nullable = false, precision = 19, scale = 6)
+    private BigDecimal tradedQuantity;
+    @Column(name = "average_trade_price", precision = 19, scale = 6)
+    private BigDecimal averageTradePrice;
+    @Enumerated(EnumType.STRING) @Column(name = "order_status", nullable = false, length = 24)
+    private OrderStatus status;
+    @Enumerated(EnumType.STRING) @Column(name = "target_status", nullable = false, length = 24)
+    private OrderStatus targetStatus;
+    @Column(nullable = false, length = 32)
+    private String destination;
+    @Column(name = "originator_reference", nullable = false, length = 100)
+    private String originatorReference;
+    @Column(name = "parent_order_id")
+    private UUID parentOrderId;
+    @Column(name = "root_order_id", nullable = false)
+    private UUID rootOrderId;
+    @Column(name = "execution_parameters")
+    private String executionParameters;
+    @Column(name = "error_message", length = 500)
+    private String errorMessage;
+    @Column(name = "created_at", nullable = false)
+    private Instant createdAt;
+    @Column(name = "updated_at", nullable = false)
+    private Instant updatedAt;
 
     protected TradingOrder() { }
 

@@ -48,11 +48,15 @@ public class MarketDataService {
     }
 
     ResolvedListings resolve(List<ListingSnapshot> requested, String authorization) {
-        List<String> compositeSymbols = requested.stream().filter(MarketDataService::isComposite)
-                .map(ListingSnapshot::symbol).distinct().toList();
+        List<String> compositeSymbols = requested.stream()
+                .filter(MarketDataService::isComposite)
+                .map(ListingSnapshot::symbol)
+                .distinct()
+                .toList();
         List<ListingSnapshot> underlying = compositeSymbols.isEmpty() ? List.of()
                 : staticData.bySymbols(compositeSymbols, authorization).stream()
-                        .filter(candidate -> !isComposite(candidate)).toList();
+                                                                       .filter(candidate -> !isComposite(candidate))
+                                                                       .toList();
         Map<Long, List<ListingSnapshot>> sources = new LinkedHashMap<>();
         for (ListingSnapshot listing : requested) {
             sources.put(listing.id(), isComposite(listing)
@@ -65,12 +69,16 @@ public class MarketDataService {
 
     List<Quote> snapshot(ResolvedListings resolved, Instant timestamp) {
         Map<Long, ListingSnapshot> providerListings = new LinkedHashMap<>();
-        resolved.sources().values().stream().flatMap(List::stream)
+        resolved.sources()
+                .values()
+                .stream()
+                .flatMap(List::stream)
                 .forEach(listing -> providerListings.put(listing.id(), listing));
 
         Map<Long, Quote> quotesByListing = marketDataProvider
                 .quotes(new ArrayList<>(providerListings.values()), timestamp)
-                .stream().collect(Collectors.toMap(Quote::listingId, Function.identity(), (left, right) -> right));
+                .stream()
+                .collect(Collectors.toMap(Quote::listingId, Function.identity(), (left, right) -> right));
 
         return resolved.requested().stream().map(listing -> {
             if (!isComposite(listing)) {

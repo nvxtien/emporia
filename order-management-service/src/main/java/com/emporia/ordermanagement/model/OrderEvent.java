@@ -24,17 +24,30 @@ import static com.emporia.events.TradingEvents.SCHEMA_VERSION;
 @Table(name = "order_event")
 @Getter
 public class OrderEvent {
-    @Id private UUID id;
-    @Column(name = "command_id", nullable = false) private UUID commandId;
-    @ManyToOne(fetch = FetchType.LAZY, optional = false) @JoinColumn(name = "order_id", nullable = false) private TradingOrder order;
-    @Column(name = "order_version", nullable = false) private long orderVersion;
-    @Column(name = "event_type", nullable = false, length = 32) private String eventType;
-    @Enumerated(EnumType.STRING) @Column(name = "order_status", nullable = false, length = 24) private OrderStatus status;
-    @Column(nullable = false, precision = 19, scale = 6) private BigDecimal quantity;
-    @Column(precision = 19, scale = 6) private BigDecimal price;
-    @Column(length = 500) private String message;
-    @Column(columnDefinition = "text") private String payload;
-    @Column(name = "occurred_at", nullable = false) private Instant occurredAt;
+    @Id
+    private UUID id;
+    @Column(name = "command_id", nullable = false)
+    private UUID commandId;
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "order_id", nullable = false)
+    private TradingOrder order;
+    @Column(name = "order_version", nullable = false)
+    private long orderVersion;
+    @Column(name = "event_type", nullable = false, length = 32)
+    private String eventType;
+    @Enumerated(EnumType.STRING)
+    @Column(name = "order_status", nullable = false, length = 24)
+    private OrderStatus status;
+    @Column(nullable = false, precision = 19, scale = 6)
+    private BigDecimal quantity;
+    @Column(precision = 19, scale = 6)
+    private BigDecimal price;
+    @Column(length = 500) private
+    String message;
+    @Column(columnDefinition = "text")
+    private String payload;
+    @Column(name = "occurred_at", nullable = false)
+    private Instant occurredAt;
 
     protected OrderEvent() { }
 

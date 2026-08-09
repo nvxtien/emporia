@@ -10,19 +10,32 @@ import java.math.BigDecimal;
 @Embeddable
 @Getter
 public class ListingDetails {
-    @Column(name = "listing_id", nullable = false) private long id;
-    @Column(name = "listing_version", nullable = false) private int version;
-    @Column(name = "listing_symbol", nullable = false, length = 24) private String symbol;
-    @Column(name = "listing_name", nullable = false, length = 200) private String name;
-    @Column(name = "market_symbol", nullable = false, length = 24) private String marketSymbol;
-    @Column(name = "exchange_mic", nullable = false, length = 12) private String exchangeMic;
-    @Column(name = "exchange_name", nullable = false, length = 120) private String exchangeName;
-    @Column(name = "country_code", nullable = false, length = 2) private String countryCode;
-    @Column(nullable = false, length = 3) private String currency;
-    @Column(name = "tick_size", nullable = false, precision = 19, scale = 6) private BigDecimal tickSize;
-    @Column(name = "size_increment", nullable = false, precision = 19, scale = 6) private BigDecimal sizeIncrement;
-    @Column(name = "reference_price", nullable = false, precision = 19, scale = 6) private BigDecimal referencePrice;
-    @Column(name = "previous_close", nullable = false, precision = 19, scale = 6) private BigDecimal previousClose;
+    @Column(name = "listing_id", nullable = false)
+    private long id;
+    @Column(name = "listing_version", nullable = false)
+    private int version;
+    @Column(name = "listing_symbol", nullable = false, length = 24)
+    private String symbol;
+    @Column(name = "listing_name", nullable = false, length = 200)
+    private String name;
+    @Column(name = "market_symbol", nullable = false, length = 24)
+    private String marketSymbol;
+    @Column(name = "exchange_mic", nullable = false, length = 12)
+    private String exchangeMic;
+    @Column(name = "exchange_name", nullable = false, length = 120)
+    private String exchangeName;
+    @Column(name = "country_code", nullable = false, length = 2)
+    private String countryCode;
+    @Column(nullable = false, length = 3)
+    private String currency;
+    @Column(name = "tick_size", nullable = false, precision = 19, scale = 6)
+    private BigDecimal tickSize;
+    @Column(name = "size_increment", nullable = false, precision = 19, scale = 6)
+    private BigDecimal sizeIncrement;
+    @Column(name = "reference_price", nullable = false, precision = 19, scale = 6)
+    private BigDecimal referencePrice;
+    @Column(name = "previous_close", nullable = false, precision = 19, scale = 6)
+    private BigDecimal previousClose;
 
     protected ListingDetails() {
     }

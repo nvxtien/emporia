@@ -12,13 +12,10 @@ import jakarta.annotation.PreDestroy;
 import org.agrona.DirectBuffer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -32,8 +29,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class AeronOrderCommandSubscriber implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(AeronOrderCommandSubscriber.class);
 
-    private final String channel;
-    private final int streamId;
     private final int fragmentLimit;
     private final DisruptorOrderPipeline disruptorPipeline;
     private final Aeron aeron;
@@ -42,49 +37,8 @@ public class AeronOrderCommandSubscriber implements AutoCloseable {
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final FragmentHandler fragmentHandler;
 
-    public AeronOrderCommandSubscriber(
-            DisruptorOrderPipeline disruptorPipeline,
-            @Value("${emporia.aeron.intake.channel:aeron:ipc}") String channel,
-            @Value("${emporia.aeron.intake.stream-id:1002}") int streamId,
-            @Value("${emporia.aeron.intake.driver-dir:#{null}}") String driverDir,
-            @Value("${emporia.aeron.intake.fragment-limit:10}") int fragmentLimit) {
-        this.disruptorPipeline = disruptorPipeline;
-        this.channel = channel;
-        this.streamId = streamId;
-        this.fragmentLimit = fragmentLimit;
-
-        Aeron.Context ctx = new Aeron.Context();
-        if (driverDir != null && !driverDir.isBlank()) {
-            ctx.aeronDirectoryName(driverDir);
-        }
-        this.aeron = Aeron.connect(ctx);
-        this.subscription = aeron.addSubscription(channel, streamId);
-        this.executor = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "aeron-order-intake");
-            t.setDaemon(true);
-            return t;
-        });
-
-        this.fragmentHandler = (DirectBuffer buffer, int offset, int length, Header header) -> onFragment(buffer, offset, length);
-
-        log.info("Aeron OrderCommand subscriber initialized: channel={} streamId={}", channel, streamId);
-    }
-
-    protected AeronOrderCommandSubscriber() {
-        this.channel = "none";
-        this.streamId = 0;
-        this.fragmentLimit = 0;
-        this.disruptorPipeline = null;
-        this.aeron = null;
-        this.subscription = null;
-        this.executor = null;
-        this.fragmentHandler = (DirectBuffer buffer, int offset, int length, Header header) -> {};
-    }
-
     public AeronOrderCommandSubscriber(DisruptorOrderPipeline disruptorPipeline) {
         this.disruptorPipeline = disruptorPipeline;
-        this.channel = "test";
-        this.streamId = 1002;
         this.fragmentLimit = 10;
         this.aeron = null;
         this.subscription = null;

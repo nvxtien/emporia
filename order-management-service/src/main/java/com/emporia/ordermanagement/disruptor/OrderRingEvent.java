@@ -30,12 +30,4 @@ public class OrderRingEvent {
         this.submittedAtNanos = 0L;
         this.startedAtNanos = 0L;
     }
-
-    public com.emporia.events.math.LongPair getCommandIdPair() {
-        return command != null ? command.commandIdPair() : com.emporia.events.math.LongPair.ZERO;
-    }
-
-    public com.emporia.events.math.LongPair getOrderIdPair() {
-        return command != null ? command.orderIdPair() : com.emporia.events.math.LongPair.ZERO;
-    }
 }

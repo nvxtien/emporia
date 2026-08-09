@@ -16,13 +16,20 @@ import lombok.Getter;
 @Table(name = "processed_order_command")
 @Getter
 public class ProcessedCommand {
-    @Id @Column(name = "command_id") private UUID commandId;
-    @Column(name = "schema_version", nullable = false) private int schemaVersion;
-    @Column(nullable = false) private boolean success;
-    @Column(name = "http_status", nullable = false) private int status;
-    @Column(length = 500) private String detail;
-    @Column(columnDefinition = "text") private String payload;
-    @Column(name = "processed_at", nullable = false) private Instant processedAt;
+    @Id @Column(name = "command_id")
+    private UUID commandId;
+    @Column(name = "schema_version", nullable = false)
+    private int schemaVersion;
+    @Column(nullable = false)
+    private boolean success;
+    @Column(name = "http_status", nullable = false)
+    private int status;
+    @Column(length = 500)
+    private String detail;
+    @Column(columnDefinition = "text")
+    private String payload;
+    @Column(name = "processed_at", nullable = false)
+    private Instant processedAt;
 
     protected ProcessedCommand() { }
 

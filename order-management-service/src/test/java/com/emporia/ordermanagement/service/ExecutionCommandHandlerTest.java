@@ -21,7 +21,6 @@ import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
 import java.time.Instant;
-import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.List;
@@ -45,7 +44,7 @@ class ExecutionCommandHandlerTest {
     private final OrderStateCache cache = new OrderStateCache(orders, processed, 1000, 1000);
     private final AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
     private final ExecutionCommandHandler handler =
-            new ExecutionCommandHandler(orders, executions, events, new ObjectMapper(), metrics, cache, asyncDbWriter,
+            new ExecutionCommandHandler(orders, executions, new ObjectMapper(), metrics, cache, asyncDbWriter,
                     "orders-topic");
 
     @Test

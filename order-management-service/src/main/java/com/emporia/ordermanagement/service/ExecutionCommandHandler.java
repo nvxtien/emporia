@@ -10,11 +10,9 @@ import com.emporia.ordermanagement.model.OrderEvent;
 import com.emporia.ordermanagement.model.OrderOutboxRecord;
 import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.ExecutionRepository;
-import com.emporia.ordermanagement.repository.OrderEventRepository;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
@@ -33,7 +31,6 @@ class ExecutionCommandHandler {
 
     private final TradingOrderRepository orders;
     private final ExecutionRepository executions;
-    private final OrderEventRepository events;
     private final ObjectMapper objectMapper;
     private final OrderMetrics metrics;
     private final OrderStateCache cache;
@@ -41,12 +38,11 @@ class ExecutionCommandHandler {
     private final String ordersTopic;
 
     ExecutionCommandHandler(TradingOrderRepository orders, ExecutionRepository executions,
-                            OrderEventRepository events, ObjectMapper objectMapper, OrderMetrics metrics,
+                            ObjectMapper objectMapper, OrderMetrics metrics,
                             OrderStateCache cache, AsyncDbWriter asyncDbWriter,
                             @Value("${emporia.kafka.orders-topic:emporia.orders.v1}") String ordersTopic) {
         this.orders = orders;
         this.executions = executions;
-        this.events = events;
         this.objectMapper = objectMapper;
         this.metrics = metrics;
         this.cache = cache;

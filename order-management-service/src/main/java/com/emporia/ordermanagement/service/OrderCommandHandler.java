@@ -37,7 +37,6 @@ public class OrderCommandHandler {
     private static final List<OrderStatus> CANCELLABLE = List.of(OrderStatus.LIVE, OrderStatus.PARTIALLY_FILLED);
     private final TradingOrderRepository orders;
     private final OrderEventRepository events;
-    private final ProcessedCommandRepository processed;
     private final ObjectMapper objectMapper;
     private final ObservationRegistry observations;
     private final OrderMetrics metrics;
@@ -52,7 +51,8 @@ public class OrderCommandHandler {
                         AsyncDbWriter asyncDbWriter,
                         @Value("${emporia.kafka.orders-topic:emporia.orders.v1}") String ordersTopic,
                         @Value("${emporia.kafka.results-topic:emporia.order.results.v1}") String resultsTopic) {
-        this.orders = orders; this.events = events; this.processed = processed; this.objectMapper = objectMapper;
+        this.orders = orders; this.events = events;
+        this.objectMapper = objectMapper;
         this.observations = observations; this.metrics = metrics; this.cache = cache;
         this.asyncDbWriter = asyncDbWriter;
         this.ordersTopic = ordersTopic;
