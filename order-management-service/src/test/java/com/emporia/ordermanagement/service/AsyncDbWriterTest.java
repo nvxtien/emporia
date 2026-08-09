@@ -20,11 +20,13 @@ import java.util.List;
 import java.util.UUID;
 
 import static com.emporia.events.TradingEvents.SCHEMA_VERSION;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class AsyncDbWriterTest {
     private final TradingOrderRepository orders = mock(TradingOrderRepository.class);
@@ -62,6 +64,44 @@ class AsyncDbWriterTest {
     }
 
     @Test
+    void retriesRecordsDrainedByAFailedFlush() {
+        when(orders.saveAll(anyList()))
+                .thenThrow(new RuntimeException("database unavailable"))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        writer.enqueue(testOrder());
+
+        assertThatThrownBy(writer::flush)
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("database unavailable");
+
+        writer.flush();
+
+        verify(orders, times(2)).saveAll(anyList());
+    }
+
+    @Test
+    void failedFlushDoesNotCompactWalUntilRestoredRecordsPersist() {
+        MemoryMappedWalLogger wal = mock(MemoryMappedWalLogger.class);
+        org.mockito.Mockito.when(wal.isEnabled()).thenReturn(true);
+        AsyncDbWriter writerWithWal = new AsyncDbWriter(orders, events, processed, null, outbox, null, wal, null);
+        when(orders.saveAll(anyList()))
+                .thenThrow(new RuntimeException("database unavailable"))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        writerWithWal.enqueue(testOrder());
+
+        assertThatThrownBy(writerWithWal::flush)
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("database unavailable");
+        verify(wal, never()).compactToSafePoint();
+
+        writerWithWal.flush();
+
+        verify(wal, times(1)).compactToSafePoint();
+    }
+
+    @Test
     void enqueuesAndFlushesOutboxRecordsInBatch() {
         AsyncDbWriter writerWithOutbox = new AsyncDbWriter(orders, events, processed, null, outbox, null, null, null);
         writerWithOutbox.enqueue(new OrderOutboxRecord("orders-topic", "order-1",
@@ -89,5 +129,12 @@ class AsyncDbWriterTest {
 
         writerWithWal.flush();
         verify(wal, times(1)).compactToSafePoint();
+    }
+
+    private static TradingOrder testOrder() {
+        ListingSnapshot listing = new ListingSnapshot(1L, 1, "AAPL", "Apple Inc.", "AAPL", "XNAS", "Nasdaq", "US", "USD",
+                new BigDecimal("0.01"), BigDecimal.ONE, new BigDecimal("200"), new BigDecimal("198"));
+        return new TradingOrder(UUID.randomUUID(), "trader-1", listing, OrderSide.BUY, OrderType.LIMIT,
+                new BigDecimal("100"), new BigDecimal("150.00"), "DMA", "ref-1", null, null, null);
     }
 }

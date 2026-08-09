@@ -17,7 +17,7 @@ import java.sql.Timestamp;
 import java.sql.Types;
 import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentLinkedDeque;
 
 /**
  * High-performance Write-Behind asynchronous database batch writer.
@@ -39,11 +39,11 @@ public class AsyncDbWriter {
     /** Rewound once its records are persisted; null when running without a log. */
     private final MemoryMappedWalLogger wal;
 
-    private final ConcurrentLinkedQueue<TradingOrder> orderQueue = new ConcurrentLinkedQueue<>();
-    private final ConcurrentLinkedQueue<OrderEvent> eventQueue = new ConcurrentLinkedQueue<>();
-    private final ConcurrentLinkedQueue<ProcessedCommand> processedQueue = new ConcurrentLinkedQueue<>();
-    private final ConcurrentLinkedQueue<com.emporia.ordermanagement.model.OrderInputEvent> inputEventQueue = new ConcurrentLinkedQueue<>();
-    private final ConcurrentLinkedQueue<OrderOutboxRecord> outboxQueue = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedDeque<TradingOrder> orderQueue = new ConcurrentLinkedDeque<>();
+    private final ConcurrentLinkedDeque<OrderEvent> eventQueue = new ConcurrentLinkedDeque<>();
+    private final ConcurrentLinkedDeque<ProcessedCommand> processedQueue = new ConcurrentLinkedDeque<>();
+    private final ConcurrentLinkedDeque<com.emporia.ordermanagement.model.OrderInputEvent> inputEventQueue = new ConcurrentLinkedDeque<>();
+    private final ConcurrentLinkedDeque<OrderOutboxRecord> outboxQueue = new ConcurrentLinkedDeque<>();
 
     // Pre-allocated reusable batch buffers per thread / flush iteration
     private final TradingOrder[] orderBatchBuffer = new TradingOrder[BATCH_SIZE];
@@ -83,23 +83,23 @@ public class AsyncDbWriter {
     }
 
     public void enqueue(TradingOrder order) {
-        if (order != null) orderQueue.add(order);
+        if (order != null) orderQueue.addLast(order);
     }
 
     public void enqueue(OrderEvent event) {
-        if (event != null) eventQueue.add(event);
+        if (event != null) eventQueue.addLast(event);
     }
 
     public void enqueue(ProcessedCommand command) {
-        if (command != null) processedQueue.add(command);
+        if (command != null) processedQueue.addLast(command);
     }
 
     public void enqueue(com.emporia.ordermanagement.model.OrderInputEvent inputEvent) {
-        if (inputEvent != null) inputEventQueue.add(inputEvent);
+        if (inputEvent != null) inputEventQueue.addLast(inputEvent);
     }
 
     public void enqueue(OrderOutboxRecord outboxRecord) {
-        if (outboxRecord != null) outboxQueue.add(outboxRecord);
+        if (outboxRecord != null) outboxQueue.addLast(outboxRecord);
     }
 
     // Configurable so scripts/perf/wal-recovery-check.sh can widen it well
@@ -107,21 +107,30 @@ public class AsyncDbWriter {
     // than racing a 10ms flush that a single curl process cannot beat.
     @Scheduled(fixedDelayString = "${emporia.async-db-writer.flush-delay-ms:10}")
     public synchronized void flush() {
-        if (transactionTemplate != null) {
-            transactionTemplate.executeWithoutResult(status -> doFlush());
-        } else {
-            doFlush();
+        PendingFlushBatch batch = drainPendingBatch();
+        if (batch.isEmpty()) {
+            reclaimWriteAheadLog();
+            return;
         }
-    }
 
-    private void doFlush() {
-        flushOrders();
-        flushEvents();
-        flushProcessed();
-        flushInputEvents();
-        flushOutbox();
+        try {
+            persistBatch(batch);
+        } catch (RuntimeException failure) {
+            batch.restoreToQueues();
+            throw failure;
+        } finally {
+            batch.clearBuffers();
+        }
 
         reclaimWriteAheadLog();
+    }
+
+    private void persistBatch(PendingFlushBatch batch) {
+        if (transactionTemplate != null) {
+            transactionTemplate.executeWithoutResult(status -> persist(batch));
+        } else {
+            persist(batch);
+        }
     }
 
     /**
@@ -148,63 +157,67 @@ public class AsyncDbWriter {
         flush();
     }
 
-    private void flushOrders() {
-        if (orderQueue.isEmpty()) return;
-        int count = 0;
-        while (count < BATCH_SIZE) {
-            TradingOrder order = orderQueue.poll();
-            if (order == null) break;
-            orderBatchBuffer[count] = order;
-            count++;
-        }
-        if (count > 0) {
-            List<TradingOrder> batch = Arrays.asList(orderBatchBuffer).subList(0, count);
-            if (jdbcTemplate != null) {
-                flushOrdersJdbc(batch);
-            } else {
-                orders.saveAll(batch);
-            }
-            Arrays.fill(orderBatchBuffer, 0, count, null);
-        }
+    private PendingFlushBatch drainPendingBatch() {
+        return new PendingFlushBatch(
+                drain(orderQueue, orderBatchBuffer),
+                drain(eventQueue, eventBatchBuffer),
+                drain(processedQueue, processedBatchBuffer),
+                drain(inputEventQueue, inputEventBatchBuffer),
+                drain(outboxQueue, outboxBatchBuffer));
     }
 
-    private void flushEvents() {
-        if (eventQueue.isEmpty()) return;
+    private <T> int drain(ConcurrentLinkedDeque<T> queue, T[] buffer) {
         int count = 0;
         while (count < BATCH_SIZE) {
-            OrderEvent event = eventQueue.poll();
-            if (event == null) break;
-            eventBatchBuffer[count] = event;
-            count++;
-        }
-        if (count > 0) {
-            List<OrderEvent> batch = Arrays.asList(eventBatchBuffer).subList(0, count);
-            if (jdbcTemplate != null) {
-                flushEventsJdbc(batch);
-            } else {
-                events.saveAll(batch);
-            }
-            Arrays.fill(eventBatchBuffer, 0, count, null);
-        }
-    }
-
-    private void flushProcessed() {
-        if (processedQueue.isEmpty()) return;
-        int count = 0;
-        while (count < BATCH_SIZE) {
-            ProcessedCommand item = processedQueue.poll();
+            T item = queue.pollFirst();
             if (item == null) break;
-            processedBatchBuffer[count] = item;
+            buffer[count] = item;
             count++;
         }
-        if (count > 0) {
-            List<ProcessedCommand> batch = Arrays.asList(processedBatchBuffer).subList(0, count);
-            if (jdbcTemplate != null) {
-                flushProcessedJdbc(batch);
-            } else {
-                processed.saveAll(batch);
-            }
-            Arrays.fill(processedBatchBuffer, 0, count, null);
+        return count;
+    }
+
+    private <T> void restoreFront(ConcurrentLinkedDeque<T> queue, T[] buffer, int count) {
+        for (int index = count - 1; index >= 0; index--) {
+            queue.addFirst(buffer[index]);
+        }
+    }
+
+    private void persist(PendingFlushBatch batch) {
+        persistOrders(batch.orderCount);
+        persistEvents(batch.eventCount);
+        persistProcessed(batch.processedCount);
+        persistInputEvents(batch.inputEventCount);
+        persistOutbox(batch.outboxCount);
+    }
+
+    private void persistOrders(int count) {
+        if (count <= 0) return;
+        List<TradingOrder> batch = Arrays.asList(orderBatchBuffer).subList(0, count);
+        if (jdbcTemplate != null) {
+            flushOrdersJdbc(batch);
+        } else {
+            orders.saveAll(batch);
+        }
+    }
+
+    private void persistEvents(int count) {
+        if (count <= 0) return;
+        List<OrderEvent> batch = Arrays.asList(eventBatchBuffer).subList(0, count);
+        if (jdbcTemplate != null) {
+            flushEventsJdbc(batch);
+        } else {
+            events.saveAll(batch);
+        }
+    }
+
+    private void persistProcessed(int count) {
+        if (count <= 0) return;
+        List<ProcessedCommand> batch = Arrays.asList(processedBatchBuffer).subList(0, count);
+        if (jdbcTemplate != null) {
+            flushProcessedJdbc(batch);
+        } else {
+            processed.saveAll(batch);
         }
     }
 
@@ -308,23 +321,13 @@ public class AsyncDbWriter {
         });
     }
 
-    private void flushInputEvents() {
-        if (inputEventQueue.isEmpty()) return;
-        int count = 0;
-        while (count < BATCH_SIZE) {
-            com.emporia.ordermanagement.model.OrderInputEvent item = inputEventQueue.poll();
-            if (item == null) break;
-            inputEventBatchBuffer[count] = item;
-            count++;
-        }
-        if (count > 0) {
-            List<com.emporia.ordermanagement.model.OrderInputEvent> batch = Arrays.asList(inputEventBatchBuffer).subList(0, count);
-            if (jdbcTemplate != null) {
-                flushInputEventsJdbc(batch);
-            } else if (inputEvents != null) {
-                inputEvents.saveAll(batch);
-            }
-            Arrays.fill(inputEventBatchBuffer, 0, count, null);
+    private void persistInputEvents(int count) {
+        if (count <= 0) return;
+        List<com.emporia.ordermanagement.model.OrderInputEvent> batch = Arrays.asList(inputEventBatchBuffer).subList(0, count);
+        if (jdbcTemplate != null) {
+            flushInputEventsJdbc(batch);
+        } else if (inputEvents != null) {
+            inputEvents.saveAll(batch);
         }
     }
 
@@ -345,23 +348,13 @@ public class AsyncDbWriter {
         });
     }
 
-    private void flushOutbox() {
-        if (outboxQueue.isEmpty()) return;
-        int count = 0;
-        while (count < BATCH_SIZE) {
-            OrderOutboxRecord record = outboxQueue.poll();
-            if (record == null) break;
-            outboxBatchBuffer[count] = record;
-            count++;
-        }
-        if (count > 0) {
-            List<OrderOutboxRecord> batch = Arrays.asList(outboxBatchBuffer).subList(0, count);
-            if (jdbcTemplate != null) {
-                flushOutboxJdbc(batch);
-            } else if (outbox != null) {
-                outbox.saveAll(batch);
-            }
-            Arrays.fill(outboxBatchBuffer, 0, count, null);
+    private void persistOutbox(int count) {
+        if (count <= 0) return;
+        List<OrderOutboxRecord> batch = Arrays.asList(outboxBatchBuffer).subList(0, count);
+        if (jdbcTemplate != null) {
+            flushOutboxJdbc(batch);
+        } else if (outbox != null) {
+            outbox.saveAll(batch);
         }
     }
 
@@ -378,5 +371,49 @@ public class AsyncDbWriter {
             ps.setBytes(4, r.getPayload());
             ps.setTimestamp(5, r.getCreatedAt() == null ? null : Timestamp.from(r.getCreatedAt()));
         });
+    }
+
+    private final class PendingFlushBatch {
+        private final int orderCount;
+        private final int eventCount;
+        private final int processedCount;
+        private final int inputEventCount;
+        private final int outboxCount;
+        private boolean restored;
+
+        private PendingFlushBatch(int orderCount, int eventCount, int processedCount,
+                                  int inputEventCount, int outboxCount) {
+            this.orderCount = orderCount;
+            this.eventCount = eventCount;
+            this.processedCount = processedCount;
+            this.inputEventCount = inputEventCount;
+            this.outboxCount = outboxCount;
+        }
+
+        private boolean isEmpty() {
+            return orderCount == 0
+                    && eventCount == 0
+                    && processedCount == 0
+                    && inputEventCount == 0
+                    && outboxCount == 0;
+        }
+
+        private void restoreToQueues() {
+            if (restored) return;
+            restoreFront(outboxQueue, outboxBatchBuffer, outboxCount);
+            restoreFront(inputEventQueue, inputEventBatchBuffer, inputEventCount);
+            restoreFront(processedQueue, processedBatchBuffer, processedCount);
+            restoreFront(eventQueue, eventBatchBuffer, eventCount);
+            restoreFront(orderQueue, orderBatchBuffer, orderCount);
+            restored = true;
+        }
+
+        private void clearBuffers() {
+            Arrays.fill(orderBatchBuffer, 0, orderCount, null);
+            Arrays.fill(eventBatchBuffer, 0, eventCount, null);
+            Arrays.fill(processedBatchBuffer, 0, processedCount, null);
+            Arrays.fill(inputEventBatchBuffer, 0, inputEventCount, null);
+            Arrays.fill(outboxBatchBuffer, 0, outboxCount, null);
+        }
     }
 }
