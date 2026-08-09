@@ -119,6 +119,39 @@ class MemoryMappedWalLoggerTest {
     }
 
     @Test
+    void reopenedWalAppendsAfterReplayedRecordsThatAreNotFlushedYet() {
+        String path = walPath("replay-overwrite");
+        TradingEvents.OrderCommand replayed = TestCommands.command(UUID.randomUUID());
+        TradingEvents.OrderCommand live = TestCommands.command(UUID.randomUUID());
+
+        try (MemoryMappedWalLogger crashedProcess = new MemoryMappedWalLogger(path, 1)) {
+            crashedProcess.append(SbeEncoderDecoder.encodeOrderCommand(replayed));
+            crashedProcess.force();
+        }
+
+        try (MemoryMappedWalLogger restartedProcess = new MemoryMappedWalLogger(path, 1)) {
+            assertThat(restartedProcess.readPendingRecords()).hasSize(1);
+
+            // This is the dangerous production window: startup replay has called
+            // OrderCommandHandler.handle(...), which only enqueues async DB/outbox
+            // writes. Before AsyncDbWriter flushes those queues, the Disruptor
+            // starts accepting live commands and appends the next one.
+            restartedProcess.append(SbeEncoderDecoder.encodeOrderCommand(live));
+            restartedProcess.force();
+        }
+
+        try (MemoryMappedWalLogger secondRestart = new MemoryMappedWalLogger(path, 1)) {
+            java.util.List<TradingEvents.OrderCommand> recovered = secondRestart.readPendingRecords().stream()
+                    .map(SbeEncoderDecoder::decodeOrderCommand)
+                    .toList();
+
+            assertThat(recovered)
+                    .extracting(TradingEvents.OrderCommand::commandId)
+                    .containsExactly(replayed.commandId(), live.commandId());
+        }
+    }
+
+    @Test
     void doesNotReplayRecordsThatCompactionAlreadyReclaimed() {
         String path = walPath("no-stale");
         byte[] persisted = new byte[]{1, 2, 3, 4, 5, 6, 7, 8};

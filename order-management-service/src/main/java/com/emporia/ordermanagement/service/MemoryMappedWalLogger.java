@@ -1,6 +1,5 @@
 package com.emporia.ordermanagement.service;
 
-import com.emporia.events.sbe.SbeEncoderDecoder;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,7 +29,7 @@ public class MemoryMappedWalLogger implements Closeable {
 
     private static final Logger log = LoggerFactory.getLogger(MemoryMappedWalLogger.class);
 
-    private static final int DEFAULT_FILE_SIZE = 64 * 1024 * 1024; // 64 MB
+    private static final int LENGTH_PREFIX_BYTES = Integer.BYTES;
 
     private final Path walPath;
     /** Position through which records are handled and queued for the database. */
@@ -65,7 +64,9 @@ public class MemoryMappedWalLogger implements Closeable {
             this.file = new RandomAccessFile(walPath.toFile(), "rw");
             this.channel = file.getChannel();
             this.mappedBuffer = channel.map(FileChannel.MapMode.READ_WRITE, 0, capacityBytes);
-            log.info("Memory-Mapped WAL initialized: path={} sizeMB={}", walPath, capacityBytes / (1024 * 1024));
+            int liveEnd = liveEndOffset();
+            mappedBuffer.position(liveEnd);
+            log.info("Memory-Mapped WAL initialized: path={} sizeMB={} liveBytes={}", walPath, capacityBytes / (1024 * 1024), liveEnd);
         } catch (IOException error) {
             log.error("Failed to initialize Memory-Mapped WAL logger at {}", walPath, error);
             throw new IllegalStateException("Memory-Mapped WAL initialization failed", error);
@@ -83,7 +84,7 @@ public class MemoryMappedWalLogger implements Closeable {
             return false;
         }
 
-        int requiredBytes = 4 + sbePayload.length; // 4-byte length prefix + payload
+        int requiredBytes = LENGTH_PREFIX_BYTES + sbePayload.length;
         if (mappedBuffer.remaining() < requiredBytes) {
             log.warn("Memory-Mapped WAL log file full (capacity {} MB)", capacityBytes / (1024 * 1024));
             return false;
@@ -170,9 +171,9 @@ public class MemoryMappedWalLogger implements Closeable {
     /**
      * Reads the records this log still holds, oldest first.
      *
-     * <p>Intended for recovery, before anything is appended: a fresh mapping
-     * starts writing at zero, so replaying afterwards would read records the
-     * process had already begun overwriting.
+     * <p>Intended for recovery. Reopening a WAL scans to the same live-data
+     * boundary this method reads through, so commands appended after replay are
+     * written after the recovered records rather than over them.
      *
      * <p>Stops at the first frame whose length is not a plausible record. A file
      * is created at full size and zero-filled, and compaction blanks what it
@@ -182,15 +183,16 @@ public class MemoryMappedWalLogger implements Closeable {
         if (mappedBuffer == null) return List.of();
         List<byte[]> records = new ArrayList<>();
         int cursor = 0;
-        while (cursor + 4 <= capacityBytes) {
+        int liveEnd = liveEndOffset();
+        while (cursor + LENGTH_PREFIX_BYTES <= liveEnd) {
             int length = mappedBuffer.getInt(cursor);
-            if (length <= 0 || cursor + 4 + length > capacityBytes) break;
+            if (isNotValidFrame(cursor, length)) break;
             byte[] record = new byte[length];
             for (int i = 0; i < length; i++) {
-                record[i] = mappedBuffer.get(cursor + 4 + i);
+                record[i] = mappedBuffer.get(cursor + LENGTH_PREFIX_BYTES + i);
             }
             records.add(record);
-            cursor += 4 + length;
+            cursor += LENGTH_PREFIX_BYTES + length;
         }
         return records;
     }
@@ -207,6 +209,23 @@ public class MemoryMappedWalLogger implements Closeable {
         if (mappedBuffer != null) {
             mappedBuffer.force();
         }
+    }
+
+    private int liveEndOffset() {
+        if (mappedBuffer == null) return 0;
+        int cursor = 0;
+        while (cursor + LENGTH_PREFIX_BYTES <= capacityBytes) {
+            int length = mappedBuffer.getInt(cursor);
+            if (isNotValidFrame(cursor, length)) break;
+            cursor += LENGTH_PREFIX_BYTES + length;
+        }
+        return cursor;
+    }
+
+    private boolean isNotValidFrame(int cursor, int length) {
+        return length <= 0
+                || cursor < 0
+                || cursor + LENGTH_PREFIX_BYTES + length > capacityBytes;
     }
 
     @Override

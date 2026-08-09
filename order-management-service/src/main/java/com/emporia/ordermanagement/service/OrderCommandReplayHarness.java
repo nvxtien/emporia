@@ -70,6 +70,11 @@ public class OrderCommandReplayHarness {
         }
         if (failed > 0) {
             log.error("{} of {} write-ahead log record(s) could not be replayed", failed, records.size());
+        } else {
+            // Replayed records are now handled and queued for AsyncDbWriter.
+            // Keep them in the WAL until the async flush drains DB/outbox queues,
+            // then compaction can reclaim them safely.
+            wal.markSafePoint();
         }
         return outcomes;
     }
