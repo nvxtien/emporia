@@ -57,7 +57,7 @@ flowchart TD
     Alpaca[Alpaca IEX] -->|snapshot + WebSocket| Market
     Orders -->|validate listing| Static
 
-    Orders -->|async audit / distribution| OrderLog[[emporia.orders.v1]]
+    Orders -->|order_outbox CDC via Kafka Connect| OrderLog[[emporia.orders.v1]]
     Execution -->|SMART/VWAP child CREATE| Commands[[emporia.order.commands.v1]]
     Commands --> Orders
     Orders -->|correlated result| Results[[emporia.order.results.v1]]
@@ -79,9 +79,12 @@ flowchart TD
 The browser sees one `/api` surface. The gateway routes requests by path and
 HTTP method to the service that owns each business capability. Mutating order
 calls (`POST`/`PUT /api/orders/**`) go directly to `order-management`, which
-handles them on an in-process LMAX Disruptor and publishes Kafka events
-asynchronously for execution and audit. The same Kafka command path also
-carries `execution`'s internally generated SMART/VWAP child orders — see
+handles them on an in-process LMAX Disruptor and writes `order_outbox` records
+in the same persistence boundary as the order transition. Kafka Connect
+Debezium CDC-relays those records to `emporia.orders.v1` asynchronously for
+execution and audit, so Kafka is not on the browser request critical path. The
+same Kafka command path also carries `execution`'s internally generated
+SMART/VWAP child orders — see
 [Kafka command path](#kafka-command-path-execution-child-orders) below.
 
 ## Service ownership
@@ -117,9 +120,9 @@ cross-schema foreign key.
 3. `OrderCommandHandler` applies the transition against the in-memory order
    cache, enqueues write-behind persistence, and returns the correlated result
    to the waiting HTTP request.
-4. OMS publishes order domain events to `emporia.orders.v1` asynchronously for
-   `execution` and audit consumers (Kafka is not on the request
-   critical path).
+4. OMS writes order domain events to `order_outbox` with the order transition.
+   The Debezium Kafka Connect connector CDC-relays them to `emporia.orders.v1`
+   asynchronously for `execution` and audit consumers.
 
 ### Kafka command path (execution child orders)
 
@@ -179,7 +182,8 @@ internal service-account token policy are documented in
 - Java 21 or newer
 - Maven 3.9+
 - Node.js and npm
-- PostgreSQL running at `localhost:5432` for non-Docker local runs
+- PostgreSQL running at `localhost:5432` for non-Docker local runs, with
+  logical replication enabled for Debezium outbox CDC
 - Docker with Compose for Docker-managed infrastructure or full-stack deployment
 - **Exchange-Core Engine**: Clone and install [`exchange-core`](https://github.com/nvxtien/exchange-core) (`mvn clean install`) into your local Maven repository before building Emporia.
 
@@ -191,6 +195,8 @@ Non-Docker local PostgreSQL settings:
   `scripts/seed-portfolio-client.sh` default `DB_USERNAME` accordingly;
   override `DB_USERNAME` if your local Postgres uses a different role
 - Password: `admin123`
+- Logical replication: `wal_level=logical`, `max_replication_slots >= 1`, and
+  `max_wal_senders >= 1`; restart PostgreSQL after changing these settings
 
 Flyway creates these service-owned schemas in the local `emporia` database:
 `emporia_authentication`, `emporia_static_data`, `emporia_client_config`,
@@ -205,6 +211,9 @@ Flyway creates these service-owned schemas in the local `emporia` database:
 | Full Docker | Docker containers | Docker containers | One PostgreSQL database/container per service that owns persistent data |
 
 See [Start locally](#start-locally) below for how each mode is brought up.
+Every supported mode starts Kafka Connect on container port `8083` and exposes
+it on host port `18083` where needed, leaving host port `8083` available for
+`user-preferences-service`.
 
 ## Start locally
 
@@ -272,7 +281,9 @@ gRPC sources, export `MARKET_DATA_PROVIDER=fix-simulator` and
 connection string format and behavior.
 
 Each script logs every service to `.local-run/logs/<service>.log` and tracks
-its pid in `.local-run/pids/<service>.pid`.
+its pid in `.local-run/pids/<service>.pid`. Both scripts start Kafka Connect
+and register the `order-outbox-connector` after `order-management` is healthy
+but before `execution`, `gateway`, and the frontend start accepting traffic.
 
 #### Check service status
 
@@ -292,9 +303,10 @@ curl -fsS -o /dev/null -w 'frontend: %{http_code}\n' http://localhost:3001
 Other useful checks:
 
 ```bash
-cat .local-run/pids/*.pid                    # pid recorded per running service
-tail -f .local-run/logs/execution-service.log  # live logs for one service
-docker compose ps kafka                        # Kafka container health
+cat .local-run/pids/*.pid                                      # pid recorded per running service
+tail -f .local-run/logs/execution-service.log                    # live logs for one service
+docker compose ps kafka kafka-connect                            # Kafka/Connect container health
+curl -fsS http://localhost:18083/connectors/order-outbox-connector/status
 ```
 
 Stop everything either script started, including the Kafka and/or
@@ -315,10 +327,13 @@ scripts/seed-portfolio-client.sh <username>
 ### Manual, per-service startup
 
 Running one service by hand (for example under a debugger) is still
-supported. Kafka must already be running (`docker compose up -d kafka`), and
-`authentication` should start before any service that validates its own OAuth
-tokens. Each service's own README documents its environment variables and
-`mvn spring-boot:run` / `npm run dev` command:
+supported. Kafka and Kafka Connect must already be running
+(`docker compose up -d kafka kafka-connect`), and `authentication` should start
+before any service that validates its own OAuth tokens. After
+`order-management` is healthy, run `scripts/register-outbox-connector.sh`
+before starting `execution` or `gateway`; that connector is what relays
+`order_outbox` to `emporia.orders.v1`. Each service's own README documents its
+environment variables and `mvn spring-boot:run` / `npm run dev` command:
 [`authentication`](authentication/README.md),
 [`static-data`](static-data-service/README.md),
 [`user-preferences`](user-preferences-service/README.md),
@@ -328,8 +343,9 @@ tokens. Each service's own README documents its environment variables and
 [`portfolio`](portfolio-service/README.md),
 [`gateway`](gateway/README.md), and [`frontend`](frontend/README.md).
 
-Every service supports `GET /actuator/health` without a token. Kafka is healthy
-when `docker compose ps kafka` reports `healthy`.
+Every service supports `GET /actuator/health` without a token. Kafka and Kafka
+Connect are healthy when `docker compose ps kafka kafka-connect` reports
+`healthy`.
 
 ---
 
@@ -359,8 +375,9 @@ starting containers or services by hand.
 
 This is Mode 2 from [Start locally](#start-locally): `scripts/run-infra-docker.sh`
 starts one PostgreSQL 16 container per service that owns persistent data
-(ports `5433`-`5438`) plus Apache Kafka 4.3.1 (`9092`), then runs every Spring
-Boot service and the frontend on your host JVM against those containers.
+(ports `5433`-`5438`) plus Apache Kafka 4.3.1 (`9092`) and Kafka Connect
+(`18083` on the host), then runs every Spring Boot service and the frontend on
+your host JVM against those containers.
 
 | Service | Host port | Database | Schema |
 |---|---:|---|---|
@@ -386,9 +403,10 @@ docker compose ps
 ### 2. Full-Stack Docker Container Deployment
 
 To launch all 8 microservices, API Gateway, React UI, service-owned PostgreSQL
-instances, and Kafka in containers, build the Maven jars first — each
-Dockerfile copies a pre-built `target/*.jar` rather than building from
-source — then run `scripts/local-deploy.sh`:
+instances, Kafka, Kafka Connect, and the outbox connector registrar in
+containers, build the Maven jars first — each Dockerfile copies a pre-built
+`target/*.jar` rather than building from source — then run
+`scripts/local-deploy.sh`:
 
 ```bash
 # 1. Build and install exchange-core into your local Maven repo

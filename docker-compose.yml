@@ -127,10 +127,9 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
-      order-management-postgres:
-        condition: service_healthy
     ports:
-      - "8083:8083"
+      # 8083 is user-preferences-service in host-JVM run modes.
+      - "18083:8083"
     environment:
       BOOTSTRAP_SERVERS: kafka:9092
       GROUP_ID: emporia-outbox-connect
@@ -141,6 +140,10 @@ services:
       OFFSET_STORAGE_REPLICATION_FACTOR: 1
       STATUS_STORAGE_REPLICATION_FACTOR: 1
       CONNECT_EXACTLY_ONCE_SOURCE_SUPPORT: enabled
+    extra_hosts:
+      # Lets the local-mode connector reach the host PostgreSQL on Linux.
+      # Docker Desktop also provides this name on macOS.
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8083/connectors"]
       interval: 5s

@@ -35,11 +35,6 @@ for c in authentication-postgres static-data-postgres user-preferences-postgres 
     wait_docker_healthy "$c" docker-compose.yml
 done
 
-# CDC-drains order_outbox once order-management-service starts writing to it -
-# must be registered before the app starts, so nothing it writes is missed.
-echo "==> Registering the order_outbox CDC connector"
-"$repo_root/scripts/register-outbox-connector.sh"
-
 # clean is required: the protobuf-maven-plugin has produced inconsistent
 # incremental builds against a stale target/ from an earlier run.
 echo "==> Building and installing reactor modules (mvn clean install -DskipTests)"
@@ -87,6 +82,11 @@ PGPASSWORD=admin123 provision_portfolio_client "$BOOTSTRAP_ADMIN_USERNAME" psql 
 # as new ones. It therefore has to start after order-management is serving, not
 # merely after it has been launched.
 wait_http_health order-management-service http://localhost:8086/actuator/health
+
+# CDC-drains order_outbox after Flyway has created the table, but before
+# execution/gateway/frontend start accepting traffic.
+echo "==> Registering the order_outbox CDC connector"
+"$repo_root/scripts/register-outbox-connector.sh"
 
 DB_URL=jdbc:postgresql://localhost:5437/emporia_execution \
 DB_PASSWORD=admin123 \
