@@ -31,6 +31,17 @@ class OrderShadowComparisonServiceTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
+    void emptyInputLogDoesNotReportPerfectCoverage() {
+        OrderShadowComparisonService service = new OrderShadowComparisonService(inputEvents, processed, events, objectMapper);
+        when(inputEvents.findAllByOrderBySequenceIdAsc()).thenReturn(List.of());
+
+        OrderShadowComparisonService.ShadowComparisonReport report = service.compare(10);
+
+        assertThat(report.totalCommands()).isZero();
+        assertThat(report.passRate()).isZero();
+    }
+
+    @Test
     void reportsPerfectMatchForRejectedCommandWithNoEvents() throws Exception {
         OrderShadowComparisonService service = new OrderShadowComparisonService(inputEvents, processed, events, objectMapper);
         OrderCommand command = new OrderCommand(

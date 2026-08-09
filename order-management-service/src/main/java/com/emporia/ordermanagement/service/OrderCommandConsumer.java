@@ -2,22 +2,17 @@ package com.emporia.ordermanagement.service;
 
 import com.emporia.events.TradingEvents.OrderCommand;
 import com.emporia.ordermanagement.disruptor.DisruptorOrderPipeline;
-import com.emporia.ordermanagement.model.OrderInputEvent;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
-import tools.jackson.databind.ObjectMapper;
 
 @Component
 public class OrderCommandConsumer {
     private final DisruptorOrderPipeline disruptorPipeline;
-    private final AsyncDbWriter asyncDbWriter;
-    private final ObjectMapper objectMapper;
+    private final OrderInputEventRecorder inputRecorder;
 
-    public OrderCommandConsumer(DisruptorOrderPipeline disruptorPipeline, AsyncDbWriter asyncDbWriter,
-                                ObjectMapper objectMapper) {
+    public OrderCommandConsumer(DisruptorOrderPipeline disruptorPipeline, OrderInputEventRecorder inputRecorder) {
         this.disruptorPipeline = disruptorPipeline;
-        this.asyncDbWriter = asyncDbWriter;
-        this.objectMapper = objectMapper;
+        this.inputRecorder = inputRecorder;
     }
 
     // Keep this consumer identity stable across the service rename. Changing it would make
@@ -28,8 +23,8 @@ public class OrderCommandConsumer {
     // strategy child orders take (see ExecutionEventConsumer.publishChild in
     // execution-service), so it needs the same WAL and outbox durability REST orders get.
     @KafkaListener(topics = "${emporia.kafka.commands-topic}", groupId = "order-data-service-v1")
-    public void consume(OrderCommand command) throws Exception {
-        asyncDbWriter.enqueue(new OrderInputEvent(command, objectMapper.writeValueAsString(command)));
+    public void consume(OrderCommand command) {
+        inputRecorder.record(command);
         disruptorPipeline.submit(command).join();
     }
 }

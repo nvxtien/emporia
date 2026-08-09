@@ -30,7 +30,8 @@ class OrderCommandConsumerTest {
     void consumeLogsTheCommandThenHandsItToTheDisruptorPipeline() throws Exception {
         DisruptorOrderPipeline disruptorPipeline = mock(DisruptorOrderPipeline.class);
         AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
-        OrderCommandConsumer consumer = new OrderCommandConsumer(disruptorPipeline, asyncDbWriter, new ObjectMapper());
+        OrderCommandConsumer consumer = new OrderCommandConsumer(
+                disruptorPipeline, new OrderInputEventRecorder(asyncDbWriter, new ObjectMapper()));
 
         UUID commandId = UUID.randomUUID();
         UUID orderId = UUID.randomUUID();

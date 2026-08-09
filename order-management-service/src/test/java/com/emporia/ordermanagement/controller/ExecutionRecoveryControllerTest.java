@@ -9,6 +9,8 @@ import com.emporia.events.TradingEvents.StrategyStateView;
 import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -21,6 +23,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class ExecutionRecoveryControllerTest {
@@ -37,7 +40,7 @@ class ExecutionRecoveryControllerTest {
         when(orders.findByStatusInAndParentOrderIdIsNullOrderByCreatedAtAsc(any()))
                 .thenReturn(List.of());
 
-        ExecutionRecoveryView result = controller.recoverable();
+        ExecutionRecoveryView result = controller.recoverable(serviceJwt());
 
         assertThat(result.directOrders()).isEmpty();
         assertThat(result.strategies()).isEmpty();
@@ -50,7 +53,7 @@ class ExecutionRecoveryControllerTest {
                 .thenReturn(List.of(dma));
         when(orders.findByParentOrderIdOrderByCreatedAtAsc(dma.getId())).thenReturn(List.of());
 
-        ExecutionRecoveryView result = controller.recoverable();
+        ExecutionRecoveryView result = controller.recoverable(serviceJwt());
 
         assertThat(result.directOrders()).hasSize(1);
         assertThat(result.directOrders().getFirst().id()).isEqualTo(dma.getId());
@@ -64,7 +67,7 @@ class ExecutionRecoveryControllerTest {
                 .thenReturn(List.of(vwap));
         when(orders.findByParentOrderIdOrderByCreatedAtAsc(vwap.getId())).thenReturn(List.of());
 
-        ExecutionRecoveryView result = controller.recoverable();
+        ExecutionRecoveryView result = controller.recoverable(serviceJwt());
 
         assertThat(result.directOrders()).isEmpty();
         assertThat(result.strategies()).hasSize(1);
@@ -82,7 +85,7 @@ class ExecutionRecoveryControllerTest {
         when(orders.findByParentOrderIdOrderByCreatedAtAsc(parent.getId()))
                 .thenReturn(List.of(child1, child2));
 
-        ExecutionRecoveryView result = controller.recoverable();
+        ExecutionRecoveryView result = controller.recoverable(serviceJwt());
 
         assertThat(result.strategies()).hasSize(1);
         StrategyStateView state = result.strategies().getFirst();
@@ -102,10 +105,32 @@ class ExecutionRecoveryControllerTest {
         when(orders.findByParentOrderIdOrderByCreatedAtAsc(dma.getId())).thenReturn(List.of());
         when(orders.findByParentOrderIdOrderByCreatedAtAsc(vwap.getId())).thenReturn(List.of());
 
-        ExecutionRecoveryView result = controller.recoverable();
+        ExecutionRecoveryView result = controller.recoverable(serviceJwt());
 
         assertThat(result.directOrders()).hasSize(1);
         assertThat(result.strategies()).hasSize(1);
+    }
+
+    @Test
+    void recoverableAllowsAdminRole() {
+        when(orders.findByStatusInAndParentOrderIdIsNullOrderByCreatedAtAsc(any()))
+                .thenReturn(List.of());
+
+        ExecutionRecoveryView result = controller.recoverable(adminJwt());
+
+        assertThat(result.directOrders()).isEmpty();
+        assertThat(result.strategies()).isEmpty();
+    }
+
+    @Test
+    void recoverableRejectsAuthenticatedUserWithoutRecoveryRole() {
+        assertThatThrownBy(() -> controller.recoverable(userJwt()))
+                .isInstanceOfSatisfying(ResponseStatusException.class, exception -> {
+                    assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+                    assertThat(exception.getReason()).isEqualTo("Execution recovery access required");
+                });
+
+        verifyNoInteractions(orders);
     }
 
     // -------------------------------------------------------------------------
@@ -121,7 +146,7 @@ class ExecutionRecoveryControllerTest {
         when(orders.findByParentOrderIdOrderByCreatedAtAsc(parent.getId()))
                 .thenReturn(List.of(child));
 
-        StrategyStateView result = controller.strategy(parent.getId());
+        StrategyStateView result = controller.strategy(serviceJwt(), parent.getId());
 
         assertThat(result.parent().id()).isEqualTo(parent.getId());
         assertThat(result.children()).hasSize(1);
@@ -133,7 +158,7 @@ class ExecutionRecoveryControllerTest {
         UUID missingId = UUID.randomUUID();
         when(orders.findById(missingId)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> controller.strategy(missingId))
+        assertThatThrownBy(() -> controller.strategy(serviceJwt(), missingId))
                 .isInstanceOf(ResponseStatusException.class)
                 .hasMessageContaining("Active strategy order was not found");
     }
@@ -143,7 +168,7 @@ class ExecutionRecoveryControllerTest {
         TradingOrder dma = parentOrder("DMA");
         when(orders.findById(dma.getId())).thenReturn(Optional.of(dma));
 
-        assertThatThrownBy(() -> controller.strategy(dma.getId()))
+        assertThatThrownBy(() -> controller.strategy(serviceJwt(), dma.getId()))
                 .isInstanceOf(ResponseStatusException.class)
                 .hasMessageContaining("Active strategy order was not found");
     }
@@ -155,7 +180,7 @@ class ExecutionRecoveryControllerTest {
 
         when(orders.findById(child.getId())).thenReturn(Optional.of(child));
 
-        assertThatThrownBy(() -> controller.strategy(child.getId()))
+        assertThatThrownBy(() -> controller.strategy(serviceJwt(), child.getId()))
                 .isInstanceOf(ResponseStatusException.class)
                 .hasMessageContaining("Active strategy order was not found");
     }
@@ -166,14 +191,51 @@ class ExecutionRecoveryControllerTest {
         when(orders.findById(parent.getId())).thenReturn(Optional.of(parent));
         when(orders.findByParentOrderIdOrderByCreatedAtAsc(parent.getId())).thenReturn(List.of());
 
-        StrategyStateView result = controller.strategy(parent.getId());
+        StrategyStateView result = controller.strategy(serviceJwt(), parent.getId());
 
         assertThat(result.children()).isEmpty();
+    }
+
+    @Test
+    void strategyRejectsAuthenticatedUserWithoutRecoveryRole() {
+        UUID parentId = UUID.randomUUID();
+
+        assertThatThrownBy(() -> controller.strategy(userJwt(), parentId))
+                .isInstanceOfSatisfying(ResponseStatusException.class, exception -> {
+                    assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+                    assertThat(exception.getReason()).isEqualTo("Execution recovery access required");
+                });
+
+        verifyNoInteractions(orders);
     }
 
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
+
+    private static Jwt serviceJwt() {
+        return Jwt.withTokenValue("mock-token")
+                .header("alg", "none")
+                .subject("execution-service")
+                .claim("authorities", List.of("ROLE_EXECUTION_SERVICE"))
+                .build();
+    }
+
+    private static Jwt adminJwt() {
+        return Jwt.withTokenValue("mock-token")
+                .header("alg", "none")
+                .subject("admin")
+                .claim("authorities", List.of("ROLE_USER", "ROLE_ADMIN"))
+                .build();
+    }
+
+    private static Jwt userJwt() {
+        return Jwt.withTokenValue("mock-token")
+                .header("alg", "none")
+                .subject("trader")
+                .claim("authorities", List.of("ROLE_USER"))
+                .build();
+    }
 
     private static TradingOrder parentOrder(String destination) {
         UUID id = UUID.randomUUID();

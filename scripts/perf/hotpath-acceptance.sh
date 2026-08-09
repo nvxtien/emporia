@@ -109,8 +109,12 @@ python3 - "$OUT_DIR/shadow-report.json" "$REQUIRED_SHADOW_PASS_RATE" <<'PY'
 import json, sys
 path, required = sys.argv[1], float(sys.argv[2])
 data = json.load(open(path))
+total = int(data.get("totalCommands", 0))
 rate = float(data.get("passRate", 0.0))
+print(f"    shadow commands: {total}")
 print(f"    shadow pass rate: {rate:.4f}")
+if total <= 0:
+    raise SystemExit("shadow replay did not compare any commands")
 if rate < required:
     raise SystemExit(f"shadow pass rate {rate:.4f} < required {required:.4f}")
 PY

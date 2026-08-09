@@ -12,6 +12,7 @@ import com.emporia.ordermanagement.disruptor.HotPathRejectedException;
 import com.emporia.ordermanagement.client.StaticDataClient;
 import com.emporia.ordermanagement.dto.ProcessingOutcome;
 import com.emporia.ordermanagement.service.OrderCommandHandler;
+import com.emporia.ordermanagement.service.OrderInputEventRecorder;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
 import jakarta.validation.Valid;
@@ -62,16 +63,19 @@ public class OrderCommandController {
 
     private final StaticDataClient staticData;
     private final com.emporia.ordermanagement.disruptor.DisruptorOrderPipeline disruptorPipeline;
+    private final OrderInputEventRecorder inputRecorder;
     private final ObjectMapper objectMapper;
     private final ObservationRegistry observations;
 
     public OrderCommandController(StaticDataClient staticData,
                                   OrderCommandHandler handler,
                                   com.emporia.ordermanagement.disruptor.DisruptorOrderPipeline disruptorPipeline,
+                                  OrderInputEventRecorder inputRecorder,
                                   ObjectMapper objectMapper,
                                   ObservationRegistry observations) {
         this.staticData = staticData;
         this.disruptorPipeline = disruptorPipeline;
+        this.inputRecorder = inputRecorder;
         this.objectMapper = objectMapper;
         this.observations = observations;
     }
@@ -99,7 +103,7 @@ public class OrderCommandController {
                             ? UUID.randomUUID().toString() : request.originatorReference().strip(),
                     request.parentOrderId(), request.executionParameters() == null ? Map.of() : request.executionParameters());
 
-            ProcessingOutcome outcome = await(command);
+            ProcessingOutcome outcome = submit(command);
             return read(outcome.result().payload(), OrderView.class);
         } catch (RuntimeException exception) {
             error = exception;
@@ -122,7 +126,7 @@ public class OrderCommandController {
                     jwt.getSubject(), desk(jwt), DomainClock.now(), orderId, request.expectedVersion(), null, null, null,
                     request.quantity(), request.limitPrice(), null, null, null, Map.of());
 
-            ProcessingOutcome outcome = await(command);
+            ProcessingOutcome outcome = submit(command);
             return read(outcome.result().payload(), OrderView.class);
         } catch (RuntimeException exception) {
             error = exception;
@@ -144,7 +148,7 @@ public class OrderCommandController {
                     jwt.getSubject(), desk(jwt), DomainClock.now(), orderId, null, null, null, null,
                     null, null, null, null, null, Map.of());
 
-            ProcessingOutcome outcome = await(command);
+            ProcessingOutcome outcome = submit(command);
             return read(outcome.result().payload(), OrderView.class);
         } catch (RuntimeException exception) {
             error = exception;
@@ -166,7 +170,7 @@ public class OrderCommandController {
                     jwt.getSubject(), desk(jwt), DomainClock.now(), null, null, null, null, null,
                     null, null, null, null, null, Map.of());
 
-            ProcessingOutcome outcome = await(command);
+            ProcessingOutcome outcome = submit(command);
             return read(outcome.result().payload(), CancelAllView.class);
         } catch (RuntimeException exception) {
             error = exception;
@@ -174,6 +178,11 @@ public class OrderCommandController {
         } finally {
             stopObservation(observation, error);
         }
+    }
+
+    private ProcessingOutcome submit(OrderCommand command) {
+        inputRecorder.record(command);
+        return await(command);
     }
 
     private ProcessingOutcome await(OrderCommand command) {

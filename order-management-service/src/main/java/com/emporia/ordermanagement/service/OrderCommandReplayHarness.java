@@ -46,8 +46,9 @@ public class OrderCommandReplayHarness {
      * recognised rather than applied twice. Ordering is the order they were
      * accepted in, which is the order the log holds them.
      *
-     * <p>Must run before the pipeline accepts anything, since appending starts
-     * again at the beginning of the file.
+     * <p>Must run before the pipeline accepts anything, so the process
+     * recovers the commands that are already in the WAL before appending new
+     * live traffic after the existing frames.
      */
     public List<ProcessingOutcome> replayWriteAheadLog() {
         if (wal == null || !wal.isEnabled()) return List.of();

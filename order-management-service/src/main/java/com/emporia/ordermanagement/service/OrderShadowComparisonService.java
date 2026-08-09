@@ -75,7 +75,7 @@ public class OrderShadowComparisonService {
                 orderedInputs.size(),
                 matched,
                 mismatches.size(),
-                orderedInputs.isEmpty() ? 1.0d : ((double) matched) / orderedInputs.size(),
+                orderedInputs.isEmpty() ? 0.0d : ((double) matched) / orderedInputs.size(),
                 List.copyOf(mismatches)
         );
     }

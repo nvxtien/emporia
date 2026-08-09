@@ -12,7 +12,15 @@ import com.emporia.events.TradingEvents.OrderView;
 import com.emporia.ordermanagement.disruptor.DisruptorOrderPipeline;
 import com.emporia.ordermanagement.client.StaticDataClient;
 import com.emporia.ordermanagement.dto.ProcessingOutcome;
+import com.emporia.ordermanagement.model.OrderInputEvent;
+import com.emporia.ordermanagement.repository.OrderEventRepository;
+import com.emporia.ordermanagement.repository.ProcessedCommandRepository;
+import com.emporia.ordermanagement.repository.TradingOrderRepository;
+import com.emporia.ordermanagement.service.AsyncDbWriter;
 import com.emporia.ordermanagement.service.OrderCommandHandler;
+import com.emporia.ordermanagement.service.OrderInputEventRecorder;
+import com.emporia.ordermanagement.service.OrderMetrics;
+import com.emporia.ordermanagement.service.OrderStateCache;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.observation.DefaultMeterObservationHandler;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -42,6 +50,7 @@ import static org.mockito.Mockito.when;
 class OrderCommandControllerTest {
     private final StaticDataClient staticData = mock(StaticDataClient.class);
     private final OrderCommandHandler handler = mock(OrderCommandHandler.class);
+    private final OrderInputEventRecorder inputRecorder = mock(OrderInputEventRecorder.class);
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final MeterRegistry meters = new SimpleMeterRegistry();
     private final ObservationRegistry observations = ObservationRegistry.create();
@@ -54,7 +63,7 @@ class OrderCommandControllerTest {
                 .observationHandler(new DefaultMeterObservationHandler(meters));
         disruptorPipeline = new DisruptorOrderPipeline(handler, meters, new MemoryMappedWalLogger(null, 1), null, "yielding", 0, 0, "", "");
         disruptorPipeline.start();
-        controller = new OrderCommandController(staticData, handler, disruptorPipeline, objectMapper, observations);
+        controller = new OrderCommandController(staticData, handler, disruptorPipeline, inputRecorder, objectMapper, observations);
     }
 
     @org.junit.jupiter.api.AfterEach
@@ -91,6 +100,40 @@ class OrderCommandControllerTest {
         OrderCommand command = captor.getValue();
         assertThat(command.userSubject()).isEqualTo("trader-1");
         assertThat(command.deskId()).isEqualTo("DESK-A");
+    }
+
+    @Test
+    void createOrderRecordsInputEventForShadowReplay() {
+        Jwt jwt = jwt("trader-1", true, "DESK-A");
+        ListingSnapshot listing = listing();
+        when(staticData.get(1L, "Bearer token")).thenReturn(listing);
+
+        TradingOrderRepository orders = mock(TradingOrderRepository.class);
+        OrderEventRepository events = mock(OrderEventRepository.class);
+        ProcessedCommandRepository processed = mock(ProcessedCommandRepository.class);
+        AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
+        OrderStateCache cache = new OrderStateCache(orders, processed, 1000, 1000);
+        OrderCommandHandler realHandler = new OrderCommandHandler(orders, events, processed, objectMapper,
+                observations, new OrderMetrics(new SimpleMeterRegistry()), cache, asyncDbWriter,
+                "emporia.orders.v1", "emporia.order.results.v1");
+        DisruptorOrderPipeline realPipeline = new DisruptorOrderPipeline(
+                realHandler, new SimpleMeterRegistry(), new MemoryMappedWalLogger(null, 1),
+                null, "yielding", 0, 0, "", "");
+        realPipeline.start();
+        try {
+            OrderInputEventRecorder realRecorder = new OrderInputEventRecorder(asyncDbWriter, objectMapper);
+            OrderCommandController realController = new OrderCommandController(
+                    staticData, realHandler, realPipeline, realRecorder, objectMapper, observations);
+            OrderCommandController.CreateOrderRequest request = new OrderCommandController.CreateOrderRequest(
+                    1L, OrderSide.BUY, OrderType.LIMIT, new BigDecimal("100"), new BigDecimal("150.00"),
+                    "DMA", "ref-123", null, Map.of());
+
+            realController.create(jwt, "Bearer token", "rest-idem-key", request);
+
+            verify(asyncDbWriter).enqueue(any(OrderInputEvent.class));
+        } finally {
+            realPipeline.stop();
+        }
     }
 
     @Test

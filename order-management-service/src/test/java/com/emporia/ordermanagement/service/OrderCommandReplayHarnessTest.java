@@ -75,6 +75,47 @@ class OrderCommandReplayHarnessTest {
     }
 
     @Test
+    void replayedWalCommandsAreNotOverwrittenByLiveAppendsBeforeFlush() throws Exception {
+        String path = java.nio.file.Files.createTempDirectory("wal-replay-overwrite")
+                .resolve("replay-overwrite.log").toString();
+        OrderCommand replayed = TestCommands.command(UUID.randomUUID());
+        OrderCommand live = TestCommands.command(UUID.randomUUID());
+
+        try (MemoryMappedWalLogger crashedProcess = new MemoryMappedWalLogger(path, 1)) {
+            crashedProcess.append(com.emporia.events.sbe.SbeEncoderDecoder.encodeOrderCommand(replayed));
+            crashedProcess.force();
+        }
+
+        OrderCommandHandler handler = mock(OrderCommandHandler.class);
+        try (MemoryMappedWalLogger restartedProcess = new MemoryMappedWalLogger(path, 1)) {
+            OrderCommandReplayHarness harness = new OrderCommandReplayHarness(
+                    mock(OrderInputEventRepository.class), handler, new ObjectMapper(), restartedProcess);
+
+            harness.replayWriteAheadLog();
+
+            // This is the crash window: replay has handled the command, but
+            // AsyncDbWriter has not drained DB/outbox queues or compacted WAL.
+            restartedProcess.append(com.emporia.events.sbe.SbeEncoderDecoder.encodeOrderCommand(live));
+            restartedProcess.force();
+        }
+
+        try (MemoryMappedWalLogger secondRestart = new MemoryMappedWalLogger(path, 1)) {
+            java.util.List<OrderCommand> recovered = secondRestart.readPendingRecords().stream()
+                    .map(com.emporia.events.sbe.SbeEncoderDecoder::decodeOrderCommand)
+                    .toList();
+
+            assertThat(recovered)
+                    .extracting(OrderCommand::commandId)
+                    .containsExactly(replayed.commandId(), live.commandId());
+        }
+
+        org.mockito.ArgumentCaptor<OrderCommand> capturedReplay =
+                org.mockito.ArgumentCaptor.forClass(OrderCommand.class);
+        verify(handler).handle(capturedReplay.capture());
+        assertThat(capturedReplay.getValue().commandId()).isEqualTo(replayed.commandId());
+    }
+
+    @Test
     void doesNothingWhenNoLogIsConfigured() {
         OrderCommandHandler handler = mock(OrderCommandHandler.class);
         OrderCommandReplayHarness harness = new OrderCommandReplayHarness(

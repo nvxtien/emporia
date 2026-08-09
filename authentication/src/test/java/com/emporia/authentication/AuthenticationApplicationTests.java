@@ -12,6 +12,7 @@ import org.springframework.security.oauth2.core.AuthorizationGrantType;
 import org.springframework.security.oauth2.core.ClientAuthenticationMethod;
 import org.springframework.security.oauth2.server.authorization.client.RegisteredClient;
 import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
+import tools.jackson.databind.ObjectMapper;
 
 import java.net.CookieManager;
 import java.net.URI;
@@ -21,6 +22,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -51,6 +53,8 @@ class AuthenticationApplicationTests {
 
     @Autowired
     private PasswordEncoder passwordEncoder;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     @org.junit.jupiter.api.BeforeEach
     void setUp() {
@@ -121,25 +125,24 @@ class AuthenticationApplicationTests {
 
     @Test
     void issuesAnInternalClientCredentialsTokenToMarketData() throws Exception {
-        String credentials = Base64.getEncoder().encodeToString(
-                "emporia-market-data:emporia-market-data-local-secret"
-                        .getBytes(StandardCharsets.UTF_8));
-        HttpRequest request = HttpRequest.newBuilder(
-                        URI.create("http://localhost:" + port + "/oauth2/token"))
-                .header("Authorization", "Basic " + credentials)
-                .header("Content-Type", "application/x-www-form-urlencoded")
-                .POST(HttpRequest.BodyPublishers.ofString(
-                        "grant_type=client_credentials&scope=internal"))
-                .build();
+        Map<String, Object> response = clientCredentialsTokenResponse(
+                "emporia-market-data", "emporia-market-data-local-secret");
 
-        HttpResponse<String> response = HttpClient.newHttpClient()
-                .send(request, HttpResponse.BodyHandlers.ofString());
+        assertThat(response.get("access_token")).isInstanceOf(String.class);
+        assertThat(response)
+                .containsEntry("token_type", "Bearer")
+                .containsEntry("scope", "internal");
+    }
 
-        assertThat(response.statusCode()).isEqualTo(200);
-        assertThat(response.body())
-                .contains("\"access_token\":")
-                .contains("\"token_type\":\"Bearer\"")
-                .contains("\"scope\":\"internal\"");
+    @Test
+    void issuesExecutionClientCredentialsTokenWithRecoveryRole() throws Exception {
+        Map<String, Object> response = clientCredentialsTokenResponse(
+                "emporia-execution", "emporia-execution-local-secret");
+
+        Map<String, Object> claims = claims((String) response.get("access_token"));
+
+        assertThat(claims.get("scope")).asList().contains("internal");
+        assertThat(claims.get("authorities")).asList().contains("ROLE_EXECUTION_SERVICE");
     }
 
     @Test
@@ -402,6 +405,36 @@ class AuthenticationApplicationTests {
             request.header("Content-Type", "application/json");
         }
         return client.send(request.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private Map<String, Object> clientCredentialsTokenResponse(String clientId, String clientSecret) throws Exception {
+        String credentials = Base64.getEncoder().encodeToString(
+                (clientId + ":" + clientSecret).getBytes(StandardCharsets.UTF_8));
+        HttpRequest request = HttpRequest.newBuilder(
+                        URI.create("http://localhost:" + port + "/oauth2/token"))
+                .header("Authorization", "Basic " + credentials)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .POST(HttpRequest.BodyPublishers.ofString(
+                        "grant_type=client_credentials&scope=internal"))
+                .build();
+
+        HttpResponse<String> response = HttpClient.newHttpClient()
+                .send(request, HttpResponse.BodyHandlers.ofString());
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        return stringObjectMap(response.body());
+    }
+
+    private Map<String, Object> claims(String token) throws Exception {
+        String[] parts = token.split("\\.");
+        assertThat(parts).hasSizeGreaterThanOrEqualTo(2);
+        String payload = new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
+        return stringObjectMap(payload);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> stringObjectMap(String json) throws Exception {
+        return (Map<String, Object>) objectMapper.readValue(json, Map.class);
     }
 
     private static String form(String name, String value) {

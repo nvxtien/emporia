@@ -1,6 +1,7 @@
 package com.emporia.authentication.config;
 
 import com.emporia.authentication.user.UserAccountRepository;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.convert.converter.Converter;
 import org.springframework.security.authentication.AbstractAuthenticationToken;
 import org.springframework.security.authentication.DisabledException;
@@ -16,6 +17,7 @@ import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.crypto.factory.PasswordEncoderFactories;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.oauth2.core.AuthorizationGrantType;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.oauth2.server.resource.authentication.JwtGrantedAuthoritiesConverter;
@@ -37,6 +39,10 @@ import java.util.List;
 
 @Configuration(proxyBeanMethods = false)
 public class SecurityConfig {
+    private static final String EXECUTION_CLIENT_ID_PROPERTY =
+            "${spring.security.oauth2.authorizationserver.client.emporia-execution.registration.client-id:"
+                    + "emporia-execution}";
+    private static final String EXECUTION_RECOVERY_ROLE = "ROLE_EXECUTION_SERVICE";
 
     @Bean
     CorsConfigurationSource corsConfigurationSource() {
@@ -56,8 +62,16 @@ public class SecurityConfig {
     }
 
     @Bean
-    OAuth2TokenCustomizer<JwtEncodingContext> tradingIdentityClaims(UserAccountRepository users) {
+    OAuth2TokenCustomizer<JwtEncodingContext> tradingIdentityClaims(
+            UserAccountRepository users,
+            @Value(EXECUTION_CLIENT_ID_PROPERTY) String executionClientId) {
         return context -> {
+            if (AuthorizationGrantType.CLIENT_CREDENTIALS.equals(context.getAuthorizationGrantType())) {
+                if (executionClientId.equals(context.getRegisteredClient().getClientId())) {
+                    context.getClaims().claim("authorities", List.of(EXECUTION_RECOVERY_ROLE));
+                }
+                return;
+            }
             String username = context.getPrincipal().getName();
             users.findByUsernameIgnoreCase(username).ifPresent(account -> context.getClaims()
                     .claim("preferred_username", account.getUsername())
