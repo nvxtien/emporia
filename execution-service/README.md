@@ -6,6 +6,8 @@ it.
 
 See the [DMA, SMART, and VWAP execution guide](../docs/execution/README.md) for
 end-to-end flows, API examples, strategy behavior, cancellation, and recovery.
+For production internal matching, use the
+[exchange-core production runbook](../docs/execution/EXCHANGE_CORE_PRODUCTION_RUNBOOK.md).
 
 ## Routes
 
@@ -96,11 +98,18 @@ Spring profile, startup fails fast unless `EXCHANGE_CORE_STORAGE_DIRECTORY`
 points outside `.local-run` and `EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES` is
 greater than `0`.
 
+Exchange-core checkpoint pruning is generation-aware: only complete checkpoint
+generations consume retention slots, stale partial checkpoint files older than
+the latest manifest checkpoint may be removed, and journals or unrelated files
+are left alone. Manual storage cleanup must happen with `execution-service`
+stopped.
+
 Metrics are available from `/actuator/prometheus`, including routed orders,
 routing rejects, published fills, and exchange-core checkpoint age, retention,
-storage, and usable-storage gauges. In `exchange-core` mode, `/actuator/health`
-reports `DOWN` when retained checkpoint storage status is unavailable or when
-checkpoint failures have not yet been cleared by a successful snapshot.
+partial-file, storage, and usable-storage gauges. In `exchange-core` mode,
+`/actuator/health` reports `DOWN` when retained checkpoint storage status is
+unavailable or when checkpoint failures have not yet been cleared by a
+successful snapshot.
 
 ## Verify
 

@@ -37,6 +37,27 @@ class ExchangeCoreCheckpointStoreTest {
     }
 
     @Test
+    void maxCheckpointIdIncludesManifestAndOrphanFiles() throws IOException {
+        ExchangeCoreCheckpointStore store = new ExchangeCoreCheckpointStore(directory);
+        checkpointFiles(10);
+        Files.writeString(directory.resolve("emporia-simulation_snapshot_11_ME0.ecs"), "orphan");
+        partialCheckpointFiles(12);
+
+        store.save(10, Set.of(7));
+
+        assertThat(store.maxCheckpointId()).isEqualTo(12L);
+    }
+
+    @Test
+    void maxCheckpointIdFallsBackToManifestWhenNoFilesExist() throws IOException {
+        ExchangeCoreCheckpointStore store = new ExchangeCoreCheckpointStore(directory);
+
+        store.save(10, Set.of(7));
+
+        assertThat(store.maxCheckpointId()).isEqualTo(10L);
+    }
+
+    @Test
     void rejectsCorruptManifestWithClearIoFailure() throws IOException {
         Files.writeString(directory.resolve("emporia-exchange-core.latest"),
                 "checkpointId=not-a-number\nsymbols=7\n");
@@ -108,6 +129,45 @@ class ExchangeCoreCheckpointStoreTest {
     }
 
     @Test
+    void incompleteCheckpointsDoNotConsumeRetentionSlots() throws IOException {
+        ExchangeCoreCheckpointStore store = new ExchangeCoreCheckpointStore(directory);
+        checkpointFiles(1);
+        Files.writeString(directory.resolve("emporia-simulation_snapshot_2_ME0.ecs"), "incomplete");
+        partialCheckpointFiles(2);
+        checkpointFiles(3);
+
+        store.save(3, Set.of(7));
+        store.pruneRetainingLatest(2);
+
+        assertThat(fileNames()).containsExactlyInAnyOrder(
+                "emporia-exchange-core.latest",
+                "emporia-simulation_snapshot_1_ME0.ecs",
+                "emporia-simulation_snapshot_1_RE0.ecs",
+                "emporia-simulation_dma_lifecycle_1.dmas",
+                "emporia-simulation_snapshot_3_ME0.ecs",
+                "emporia-simulation_snapshot_3_RE0.ecs",
+                "emporia-simulation_dma_lifecycle_3.dmas");
+    }
+
+    @Test
+    void keepsFuturePartialCheckpointsForManualInspection() throws IOException {
+        ExchangeCoreCheckpointStore store = new ExchangeCoreCheckpointStore(directory);
+        checkpointFiles(3);
+        partialCheckpointFiles(4);
+
+        store.save(3, Set.of(7));
+        store.pruneRetainingLatest(1);
+
+        assertThat(fileNames()).containsExactlyInAnyOrder(
+                "emporia-exchange-core.latest",
+                "emporia-simulation_snapshot_3_ME0.ecs",
+                "emporia-simulation_snapshot_3_RE0.ecs",
+                "emporia-simulation_dma_lifecycle_3.dmas",
+                "emporia-simulation_snapshot_4_ME0.ecs.tmp",
+                "emporia-simulation_dma_lifecycle_4.dmas.tmp");
+    }
+
+    @Test
     void rejectsInvalidRetentionWindow() {
         ExchangeCoreCheckpointStore store = new ExchangeCoreCheckpointStore(directory);
 
@@ -120,6 +180,7 @@ class ExchangeCoreCheckpointStoreTest {
     void reportsCheckpointStorageStats() throws IOException {
         ExchangeCoreCheckpointStore store = new ExchangeCoreCheckpointStore(directory);
         checkpointFiles(7);
+        partialCheckpointFiles(8);
         Files.writeString(directory.resolve("unrelated.txt"), "abc");
 
         store.save(7, Set.of(3));
@@ -130,6 +191,7 @@ class ExchangeCoreCheckpointStoreTest {
         assertThat(stats.latestCheckpointIdOrZero()).isEqualTo(7L);
         assertThat(stats.checkpointIdCount()).isEqualTo(1);
         assertThat(stats.checkpointFileCount()).isEqualTo(3);
+        assertThat(stats.partialCheckpointFileCount()).isEqualTo(2);
         assertThat(stats.storageBytes()).isGreaterThan(3L);
         assertThat(stats.usableStorageBytes()).isPositive();
     }
@@ -157,6 +219,11 @@ class ExchangeCoreCheckpointStoreTest {
         Files.writeString(directory.resolve("emporia-simulation_snapshot_" + checkpointId + "_ME0.ecs"), "matching");
         Files.writeString(directory.resolve("emporia-simulation_snapshot_" + checkpointId + "_RE0.ecs"), "risk");
         Files.writeString(directory.resolve("emporia-simulation_dma_lifecycle_" + checkpointId + ".dmas"), "lifecycle");
+    }
+
+    private void partialCheckpointFiles(long checkpointId) throws IOException {
+        Files.writeString(directory.resolve("emporia-simulation_snapshot_" + checkpointId + "_ME0.ecs.tmp"), "partial");
+        Files.writeString(directory.resolve("emporia-simulation_dma_lifecycle_" + checkpointId + ".dmas.tmp"), "partial");
     }
 
     private List<String> fileNames() throws IOException {

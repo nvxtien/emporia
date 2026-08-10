@@ -390,6 +390,19 @@ In exchange-core mode, Emporia checkpoints after symbol registration and after
 each exchange-core order mutation before publishing the resulting execution
 commands. It also attempts a final checkpoint during graceful shutdown.
 
+Checkpoint pruning is app-owned and runs only after a checkpoint file set and
+the `emporia-exchange-core.latest` manifest have both been saved. Retention is
+based on complete checkpoint generations, where a generation has native
+exchange-core snapshot files and a DMA lifecycle file. Stale partial checkpoint
+files older than the latest manifest checkpoint can be removed during pruning,
+but files newer than the manifest are left in place for manual inspection.
+Journals, manifest temp files, and unrelated files are never pruned
+automatically. Manual storage cleanup must be done only while
+`execution-service` is stopped.
+
+For production operations, use the
+[exchange-core production runbook](EXCHANGE_CORE_PRODUCTION_RUNBOOK.md).
+
 If order management is temporarily unavailable, recovery retries after five
 seconds.
 
@@ -437,9 +450,10 @@ The health details include `checkpointStatusAvailable`,
 `checkpointFailuresSinceLastSuccess`, `lastCheckpointSuccessAt`,
 `checkpointAgeSeconds`, `checkpointStorageBytes`, and
 `checkpointUsableStorageBytes`. Prometheus exposes matching gauges for
-checkpoint age, latest checkpoint id, retained ids/files, stored bytes, usable
-storage bytes, and configured retention. Alert on any checkpoint failure, a stale
-checkpoint age for the configured snapshot interval, or low usable storage.
+checkpoint age, latest checkpoint id, retained ids/files, partial checkpoint
+files, stored bytes, usable storage bytes, and configured retention. Alert on any
+checkpoint failure, a stale checkpoint age for the configured snapshot interval,
+low usable storage, or a non-zero partial checkpoint file count.
 
 Run the focused service tests:
 
@@ -475,8 +489,9 @@ node emporia/scripts/oidc-smoke-test.mjs
 - The built-in FIX adapter does not provide durable sequence storage, resend
   recovery, certificates, counterparty certification, or production session
   controls.
-- Exchange-core checkpoint recovery restores the latest committed snapshot, but
-  continuous journal replay after that checkpoint is not enabled yet.
+- Exchange-core checkpoint recovery restores the latest committed snapshot.
+  Journalled replay is available behind `EXCHANGE_CORE_JOURNALING=true`; keep it
+  gated by `scripts/perf/crash-recovery-check.sh` before production rollout.
 
 ## Implementation map
 

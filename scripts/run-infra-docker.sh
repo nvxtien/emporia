@@ -27,6 +27,7 @@ source "$repo_root/scripts/lib/run-common.sh"
 check_exchange_core
 
 BOOTSTRAP_ADMIN_USERNAME="${BOOTSTRAP_ADMIN_USERNAME:-admin}"
+MAVEN_TEST_SKIP_ARGS=(${MAVEN_TEST_SKIP_ARGS:--DskipTests})
 
 echo "==> Starting per-service PostgreSQL containers and Kafka (Docker)"
 docker compose up -d
@@ -37,8 +38,8 @@ done
 
 # clean is required: the protobuf-maven-plugin has produced inconsistent
 # incremental builds against a stale target/ from an earlier run.
-echo "==> Building and installing reactor modules (mvn clean install -DskipTests)"
-mvn -q -f pom.xml clean install -DskipTests
+echo "==> Building and installing reactor modules (mvn clean install ${MAVEN_TEST_SKIP_ARGS[*]})"
+mvn -q -f pom.xml clean install "${MAVEN_TEST_SKIP_ARGS[@]}"
 
 AUTH_ISSUER=http://localhost:3001 \
 OAUTH_REDIRECT_URI=http://localhost:3001/auth/callback \
@@ -51,27 +52,27 @@ BOOTSTRAP_ADMIN_DESK=default \
 BOOTSTRAP_ADMIN_CAN_TRADE=true \
 DB_URL=jdbc:postgresql://localhost:5433/emporia_authentication \
 DB_PASSWORD=admin123 \
-start_service authentication authentication mvn spring-boot:run
+start_service authentication authentication mvn "${MAVEN_TEST_SKIP_ARGS[@]}" spring-boot:run
 
 wait_http_health authentication http://localhost:9000/actuator/health
 
 DB_URL=jdbc:postgresql://localhost:5434/emporia_static_data \
 DB_PASSWORD=admin123 \
-start_service static-data-service static-data-service mvn spring-boot:run
+start_service static-data-service static-data-service mvn "${MAVEN_TEST_SKIP_ARGS[@]}" spring-boot:run
 
 DB_URL=jdbc:postgresql://localhost:5435/emporia_user_preferences \
 DB_PASSWORD=admin123 \
-start_service user-preferences-service user-preferences-service mvn spring-boot:run
+start_service user-preferences-service user-preferences-service mvn "${MAVEN_TEST_SKIP_ARGS[@]}" spring-boot:run
 
-start_service market-data-service market-data-service mvn spring-boot:run
+start_service market-data-service market-data-service mvn "${MAVEN_TEST_SKIP_ARGS[@]}" spring-boot:run
 
 DB_URL=jdbc:postgresql://localhost:5436/emporia_order_management \
 DB_PASSWORD=admin123 \
-start_service order-management-service order-management-service mvn spring-boot:run
+start_service order-management-service order-management-service mvn "${MAVEN_TEST_SKIP_ARGS[@]}" spring-boot:run
 
 DB_URL=jdbc:postgresql://localhost:5438/emporia_portfolio \
 DB_PASSWORD=admin123 \
-start_service portfolio-service portfolio-service mvn spring-boot:run
+start_service portfolio-service portfolio-service mvn "${MAVEN_TEST_SKIP_ARGS[@]}" spring-boot:run
 
 wait_http_health portfolio-service http://localhost:8088/actuator/health
 PGPASSWORD=admin123 provision_portfolio_client "$BOOTSTRAP_ADMIN_USERNAME" psql -h localhost -p 5438 -U postgres -d emporia_portfolio
@@ -93,11 +94,15 @@ DB_PASSWORD=admin123 \
 EXECUTION_VENUE_MODE=${EXECUTION_VENUE_MODE:-exchange-core} \
 EXCHANGE_CORE_ACCOUNTING_MODE=${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk} \
 EXCHANGE_CORE_PORTFOLIO_URL=${EXCHANGE_CORE_PORTFOLIO_URL:-http://localhost:8088} \
-start_service execution-service execution-service mvn spring-boot:run
+EXCHANGE_CORE_JOURNALING=${EXCHANGE_CORE_JOURNALING:-false} \
+EXCHANGE_CORE_SNAPSHOT_INTERVAL=${EXCHANGE_CORE_SNAPSHOT_INTERVAL:-60s} \
+EXCHANGE_CORE_RETAINED_CHECKPOINTS=${EXCHANGE_CORE_RETAINED_CHECKPOINTS:-2} \
+EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES=${EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES:-0} \
+start_service execution-service execution-service mvn "${MAVEN_TEST_SKIP_ARGS[@]}" spring-boot:run
 
 SERVER_PORT=8082 \
 EMPORIA_AUTH_ISSUER=http://localhost:3001 \
-start_service gateway gateway mvn spring-boot:run
+start_service gateway gateway mvn "${MAVEN_TEST_SKIP_ARGS[@]}" spring-boot:run
 
 wait_http_health static-data-service http://localhost:8081/actuator/health
 wait_http_health user-preferences-service http://localhost:8083/actuator/health
@@ -118,7 +123,7 @@ cat <<EOF
 ==> Infrastructure-only Docker stack is up
     Frontend:         http://localhost:3001  (sign in: admin / admin123)
     Gateway:          http://localhost:8082
-    Execution venue:  ${EXECUTION_VENUE_MODE:-exchange-core} (accounting: ${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk})
+    Execution venue:  ${EXECUTION_VENUE_MODE:-exchange-core} (accounting: ${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk}, journaling: ${EXCHANGE_CORE_JOURNALING:-false})
     Market data:      ${MARKET_DATA_PROVIDER:-simulated}
     Traces/metrics:   http://localhost:3300  (Grafana: Tempo + Prometheus)
     Postgres/Kafka:   docker compose ps

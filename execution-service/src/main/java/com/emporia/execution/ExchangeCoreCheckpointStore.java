@@ -9,8 +9,10 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
@@ -22,7 +24,11 @@ import java.util.stream.Stream;
 final class ExchangeCoreCheckpointStore {
     private static final String FILE_NAME = "emporia-exchange-core.latest";
     private static final Pattern SNAPSHOT_FILE = Pattern.compile(".+_snapshot_(\\d+)_[A-Z]+\\d+\\.ecs");
+    private static final Pattern SNAPSHOT_PARTIAL_FILE =
+            Pattern.compile(".+_snapshot_(\\d+)_[A-Z]+\\d+\\.ecs\\..+");
     private static final Pattern DMA_LIFECYCLE_FILE = Pattern.compile(".+_dma_lifecycle_(\\d+)\\.dmas");
+    private static final Pattern DMA_LIFECYCLE_PARTIAL_FILE =
+            Pattern.compile(".+_dma_lifecycle_(\\d+)\\.dmas\\..+");
 
     private final Path directory;
     private final Path manifest;
@@ -96,13 +102,15 @@ final class ExchangeCoreCheckpointStore {
 
         long latestCheckpointId = latest.get().checkpointId();
         List<CheckpointFile> files = checkpointFiles();
-        Set<Long> retainedIds = files.stream()
-                                     .map(CheckpointFile::checkpointId)
-                                     .filter(checkpointId -> checkpointId <= latestCheckpointId)
-                                     .distinct()
-                                     .sorted(Comparator.reverseOrder())
-                                     .limit(retainedCheckpoints)
-                                     .collect(Collectors.toCollection(HashSet::new));
+        Map<Long, CheckpointGeneration> generations = checkpointGenerations(files);
+        Set<Long> retainedIds = generations.values().stream()
+                                           .filter(CheckpointGeneration::complete)
+                                           .map(CheckpointGeneration::checkpointId)
+                                           .filter(checkpointId -> checkpointId <= latestCheckpointId)
+                                           .distinct()
+                                           .sorted(Comparator.reverseOrder())
+                                           .limit(retainedCheckpoints)
+                                           .collect(Collectors.toCollection(HashSet::new));
         retainedIds.add(latestCheckpointId);
 
         for (CheckpointFile file : files) {
@@ -116,24 +124,42 @@ final class ExchangeCoreCheckpointStore {
     StorageStats stats() throws IOException {
         Optional<LatestCheckpoint> latest = load();
         if (!Files.isDirectory(directory)) {
-            return new StorageStats(directory, latest.map(LatestCheckpoint::checkpointId), 0, 0, 0, 0);
+            return new StorageStats(directory, latest.map(LatestCheckpoint::checkpointId), 0, 0, 0, 0, 0);
         }
 
         List<CheckpointFile> checkpoints = checkpointFiles();
+        Map<Long, CheckpointGeneration> generations = checkpointGenerations(checkpoints);
         long bytes = regularStorageBytes();
         long usableBytes = Files.getFileStore(directory).getUsableSpace();
-        long checkpointIds = checkpoints.stream()
-                                        .mapToLong(CheckpointFile::checkpointId)
-                                        .distinct()
-                                        .count();
+        long completeCheckpointIds = generations.values().stream()
+                                                .filter(CheckpointGeneration::complete)
+                                                .count();
+        long completeCheckpointFiles = checkpoints.stream()
+                                                 .filter(CheckpointFile::complete)
+                                                 .count();
+        long partialCheckpointFiles = checkpoints.stream()
+                                                 .filter(CheckpointFile::partial)
+                                                 .count();
         return new StorageStats(directory, latest.map(LatestCheckpoint::checkpointId),
-                                (int) checkpointIds, checkpoints.size(), bytes, usableBytes);
+                                (int) completeCheckpointIds, (int) completeCheckpointFiles,
+                                (int) partialCheckpointFiles, bytes, usableBytes);
     }
 
     long usableStorageBytes() throws IOException {
         Files.createDirectories(directory);
         FileStore store = Files.getFileStore(directory);
         return store.getUsableSpace();
+    }
+
+    long maxCheckpointId() throws IOException {
+        long maxCheckpointId = load().map(LatestCheckpoint::checkpointId).orElse(0L);
+        if (!Files.isDirectory(directory)) {
+            return maxCheckpointId;
+        }
+        for (CheckpointFile file : checkpointFiles()) {
+            maxCheckpointId = Math.max(maxCheckpointId, file.checkpointId());
+        }
+        return maxCheckpointId;
     }
 
     void requireUsableSpace(long minFreeBytes) throws IOException {
@@ -170,13 +196,34 @@ final class ExchangeCoreCheckpointStore {
         String name = path.getFileName().toString();
         Matcher snapshot = SNAPSHOT_FILE.matcher(name);
         if (snapshot.matches()) {
-            return Optional.of(new CheckpointFile(path, Long.parseLong(snapshot.group(1))));
+            return Optional.of(new CheckpointFile(path, Long.parseLong(snapshot.group(1)),
+                    CheckpointFileKind.SNAPSHOT));
         }
         Matcher lifecycle = DMA_LIFECYCLE_FILE.matcher(name);
         if (lifecycle.matches()) {
-            return Optional.of(new CheckpointFile(path, Long.parseLong(lifecycle.group(1))));
+            return Optional.of(new CheckpointFile(path, Long.parseLong(lifecycle.group(1)),
+                    CheckpointFileKind.DMA_LIFECYCLE));
+        }
+        Matcher partialSnapshot = SNAPSHOT_PARTIAL_FILE.matcher(name);
+        if (partialSnapshot.matches()) {
+            return Optional.of(new CheckpointFile(path, Long.parseLong(partialSnapshot.group(1)),
+                    CheckpointFileKind.PARTIAL));
+        }
+        Matcher partialLifecycle = DMA_LIFECYCLE_PARTIAL_FILE.matcher(name);
+        if (partialLifecycle.matches()) {
+            return Optional.of(new CheckpointFile(path, Long.parseLong(partialLifecycle.group(1)),
+                    CheckpointFileKind.PARTIAL));
         }
         return Optional.empty();
+    }
+
+    private static Map<Long, CheckpointGeneration> checkpointGenerations(List<CheckpointFile> files) {
+        Map<Long, CheckpointGeneration> generations = new HashMap<>();
+        for (CheckpointFile file : files) {
+            generations.computeIfAbsent(file.checkpointId(), CheckpointGeneration::new)
+                       .add(file);
+        }
+        return generations;
     }
 
     record LatestCheckpoint(long checkpointId, Set<Integer> symbols) {
@@ -188,7 +235,46 @@ final class ExchangeCoreCheckpointStore {
         }
     }
 
-    private record CheckpointFile(Path path, long checkpointId) {
+    private enum CheckpointFileKind {
+        SNAPSHOT,
+        DMA_LIFECYCLE,
+        PARTIAL
+    }
+
+    private record CheckpointFile(Path path, long checkpointId, CheckpointFileKind kind) {
+        boolean complete() {
+            return kind != CheckpointFileKind.PARTIAL;
+        }
+
+        boolean partial() {
+            return kind == CheckpointFileKind.PARTIAL;
+        }
+    }
+
+    private static final class CheckpointGeneration {
+        private final long checkpointId;
+        private boolean hasSnapshot;
+        private boolean hasDmaLifecycle;
+
+        private CheckpointGeneration(long checkpointId) {
+            this.checkpointId = checkpointId;
+        }
+
+        private void add(CheckpointFile file) {
+            if (file.kind() == CheckpointFileKind.SNAPSHOT) {
+                hasSnapshot = true;
+            } else if (file.kind() == CheckpointFileKind.DMA_LIFECYCLE) {
+                hasDmaLifecycle = true;
+            }
+        }
+
+        private long checkpointId() {
+            return checkpointId;
+        }
+
+        private boolean complete() {
+            return hasSnapshot && hasDmaLifecycle;
+        }
     }
 
     record StorageStats(
@@ -196,6 +282,7 @@ final class ExchangeCoreCheckpointStore {
             Optional<Long> latestCheckpointId,
             int checkpointIdCount,
             int checkpointFileCount,
+            int partialCheckpointFileCount,
             long storageBytes,
             long usableStorageBytes) {
         long latestCheckpointIdOrZero() {

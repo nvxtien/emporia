@@ -152,12 +152,17 @@ resilience4j:
     instances:
       orderCommands:
         slidingWindowType: COUNT_BASED
-        slidingWindowSize: ${EMPORIA_GATEWAY_ORDER_CB_WINDOW_SIZE:2}
-        minimumNumberOfCalls: ${EMPORIA_GATEWAY_ORDER_CB_MIN_CALLS:2}
-        failureRateThreshold: ${EMPORIA_GATEWAY_ORDER_CB_FAILURE_RATE:50}
-        waitDurationInOpenState: ${EMPORIA_GATEWAY_ORDER_CB_OPEN_DURATION:2s}
-        permittedNumberOfCallsInHalfOpenState: ${EMPORIA_GATEWAY_ORDER_CB_HALF_OPEN_CALLS:1}
+        slidingWindowSize: ${EMPORIA_GATEWAY_ORDER_CB_WINDOW_SIZE:100}
+        minimumNumberOfCalls: ${EMPORIA_GATEWAY_ORDER_CB_MIN_CALLS:25}
+        failureRateThreshold: ${EMPORIA_GATEWAY_ORDER_CB_FAILURE_RATE:75}
+        waitDurationInOpenState: ${EMPORIA_GATEWAY_ORDER_CB_OPEN_DURATION:5s}
+        permittedNumberOfCallsInHalfOpenState: ${EMPORIA_GATEWAY_ORDER_CB_HALF_OPEN_CALLS:5}
         automaticTransitionFromOpenToHalfOpenEnabled: true
+  timelimiter:
+    instances:
+      orderCommands:
+        timeoutDuration: ${EMPORIA_GATEWAY_ORDER_CB_TIMEOUT:12s}
+        cancelRunningFuture: true
 
 management:
   endpoints:

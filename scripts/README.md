@@ -23,6 +23,7 @@ scripts/
 ├── tuned/                        # Linux bare-metal kernel performance profiles (`tuned.conf`)
 └── perf/                         # High-Performance Load Testing & Benchmarking Suite
     ├── run-order-load-test.sh    # Convenient wrapper for order load testing
+    ├── order-path-capacity.sh    # Gateway-to-execution capacity benchmark with checkpoint metrics
     ├── order-submit-smoke.sh     # High-concurrency HTTP REST order submission test
     ├── exchange-core-benchmark.sh# LMAX Disruptor single-writer matching engine benchmark
     ├── market-data-fanout-smoke.sh# Aeron IPC / UDP Multicast quote fan-out load test
@@ -150,6 +151,29 @@ All shell scripts in this repository adhere to the following strict operational 
   ```bash
   ./scripts/perf/run-order-load-test.sh
   ```
+
+#### `scripts/perf/order-path-capacity.sh`
+- **Purpose**: Capacity benchmark for the gateway -> order-management -> Kafka -> execution path, including k6 latency, Kafka execution lag, and exchange-core checkpoint health metrics.
+- **Usage**:
+  ```bash
+  ORDER_PATH_RATES="5 10 20 40 60" PROBE_STEP=60s ./scripts/perf/order-path-capacity.sh
+  ```
+- **Journalled catch-up run**:
+  ```bash
+  EXCHANGE_CORE_JOURNALING=true MAVEN_TEST_SKIP_ARGS=-Dmaven.test.skip=true ./scripts/run-infra-docker.sh
+  EXCHANGE_CORE_JOURNALING=true ./scripts/perf/order-path-capacity.sh
+  ```
+- **Artifacts**: Writes `summary.csv`, `run-notes.txt`, k6 logs, execution health JSON, and checkpoint Prometheus snapshots under `.local-run/order-path-capacity/<timestamp>`.
+- **Pass criteria**: waits for starting execution lag to drain, then exits non-zero if any k6 rate step crosses its failure/rejection thresholds.
+
+#### `scripts/perf/reset-venue-state.sh`
+- **Purpose**: Destructive local-only reset for clean exchange-core capacity baselines.
+- **Behavior**: Stops `execution-service`, advances the execution consumer group to the latest order-event offset, deletes local exchange-core storage, and force-cancels working orders in order-management.
+- **Usage**:
+  ```bash
+  ./scripts/perf/reset-venue-state.sh --yes
+  ```
+- **Warning**: Do not use this in production; it deliberately discards local venue state.
 
 #### `scripts/perf/order-submit-smoke.sh`
 - **Purpose**: High-concurrency HTTP/REST order submission test.

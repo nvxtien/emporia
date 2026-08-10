@@ -26,9 +26,11 @@ start_service() {
     echo "==> Starting $name"
     (
         cd "$repo_root/$dir"
-        exec "$@"
-    ) >"$log_dir/$name.log" 2>&1 &
-    local pid=$!
+        nohup "$@" >"$log_dir/$name.log" 2>&1 < /dev/null &
+        echo "$!" >"$pid_dir/$name.pid"
+    )
+    local pid
+    pid="$(cat "$pid_dir/$name.pid")"
     echo "$pid" >"$pid_dir/$name.pid"
     echo "    pid=$pid log=$log_dir/$name.log"
 }

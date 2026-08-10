@@ -33,6 +33,11 @@ spring:
       properties:
         linger.ms: ${KAFKA_PRODUCER_LINGER_MS:5}
         max.block.ms: ${KAFKA_PRODUCER_MAX_BLOCK_MS:2000}
+        # Kafka requires delivery.timeout.ms >= linger.ms + request.timeout.ms.
+        # Keep the order/execution command path on a short request timeout so
+        # the 10s delivery deadline remains valid and producer construction
+        # cannot fail during consumer recovery.
+        request.timeout.ms: ${KAFKA_PRODUCER_REQUEST_TIMEOUT_MS:5000}
         delivery.timeout.ms: ${KAFKA_PRODUCER_DELIVERY_TIMEOUT_MS:10000}
     consumer:
       auto-offset-reset: earliest
@@ -99,13 +104,14 @@ emporia:
       portfolio-request-timeout: ${EXCHANGE_CORE_PORTFOLIO_REQUEST_TIMEOUT:3s}
       # Journalled checkpointing. Off snapshots engine state after every command;
       # on writes a journal and snapshots on the interval below instead, which
-      # takes the snapshot off the command path.
+      # takes the snapshot off the command path and improves execution consumer
+      # catch-up capacity.
       #
       # Recovery then depends on two mechanisms, not one: the journal restores
       # the matching engine, and the lifecycle projection is rebuilt from
-      # order-management at startup. Verify with
-      # scripts/perf/crash-recovery-check.sh before turning this on anywhere
-      # that matters.
+      # order-management at startup. Keep this off by default for conservative
+      # local/prod parity, and verify with scripts/perf/crash-recovery-check.sh
+      # before turning it on anywhere that matters.
       journaling: ${EXCHANGE_CORE_JOURNALING:false}
       snapshot-interval: ${EXCHANGE_CORE_SNAPSHOT_INTERVAL:60s}
       # Total checkpoint ids to retain, including the latest manifest

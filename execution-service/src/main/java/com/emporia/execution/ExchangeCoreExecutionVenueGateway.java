@@ -133,9 +133,10 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             @Value("${emporia.execution.exchange-core.accounting-mode:matching-only}") String accountingMode,
             @Value("${emporia.execution.exchange-core.portfolio-url:}") String portfolioUrl,
             @Value("${emporia.execution.exchange-core.portfolio-request-timeout:3s}") Duration portfolioTimeout,
-            // Defaults off: the journal does not restore the DMA order
-            // lifecycle, so enabling it would recover a book holding orders the
-            // lifecycle layer cannot resolve. See rework/WAL_LIFECYCLE_GAP.md.
+            // Defaults off for conservative local/prod parity. When enabled,
+            // the journal restores the engine and startup rebuilds the DMA
+            // lifecycle from order-management; scripts/perf/crash-recovery-check.sh
+            // is the acceptance gate before relying on it in production.
             @Value("${emporia.execution.exchange-core.journaling:false}") boolean journaling,
             @Value("${emporia.execution.exchange-core.retained-checkpoints:2}") int retainedCheckpoints,
             @Value("${emporia.execution.exchange-core.min-free-storage-bytes:0}") long minFreeStorageBytes,
@@ -735,6 +736,10 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
                 gateway -> gateway.checkpointStatus()
                         .map(ExchangeCoreCheckpointStore.StorageStats::checkpointFileCount)
                         .orElse(0));
+        meters.gauge("emporia.execution.venue.checkpoint.partial.files", this,
+                gateway -> gateway.checkpointStatus()
+                        .map(ExchangeCoreCheckpointStore.StorageStats::partialCheckpointFileCount)
+                        .orElse(0));
         meters.gauge("emporia.execution.venue.checkpoint.storage.bytes", this,
                 gateway -> gateway.checkpointStatus()
                         .map(ExchangeCoreCheckpointStore.StorageStats::storageBytes)
@@ -761,16 +766,18 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         boolean checkpointStatusMissing = checkpoint.isEmpty() && venue.retainedCheckpoints() > 0;
         Health.Builder status = failures == 0 && !checkpointStatusMissing ? Health.up() : Health.down();
         status.withDetail("venue", "exchange-core")
-              .withDetail("checkpointFailuresSinceLastSuccess", failures)
-              .withDetail("checkpointStatusAvailable", checkpoint.isPresent())
-              .withDetail("checkpointAgeSeconds", checkpointAgeSeconds())
-              .withDetail("retainedCheckpointsConfigured", venue.retainedCheckpoints());
-        checkpoint.ifPresent(stats -> status.withDetail("checkpointStorageDirectory", stats.directory().toString())
-                                            .withDetail("latestCheckpointId", stats.latestCheckpointIdOrZero())
-                                            .withDetail("checkpointIdCount", stats.checkpointIdCount())
-                                            .withDetail("checkpointFileCount", stats.checkpointFileCount())
-                                            .withDetail("checkpointStorageBytes", stats.storageBytes())
-                                            .withDetail("checkpointUsableStorageBytes", stats.usableStorageBytes()));
+                .withDetail("checkpointFailuresSinceLastSuccess", failures)
+                .withDetail("checkpointStatusAvailable", checkpoint.isPresent())
+                .withDetail("checkpointAgeSeconds", checkpointAgeSeconds())
+                .withDetail("retainedCheckpointsConfigured", venue.retainedCheckpoints());
+        checkpoint.ifPresent(stats -> status
+                .withDetail("checkpointStorageDirectory", stats.directory().toString())
+                .withDetail("latestCheckpointId", stats.latestCheckpointIdOrZero())
+                .withDetail("checkpointIdCount", stats.checkpointIdCount())
+                .withDetail("checkpointFileCount", stats.checkpointFileCount())
+                .withDetail("partialCheckpointFileCount", stats.partialCheckpointFileCount())
+                .withDetail("checkpointStorageBytes", stats.storageBytes())
+                .withDetail("checkpointUsableStorageBytes", stats.usableStorageBytes()));
         if (checkpointStatusMissing) {
             status.withDetail("checkpointStatusDetail", "unavailable");
         }
@@ -1218,15 +1225,16 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             checkpointStore = new ExchangeCoreCheckpointStore(configuration.storageDirectory());
             ExchangeCoreCheckpointStore.LatestCheckpoint latest =
                     checkpointStore.load().orElse(null);
+            long nextCheckpointBaseline = checkpointStore.maxCheckpointId();
             if (latest == null) {
                 simulation = ProductionSimulation.start(configuration, spec.accounting());
                 restoredSymbols = Set.of();
-                checkpointSequence = new AtomicLong(0);
+                checkpointSequence = new AtomicLong(nextCheckpointBaseline);
             } else {
                 simulation = ProductionSimulation.recover(configuration, latest.checkpointId(), spec.accounting());
                 restoredSymbols = latest.symbols();
                 knownSymbols.addAll(restoredSymbols);
-                checkpointSequence = new AtomicLong(latest.checkpointId());
+                checkpointSequence = new AtomicLong(Math.max(latest.checkpointId(), nextCheckpointBaseline));
             }
         }
 
@@ -1262,11 +1270,11 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         // nothing durable between timed snapshots, which is why one flag
         // controls both rather than two independent settings.
         //
-        // NOT YET SAFE TO ENABLE - see rework/WAL_LIFECYCLE_GAP.md. The journal
-        // restores the matching engine but not the DMA order lifecycle, which
-        // is snapshot-only, so recovery would leave the book holding orders the
-        // lifecycle layer cannot resolve. Default stays false until that is
-        // resolved.
+        // The journal restores the matching engine; startup rebuilds the DMA
+        // lifecycle projection from order-management before the listener opens.
+        // Keep crash-recovery acceptance green before using this mode in
+        // production, because a graceful shutdown checkpoint can hide journal
+        // replay gaps.
         @Override
         public CompletableFuture<ProductionSimulationResult> submit(DmaLimitOrder order) {
             return checkpointUnlessJournalled(simulation.submit(order));

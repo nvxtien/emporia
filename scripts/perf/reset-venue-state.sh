@@ -22,6 +22,11 @@ cd "$repo_root"
 PG_CONTAINER="${PG_CONTAINER:-emporia-order-management-postgres}"
 PG_DB="${PG_DB:-emporia_order_management}"
 PG_USER="${PG_USER:-postgres}"
+KAFKA_CONTAINER="${KAFKA_CONTAINER:-emporia-kafka}"
+KAFKA_BOOTSTRAP="${KAFKA_BOOTSTRAP:-localhost:9092}"
+EXECUTION_GROUP="${EXECUTION_GROUP:-emporia-execution-service-v1}"
+ORDERS_TOPIC="${ORDERS_TOPIC:-emporia.orders.v1}"
+RESET_KAFKA_OFFSETS="${RESET_KAFKA_OFFSETS:-true}"
 STORAGE_DIR="${EXCHANGE_CORE_STORAGE_DIRECTORY:-$repo_root/execution-service/.local-run/exchange-core-simulation}"
 REASON="${RESET_REASON:-Force-cancelled by scripts/perf/reset-venue-state.sh before a capacity baseline}"
 
@@ -34,6 +39,10 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
   Intended for local performance testing only."
 
 psql_q() { docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc "$1" 2>/dev/null; }
+kafka_consumer_groups() {
+    docker exec "$KAFKA_CONTAINER" /opt/kafka/bin/kafka-consumer-groups.sh \
+        --bootstrap-server "$KAFKA_BOOTSTRAP" "$@"
+}
 
 docker exec "$PG_CONTAINER" true >/dev/null 2>&1 \
     || fail "postgres container '${PG_CONTAINER}' is not running"
@@ -63,6 +72,14 @@ fi
 # would keep writing to the directory being cleared.
 pkill -TERM -f "execution-service" 2>/dev/null || true
 sleep 3
+
+if [ "$RESET_KAFKA_OFFSETS" != "false" ]; then
+    docker exec "$KAFKA_CONTAINER" true >/dev/null 2>&1 \
+        || fail "kafka container '${KAFKA_CONTAINER}' is not running"
+    echo "==> Advancing execution consumer offsets to latest"
+    kafka_consumer_groups --group "$EXECUTION_GROUP" --topic "$ORDERS_TOPIC" \
+        --reset-offsets --to-latest --execute
+fi
 
 echo "==> Clearing exchange-core engine state"
 rm -rf "$STORAGE_DIR"

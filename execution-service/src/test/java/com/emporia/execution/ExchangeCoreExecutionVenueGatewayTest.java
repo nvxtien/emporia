@@ -606,6 +606,7 @@ class ExchangeCoreExecutionVenueGatewayTest {
                 Optional.of(99L),
                 2,
                 6,
+                1,
                 4096,
                 8192));
         ExchangeCoreExecutionVenueGateway gateway =
@@ -618,6 +619,7 @@ class ExchangeCoreExecutionVenueGatewayTest {
                 .containsEntry("latestCheckpointId", 99L)
                 .containsEntry("checkpointIdCount", 2)
                 .containsEntry("checkpointFileCount", 6)
+                .containsEntry("partialCheckpointFileCount", 1)
                 .containsEntry("checkpointStorageBytes", 4096L)
                 .containsEntry("checkpointUsableStorageBytes", 8192L)
                 .containsEntry("checkpointStatusAvailable", true)
@@ -628,6 +630,8 @@ class ExchangeCoreExecutionVenueGatewayTest {
                 .isEqualTo(2.0);
         assertThat(meters.get("emporia.execution.venue.checkpoint.files").gauge().value())
                 .isEqualTo(6.0);
+        assertThat(meters.get("emporia.execution.venue.checkpoint.partial.files").gauge().value())
+                .isEqualTo(1.0);
         assertThat(meters.get("emporia.execution.venue.checkpoint.storage.bytes").gauge().value())
                 .isEqualTo(4096.0);
         assertThat(meters.get("emporia.execution.venue.checkpoint.storage.usable.bytes").gauge().value())
