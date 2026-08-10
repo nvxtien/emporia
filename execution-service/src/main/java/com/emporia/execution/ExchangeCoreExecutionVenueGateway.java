@@ -134,18 +134,29 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             // lifecycle, so enabling it would recover a book holding orders the
             // lifecycle layer cannot resolve. See rework/WAL_LIFECYCLE_GAP.md.
             @Value("${emporia.execution.exchange-core.journaling:false}") boolean journaling,
+            @Value("${emporia.execution.exchange-core.retained-checkpoints:2}") int retainedCheckpoints,
+            @Value("${emporia.execution.exchange-core.min-free-storage-bytes:0}") long minFreeStorageBytes,
             @Value("${emporia.execution.sor.slippage-bps:10}") BigDecimal slippageBps,
             MeterRegistry meters)
             throws IOException {
-        this(commands, buildVenue(exchangeId, storage, partitions,
-                buildAccounting(accountingMode, exchangeId, portfolioUrl, portfolioTimeout, tokenProvider, dataSource.orElse(null)),
-                journaling),
-                ACCOUNTING_FULL_EQUITY.equalsIgnoreCase(accountingMode),
-                recoverySource,
-                slippageBps,
-                meters);
-        log.info("Exchange-core venue started with accounting-mode={} journaling={} slippage-bps={}",
-                accountingMode, journaling, slippageBps);
+        this(GatewaySpec.builder(commands, buildVenue(ProductionVenueSpec.builder()
+                        .exchangeId(exchangeId)
+                        .storage(storage)
+                        .partitions(partitions)
+                        .accounting(buildAccounting(accountingMode, exchangeId, portfolioUrl,
+                                portfolioTimeout, tokenProvider, dataSource.orElse(null)))
+                        .journaling(journaling)
+                        .retainedCheckpoints(retainedCheckpoints)
+                        .minFreeStorageBytes(minFreeStorageBytes)
+                        .build()))
+                .fullEquityRisk(ACCOUNTING_FULL_EQUITY.equalsIgnoreCase(accountingMode))
+                .recoverySource(recoverySource)
+                .slippageBps(slippageBps)
+                .meterRegistry(meters)
+                .buildSpec());
+        log.info("Exchange-core venue started with accounting-mode={} journaling={} retained-checkpoints={} "
+                        + "min-free-storage-bytes={} slippage-bps={}",
+                accountingMode, journaling, retainedCheckpoints, minFreeStorageBytes, slippageBps);
     }
 
     private static ProductionSimulationAccounting buildAccounting(
@@ -204,9 +215,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         return new HttpEmporiaPortfolioGateway(config);
     }
 
-    private static ExchangeCoreVenue buildVenue(
-            String exchangeId, Path storage, int partitions,
-            ProductionSimulationAccounting accounting, boolean journaling) throws IOException {
+    private static ExchangeCoreVenue buildVenue(ProductionVenueSpec spec) throws IOException {
         // exchange-core writes its snapshots straight into this directory and does
         // not create it. Only ExchangeCoreCheckpointStore.save did, and that runs
         // after the snapshot write has already failed.
@@ -217,18 +226,29 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         // storage location now lives under .local-run rather than target/ so a
         // build can no longer delete it mid-run, and a checkpoint that fails
         // anyway is counted and turns the venue's health DOWN.
-        Files.createDirectories(storage);
-        return new ProductionSimulationVenue(exchangeId, storage, partitions, accounting, journaling);
+        Files.createDirectories(spec.storage());
+        if (usesLocalRunStorage(spec.storage())) {
+            log.warn("Exchange-core storage directory {} is under .local-run. "
+                    + "That is appropriate for local development, but production internal matching "
+                    + "must use an explicit persistent volume.", spec.storage().toAbsolutePath().normalize());
+        }
+        return new ProductionSimulationVenue(spec);
+    }
+
+    static GatewayBuilder builder(ExecutionCommandPublisher commands, ExchangeCoreVenue venue) {
+        return GatewaySpec.builder(commands, venue);
     }
 
     /** Matching-only wiring; no client onboarding, since there are no risk profiles. */
     public ExchangeCoreExecutionVenueGateway(ExecutionCommandPublisher commands, ExchangeCoreVenue venue) {
-        this(commands, venue, false);
+        this(GatewaySpec.builder(commands, venue).buildSpec());
     }
 
     public ExchangeCoreExecutionVenueGateway(ExecutionCommandPublisher commands, ExchangeCoreVenue venue,
                                              boolean fullEquityRisk) {
-        this(commands, venue, fullEquityRisk, null);
+        this(GatewaySpec.builder(commands, venue)
+                .fullEquityRisk(fullEquityRisk)
+                .buildSpec());
     }
 
     /**
@@ -239,33 +259,48 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
      */
     public ExchangeCoreExecutionVenueGateway(ExecutionCommandPublisher commands, ExchangeCoreVenue venue,
                                              boolean fullEquityRisk, TradingDataClient recoverySource) {
-        this(commands, venue, fullEquityRisk, recoverySource, DEFAULT_SLIPPAGE_BPS);
+        this(GatewaySpec.builder(commands, venue)
+                .fullEquityRisk(fullEquityRisk)
+                .recoverySource(recoverySource)
+                .buildSpec());
     }
 
     public ExchangeCoreExecutionVenueGateway(ExecutionCommandPublisher commands, ExchangeCoreVenue venue,
                                              boolean fullEquityRisk, TradingDataClient recoverySource,
                                              BigDecimal slippageBps) {
-        // Test wiring: counters go to a throwaway registry rather than being
-        // skipped, so the instrumented paths still run under test.
-        this(commands, venue, fullEquityRisk, recoverySource, slippageBps, new SimpleMeterRegistry());
+        this(GatewaySpec.builder(commands, venue)
+                .fullEquityRisk(fullEquityRisk)
+                .recoverySource(recoverySource)
+                .slippageBps(slippageBps)
+                .buildSpec());
     }
 
     public ExchangeCoreExecutionVenueGateway(ExecutionCommandPublisher commands, ExchangeCoreVenue venue,
                                              boolean fullEquityRisk, TradingDataClient recoverySource,
                                              BigDecimal slippageBps, MeterRegistry meters) {
-        this.commands = Objects.requireNonNull(commands, "commands");
-        this.venue = Objects.requireNonNull(venue, "venue");
-        this.fullEquityRisk = fullEquityRisk;
-        this.recoverySource = recoverySource;
-        this.slippageBps = Objects.requireNonNull(slippageBps, "slippageBps");
-        this.meters = Objects.requireNonNull(meters, "meters");
-        if (slippageBps.signum() < 0) {
+        this(GatewaySpec.builder(commands, venue)
+                .fullEquityRisk(fullEquityRisk)
+                .recoverySource(recoverySource)
+                .slippageBps(slippageBps)
+                .meterRegistry(meters)
+                .buildSpec());
+    }
+
+    private ExchangeCoreExecutionVenueGateway(GatewaySpec spec) {
+        this.commands = spec.commands();
+        this.venue = spec.venue();
+        this.fullEquityRisk = spec.fullEquityRisk();
+        this.recoverySource = spec.recoverySource();
+        this.slippageBps = spec.slippageBps();
+        this.meters = spec.meters();
+        if (spec.slippageBps().signum() < 0) {
             throw new IllegalArgumentException("slippage budget must not be negative");
         }
         // Shares the gateway's budget so a rebuilt projection carries the same
         // protection price the submit path would have sent.
-        this.lifecycleRebuilder = new ExchangeCoreLifecycleRebuilder(slippageBps);
-        this.symbols.addAll(venue.restoredSymbols());
+        this.lifecycleRebuilder = new ExchangeCoreLifecycleRebuilder(spec.slippageBps());
+        this.symbols.addAll(spec.venue().restoredSymbols());
+        registerCheckpointGauges();
     }
 
     /**
@@ -626,6 +661,27 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         checkpointFailures.set(0);
     }
 
+    private void registerCheckpointGauges() {
+        meters.gauge("emporia.execution.venue.checkpoint.latest.id", this,
+                gateway -> gateway.checkpointStatus()
+                        .map(ExchangeCoreCheckpointStore.StorageStats::latestCheckpointIdOrZero)
+                        .orElse(0L));
+        meters.gauge("emporia.execution.venue.checkpoint.ids", this,
+                gateway -> gateway.checkpointStatus()
+                        .map(ExchangeCoreCheckpointStore.StorageStats::checkpointIdCount)
+                        .orElse(0));
+        meters.gauge("emporia.execution.venue.checkpoint.files", this,
+                gateway -> gateway.checkpointStatus()
+                        .map(ExchangeCoreCheckpointStore.StorageStats::checkpointFileCount)
+                        .orElse(0));
+        meters.gauge("emporia.execution.venue.checkpoint.storage.bytes", this,
+                gateway -> gateway.checkpointStatus()
+                        .map(ExchangeCoreCheckpointStore.StorageStats::storageBytes)
+                        .orElse(0L));
+        meters.gauge("emporia.execution.venue.checkpoint.retained.configured", this,
+                gateway -> gateway.venue.retainedCheckpoints());
+    }
+
     /**
      * Reports the venue unhealthy while it cannot persist its state.
      *
@@ -639,12 +695,28 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         Health.Builder status = failures == 0 ? Health.up() : Health.down();
         status.withDetail("venue", "exchange-core")
                 .withDetail("checkpointFailuresSinceLastSuccess", failures);
+        checkpointStatus().ifPresent(checkpoint -> status
+                .withDetail("checkpointStorageDirectory", checkpoint.directory().toString())
+                .withDetail("latestCheckpointId", checkpoint.latestCheckpointIdOrZero())
+                .withDetail("checkpointIdCount", checkpoint.checkpointIdCount())
+                .withDetail("checkpointFileCount", checkpoint.checkpointFileCount())
+                .withDetail("checkpointStorageBytes", checkpoint.storageBytes())
+                .withDetail("retainedCheckpointsConfigured", venue.retainedCheckpoints()));
         if (lastCheckpointFailure != null) {
             status.withDetail("lastCheckpointFailureAt", lastCheckpointFailure.toString())
                     .withDetail("lastCheckpointFailureDetail",
                             lastCheckpointFailureDetail == null ? "unknown" : lastCheckpointFailureDetail);
         }
         return status.build();
+    }
+
+    private Optional<ExchangeCoreCheckpointStore.StorageStats> checkpointStatus() {
+        try {
+            return venue.checkpointStatus();
+        } catch (RuntimeException unavailable) {
+            log.debug("Exchange-core checkpoint status unavailable", unavailable);
+            return Optional.empty();
+        }
     }
 
     private void ensureSymbol(ListingSnapshot listing) {
@@ -816,6 +888,145 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
                 : error;
     }
 
+    static boolean usesLocalRunStorage(Path storage) {
+        for (Path segment : storage.toAbsolutePath().normalize()) {
+            if (".local-run".equals(segment.toString())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private record GatewaySpec(
+            ExecutionCommandPublisher commands,
+            ExchangeCoreVenue venue,
+            boolean fullEquityRisk,
+            TradingDataClient recoverySource,
+            BigDecimal slippageBps,
+            MeterRegistry meters) {
+        private GatewaySpec {
+            commands = Objects.requireNonNull(commands, "commands");
+            venue = Objects.requireNonNull(venue, "venue");
+            slippageBps = Objects.requireNonNull(slippageBps, "slippageBps");
+            meters = Objects.requireNonNull(meters, "meters");
+        }
+
+        private static GatewayBuilder builder(ExecutionCommandPublisher commands, ExchangeCoreVenue venue) {
+            return new GatewayBuilder(commands, venue);
+        }
+    }
+
+    static final class GatewayBuilder {
+        private final ExecutionCommandPublisher commands;
+        private final ExchangeCoreVenue venue;
+        private boolean fullEquityRisk;
+        private TradingDataClient recoverySource;
+        private BigDecimal slippageBps = DEFAULT_SLIPPAGE_BPS;
+        private MeterRegistry meters = new SimpleMeterRegistry();
+
+        private GatewayBuilder(ExecutionCommandPublisher commands, ExchangeCoreVenue venue) {
+            this.commands = commands;
+            this.venue = venue;
+        }
+
+        GatewayBuilder fullEquityRisk(boolean fullEquityRisk) {
+            this.fullEquityRisk = fullEquityRisk;
+            return this;
+        }
+
+        GatewayBuilder recoverySource(TradingDataClient recoverySource) {
+            this.recoverySource = recoverySource;
+            return this;
+        }
+
+        GatewayBuilder slippageBps(BigDecimal slippageBps) {
+            this.slippageBps = Objects.requireNonNull(slippageBps, "slippageBps");
+            return this;
+        }
+
+        GatewayBuilder meterRegistry(MeterRegistry meters) {
+            this.meters = Objects.requireNonNull(meters, "meters");
+            return this;
+        }
+
+        ExchangeCoreExecutionVenueGateway build() {
+            return new ExchangeCoreExecutionVenueGateway(buildSpec());
+        }
+
+        private GatewaySpec buildSpec() {
+            return new GatewaySpec(commands, venue, fullEquityRisk, recoverySource, slippageBps, meters);
+        }
+    }
+
+    private record ProductionVenueSpec(
+            String exchangeId,
+            Path storage,
+            int partitions,
+            ProductionSimulationAccounting accounting,
+            boolean journaling,
+            int retainedCheckpoints,
+            long minFreeStorageBytes) {
+        private ProductionVenueSpec {
+            exchangeId = Objects.requireNonNull(exchangeId, "exchangeId");
+            storage = Objects.requireNonNull(storage, "storage");
+            accounting = Objects.requireNonNull(accounting, "accounting");
+        }
+
+        private static ProductionVenueSpecBuilder builder() {
+            return new ProductionVenueSpecBuilder();
+        }
+    }
+
+    private static final class ProductionVenueSpecBuilder {
+        private String exchangeId;
+        private Path storage;
+        private int partitions;
+        private ProductionSimulationAccounting accounting;
+        private boolean journaling;
+        private int retainedCheckpoints = 2;
+        private long minFreeStorageBytes;
+
+        private ProductionVenueSpecBuilder exchangeId(String exchangeId) {
+            this.exchangeId = exchangeId;
+            return this;
+        }
+
+        private ProductionVenueSpecBuilder storage(Path storage) {
+            this.storage = storage;
+            return this;
+        }
+
+        private ProductionVenueSpecBuilder partitions(int partitions) {
+            this.partitions = partitions;
+            return this;
+        }
+
+        private ProductionVenueSpecBuilder accounting(ProductionSimulationAccounting accounting) {
+            this.accounting = accounting;
+            return this;
+        }
+
+        private ProductionVenueSpecBuilder journaling(boolean journaling) {
+            this.journaling = journaling;
+            return this;
+        }
+
+        private ProductionVenueSpecBuilder retainedCheckpoints(int retainedCheckpoints) {
+            this.retainedCheckpoints = retainedCheckpoints;
+            return this;
+        }
+
+        private ProductionVenueSpecBuilder minFreeStorageBytes(long minFreeStorageBytes) {
+            this.minFreeStorageBytes = minFreeStorageBytes;
+            return this;
+        }
+
+        private ProductionVenueSpec build() {
+            return new ProductionVenueSpec(exchangeId, storage, partitions, accounting,
+                    journaling, retainedCheckpoints, minFreeStorageBytes);
+        }
+    }
+
     interface ExchangeCoreVenue extends AutoCloseable {
         void addSymbols(Collection<CoreSymbolSpecification> symbols);
 
@@ -846,6 +1057,14 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
 
         Set<Integer> restoredSymbols();
 
+        default Optional<ExchangeCoreCheckpointStore.StorageStats> checkpointStatus() {
+            return Optional.empty();
+        }
+
+        default int retainedCheckpoints() {
+            return 0;
+        }
+
         void checkpoint();
 
         @Override
@@ -862,22 +1081,31 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         private final Set<Integer> knownSymbols = ConcurrentHashMap.newKeySet();
         private final AtomicLong checkpointSequence;
         private final boolean journaling;
+        private final int retainedCheckpoints;
+        private final long minFreeStorageBytes;
 
-        private ProductionSimulationVenue(
-                String exchangeId, Path storage, int partitions,
-                ProductionSimulationAccounting accounting, boolean journaling) throws IOException {
-            this.journaling = journaling;
+        private ProductionSimulationVenue(ProductionVenueSpec spec) throws IOException {
+            if (spec.retainedCheckpoints() < 1) {
+                throw new IllegalArgumentException("retainedCheckpoints must be at least 1");
+            }
+            if (spec.minFreeStorageBytes() < 0) {
+                throw new IllegalArgumentException("minFreeStorageBytes must not be negative");
+            }
+            this.journaling = spec.journaling();
+            this.retainedCheckpoints = spec.retainedCheckpoints();
+            this.minFreeStorageBytes = spec.minFreeStorageBytes();
             ProductionSimulationConfiguration configuration =
-                    ProductionSimulationConfiguration.create(exchangeId, storage, partitions, journaling);
+                    ProductionSimulationConfiguration.create(
+                            spec.exchangeId(), spec.storage(), spec.partitions(), spec.journaling());
             checkpointStore = new ExchangeCoreCheckpointStore(configuration.storageDirectory());
             ExchangeCoreCheckpointStore.LatestCheckpoint latest =
                     checkpointStore.load().orElse(null);
             if (latest == null) {
-                simulation = ProductionSimulation.start(configuration, accounting);
+                simulation = ProductionSimulation.start(configuration, spec.accounting());
                 restoredSymbols = Set.of();
                 checkpointSequence = new AtomicLong(0);
             } else {
-                simulation = ProductionSimulation.recover(configuration, latest.checkpointId(), accounting);
+                simulation = ProductionSimulation.recover(configuration, latest.checkpointId(), spec.accounting());
                 restoredSymbols = latest.symbols();
                 knownSymbols.addAll(restoredSymbols);
                 checkpointSequence = new AtomicLong(latest.checkpointId());
@@ -947,11 +1175,32 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         }
 
         @Override
-        public void checkpoint() {
+        public Optional<ExchangeCoreCheckpointStore.StorageStats> checkpointStatus() {
             try {
+                return Optional.of(checkpointStore.stats());
+            } catch (IOException unavailable) {
+                throw new ExchangeCoreCheckpointException(unavailable);
+            }
+        }
+
+        @Override
+        public int retainedCheckpoints() {
+            return retainedCheckpoints;
+        }
+
+        @Override
+        public synchronized void checkpoint() {
+            try {
+                checkpointStore.requireUsableSpace(minFreeStorageBytes);
                 long checkpointId = checkpointSequence.incrementAndGet();
                 ProductionSimulationCheckpoint checkpoint = simulation.checkpoint(checkpointId);
                 checkpointStore.save(checkpoint.checkpointId(), knownSymbols);
+                try {
+                    checkpointStore.pruneRetainingLatest(retainedCheckpoints);
+                } catch (IOException | RuntimeException pruneFailure) {
+                    log.warn("Exchange-core checkpoint {} saved, but old checkpoint pruning failed: {}",
+                            checkpoint.checkpointId(), pruneFailure.getMessage());
+                }
             } catch (IOException error) {
                 throw new ExchangeCoreCheckpointException(error);
             }

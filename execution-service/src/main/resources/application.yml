@@ -59,6 +59,10 @@ emporia:
     client-secret: ${EXECUTION_OAUTH_CLIENT_SECRET:emporia-execution-local-secret}
   execution:
     venue-mode: ${EXECUTION_VENUE_MODE:simulated}
+    orders-consumer:
+      # Match the default emporia.orders.v1 partition count so one execution
+      # instance can drain independent orders in parallel.
+      concurrency: ${EXECUTION_ORDERS_CONSUMER_CONCURRENCY:6}
     fix-venues: ${FIX_EXECUTION_VENUES:}
     fix-tls-enabled: ${FIX_TLS_ENABLED:false}
     fix-tls-truststore-path: ${FIX_TLS_TRUSTSTORE_PATH:}
@@ -104,6 +108,13 @@ emporia:
       # that matters.
       journaling: ${EXCHANGE_CORE_JOURNALING:false}
       snapshot-interval: ${EXCHANGE_CORE_SNAPSHOT_INTERVAL:60s}
+      # Total checkpoint ids to retain, including the latest manifest
+      # checkpoint. 2 means latest + one previous recovery point.
+      retained-checkpoints: ${EXCHANGE_CORE_RETAINED_CHECKPOINTS:2}
+      # Optional pre-checkpoint storage safety guard. 0 disables the guard;
+      # production internal matching should set this to a meaningful floor for
+      # the mounted exchange-core volume.
+      min-free-storage-bytes: ${EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES:0}
 
 management:
   endpoints.web.exposure.include: health,info,prometheus

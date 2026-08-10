@@ -17,6 +17,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.SendResult;
 
 import java.time.Duration;
@@ -25,6 +26,7 @@ import org.springframework.scheduling.TaskScheduler;
 import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
+import java.lang.reflect.Method;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -63,6 +65,18 @@ class ExecutionEventConsumerTest {
         ObservationRegistry registry = ObservationRegistry.create();
         registry.observationConfig().observationHandler(new DefaultMeterObservationHandler(meters));
         return registry;
+    }
+
+    @Test
+    void orderConsumerUsesAllOrderTopicPartitionsByDefault() throws Exception {
+        Method consume = ExecutionEventConsumer.class.getDeclaredMethod("consume", OrderDomainEvent.class);
+        KafkaListener listener = consume.getAnnotation(KafkaListener.class);
+
+        assertThat(listener).isNotNull();
+        assertThat(listener.topics()).containsExactly("${emporia.kafka.orders-topic}");
+        assertThat(listener.groupId()).isEqualTo("emporia-execution-service-v1");
+        assertThat(listener.concurrency()).isEqualTo("${emporia.execution.orders-consumer.concurrency:6}");
+        assertThat(listener.properties()).containsExactly("auto.offset.reset=latest");
     }
 
     @Test

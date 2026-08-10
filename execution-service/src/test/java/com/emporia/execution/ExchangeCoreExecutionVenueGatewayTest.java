@@ -24,6 +24,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
 
 import java.math.BigDecimal;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
@@ -82,7 +83,9 @@ class ExchangeCoreExecutionVenueGatewayTest {
     @Test
     void onboardsEachClientExactlyOnceUnderFullEquityRisk() {
         ExchangeCoreExecutionVenueGateway riskGateway =
-                new ExchangeCoreExecutionVenueGateway(commands, venue, true);
+                ExchangeCoreExecutionVenueGateway.builder(commands, venue)
+                        .fullEquityRisk(true)
+                        .build();
         for (int i = 0; i < 2; i++) {
             venue.submitResponses.add(request -> successful(
                     SimulationOperation.SUBMIT_LIMIT, request.deliveryId(),
@@ -470,7 +473,8 @@ class ExchangeCoreExecutionVenueGatewayTest {
     void rejectsFullEquityRiskAccountingWithoutPortfolioUrl() {
         assertThatThrownBy(() -> new ExchangeCoreExecutionVenueGateway(
                 commands, null, Optional.empty(), null, "ex-1", java.nio.file.Path.of("/tmp"), 1,
-                "full-equity-risk", "", Duration.ofSeconds(3), true, new BigDecimal("10"), new SimpleMeterRegistry()))
+                "full-equity-risk", "", Duration.ofSeconds(3), true, 2, 0L,
+                new BigDecimal("10"), new SimpleMeterRegistry()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("EXCHANGE_CORE_PORTFOLIO_URL is required");
     }
@@ -480,7 +484,8 @@ class ExchangeCoreExecutionVenueGatewayTest {
     void initializesWithRealProductionSimulationVenue(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tempDir) throws Exception {
         ExchangeCoreExecutionVenueGateway realGateway = new ExchangeCoreExecutionVenueGateway(
                 commands, null, Optional.empty(), null, "ex-1", tempDir, 1,
-                "matching-only", null, Duration.ofSeconds(3), true, new BigDecimal("10"), new SimpleMeterRegistry());
+                "matching-only", null, Duration.ofSeconds(3), true, 2, 0L,
+                new BigDecimal("10"), new SimpleMeterRegistry());
 
         assertThat(realGateway).isNotNull();
         realGateway.start();
@@ -505,7 +510,9 @@ class ExchangeCoreExecutionVenueGatewayTest {
         when(recoverySource.recoverable())
                 .thenReturn(new ExecutionRecoveryView(List.of(live), List.of()));
         ExchangeCoreExecutionVenueGateway recovering =
-                new ExchangeCoreExecutionVenueGateway(commands, venue, false, recoverySource);
+                ExchangeCoreExecutionVenueGateway.builder(commands, venue)
+                        .recoverySource(recoverySource)
+                        .build();
 
         recovering.start();
 
@@ -545,8 +552,9 @@ class ExchangeCoreExecutionVenueGatewayTest {
         failing.checkpointFailure = new ExchangeCoreExecutionVenueGateway
                 .ExchangeCoreCheckpointException(new java.io.IOException("No such file or directory"));
         ExchangeCoreExecutionVenueGateway gateway =
-                new ExchangeCoreExecutionVenueGateway(commands, failing, false, null,
-                        ExchangeCoreExecutionVenueGateway.DEFAULT_SLIPPAGE_BPS, meters);
+                ExchangeCoreExecutionVenueGateway.builder(commands, failing)
+                        .meterRegistry(meters)
+                        .build();
         gateway.start();
 
         gateway.snapshotPeriodically();
@@ -569,8 +577,9 @@ class ExchangeCoreExecutionVenueGatewayTest {
         recovering.checkpointFailure = new ExchangeCoreExecutionVenueGateway
                 .ExchangeCoreCheckpointException(new java.io.IOException("No such file or directory"));
         ExchangeCoreExecutionVenueGateway gateway =
-                new ExchangeCoreExecutionVenueGateway(commands, recovering, false, null,
-                        ExchangeCoreExecutionVenueGateway.DEFAULT_SLIPPAGE_BPS, meters);
+                ExchangeCoreExecutionVenueGateway.builder(commands, recovering)
+                        .meterRegistry(meters)
+                        .build();
         gateway.start();
         gateway.snapshotPeriodically();
         assertThat(gateway.health().getStatus().getCode()).isEqualTo("DOWN");
@@ -581,6 +590,49 @@ class ExchangeCoreExecutionVenueGatewayTest {
         gateway.snapshotPeriodically();
 
         assertThat(gateway.health().getStatus().getCode()).isEqualTo("UP");
+    }
+
+    @Test
+    void healthAndMetricsExposeCheckpointStorageStatus() {
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        FakeVenue reporting = new FakeVenue();
+        reporting.retainedCheckpoints = 2;
+        reporting.checkpointStatus = Optional.of(new ExchangeCoreCheckpointStore.StorageStats(
+                Path.of("/var/lib/emporia/exchange-core"),
+                Optional.of(99L),
+                2,
+                6,
+                4096));
+        ExchangeCoreExecutionVenueGateway gateway =
+                ExchangeCoreExecutionVenueGateway.builder(commands, reporting)
+                        .meterRegistry(meters)
+                        .build();
+
+        assertThat(gateway.health().getDetails())
+                .containsEntry("checkpointStorageDirectory", "/var/lib/emporia/exchange-core")
+                .containsEntry("latestCheckpointId", 99L)
+                .containsEntry("checkpointIdCount", 2)
+                .containsEntry("checkpointFileCount", 6)
+                .containsEntry("checkpointStorageBytes", 4096L)
+                .containsEntry("retainedCheckpointsConfigured", 2);
+        assertThat(meters.get("emporia.execution.venue.checkpoint.latest.id").gauge().value())
+                .isEqualTo(99.0);
+        assertThat(meters.get("emporia.execution.venue.checkpoint.ids").gauge().value())
+                .isEqualTo(2.0);
+        assertThat(meters.get("emporia.execution.venue.checkpoint.files").gauge().value())
+                .isEqualTo(6.0);
+        assertThat(meters.get("emporia.execution.venue.checkpoint.storage.bytes").gauge().value())
+                .isEqualTo(4096.0);
+        assertThat(meters.get("emporia.execution.venue.checkpoint.retained.configured").gauge().value())
+                .isEqualTo(2.0);
+    }
+
+    @Test
+    void detectsLocalRunStoragePaths() {
+        assertThat(ExchangeCoreExecutionVenueGateway.usesLocalRunStorage(
+                Path.of("execution-service/.local-run/exchange-core-simulation"))).isTrue();
+        assertThat(ExchangeCoreExecutionVenueGateway.usesLocalRunStorage(
+                Path.of("/var/lib/emporia/exchange-core"))).isFalse();
     }
 
     @Test
@@ -689,6 +741,8 @@ class ExchangeCoreExecutionVenueGatewayTest {
         private int checkpoints;
         private boolean closed;
         private RuntimeException checkpointFailure;
+        private Optional<ExchangeCoreCheckpointStore.StorageStats> checkpointStatus = Optional.empty();
+        private int retainedCheckpoints;
 
         private FakeVenue() {
             this(Set.of());
@@ -755,6 +809,16 @@ class ExchangeCoreExecutionVenueGatewayTest {
         @Override
         public Set<Integer> restoredSymbols() {
             return restoredSymbols;
+        }
+
+        @Override
+        public Optional<ExchangeCoreCheckpointStore.StorageStats> checkpointStatus() {
+            return checkpointStatus;
+        }
+
+        @Override
+        public int retainedCheckpoints() {
+            return retainedCheckpoints;
         }
 
         @Override

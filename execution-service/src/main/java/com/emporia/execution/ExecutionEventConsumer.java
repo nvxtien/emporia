@@ -160,6 +160,7 @@ class ExecutionEventConsumer {
     @KafkaListener(
             topics = "${emporia.kafka.orders-topic}",
             groupId = "emporia-execution-service-v1",
+            concurrency = "${emporia.execution.orders-consumer.concurrency:6}",
             properties = "auto.offset.reset=latest"
     )
     void consume(OrderDomainEvent event) {

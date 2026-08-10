@@ -83,8 +83,11 @@ session controls are required before real venue onboarding.
 | `EMPORIA_ORDER_MANAGEMENT_URL` | `http://localhost:8086` | Strategy state and restart recovery |
 | `EXECUTION_OAUTH_CLIENT_ID` | `emporia-execution` | Service OAuth client |
 | `EXECUTION_OAUTH_CLIENT_SECRET` | local development value | Service OAuth secret |
-| `EXECUTION_VENUE_MODE` | `simulated` | `simulated` or `fix` |
+| `EXECUTION_VENUE_MODE` | `simulated` | `simulated`, `fix`, or `exchange-core` |
+| `EXECUTION_ORDERS_CONSUMER_CONCURRENCY` | `6` | Kafka listener concurrency for `emporia.orders.v1`; defaults to the topic partition count |
 | `EXECUTION_FILL_DELAY` | `100ms` | Simulated fill delay |
+| `EXCHANGE_CORE_RETAINED_CHECKPOINTS` | `2` | Total exchange-core checkpoint ids retained after a successful manifest update when using `exchange-core` mode |
+| `EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES` | `0` | Optional pre-checkpoint free-space floor for exchange-core storage when using `exchange-core` mode |
 | `STRATEGY_TIME_COMPRESSION` | `60` | Local VWAP time compression |
 | `VWAP_DEFAULT_BUCKETS` | `10` | Default VWAP child count |
 

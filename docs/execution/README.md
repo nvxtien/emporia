@@ -403,11 +403,14 @@ seconds.
 | `EMPORIA_MARKET_DATA_URL` | `http://localhost:8084` | Venue depth lookup |
 | `EMPORIA_ORDER_MANAGEMENT_URL` | `http://localhost:8086` | Strategy state and recovery |
 | `EXECUTION_VENUE_MODE` | `simulated` | `simulated`, `fix`, or `exchange-core` |
+| `EXECUTION_ORDERS_CONSUMER_CONCURRENCY` | `6` | Kafka listener concurrency for `emporia.orders.v1`; defaults to the topic partition count |
 | `EXECUTION_FILL_DELAY` | `100ms` | Simulated fill delay |
 | `FIX_EXECUTION_VENUES` | empty | FIX session definitions by MIC |
 | `EXCHANGE_CORE_EXCHANGE_ID` | `emporia-simulation` | Exchange-core snapshot namespace |
 | `EXCHANGE_CORE_STORAGE_DIRECTORY` | `.local-run/exchange-core-simulation` | Exchange-core snapshots and Emporia latest-checkpoint manifest |
 | `EXCHANGE_CORE_SYMBOL_PARTITIONS` | `2` | Power-of-two exchange-core symbol partitions |
+| `EXCHANGE_CORE_RETAINED_CHECKPOINTS` | `2` | Total exchange-core checkpoint ids retained after a successful manifest update; `2` means latest plus one previous recovery point |
+| `EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES` | `0` | Optional pre-checkpoint free-space floor for exchange-core storage; `0` disables the guard |
 | `STRATEGY_TIME_COMPRESSION` | `60` | Strategy schedule acceleration |
 | `VWAP_DEFAULT_BUCKETS` | `10` | Default number of VWAP buckets |
 
