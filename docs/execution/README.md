@@ -414,6 +414,11 @@ seconds.
 | `STRATEGY_TIME_COMPRESSION` | `60` | Strategy schedule acceleration |
 | `VWAP_DEFAULT_BUCKETS` | `10` | Default number of VWAP buckets |
 
+When `EXECUTION_VENUE_MODE=exchange-core` runs with the `prod` or `production`
+Spring profile, startup fails fast unless `EXCHANGE_CORE_STORAGE_DIRECTORY`
+points outside `.local-run` and `EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES` is
+greater than `0`.
+
 The execution service uses the `emporia-execution` OAuth client for internal
 static-data, market-data, and order-management requests.
 

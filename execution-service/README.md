@@ -91,6 +91,11 @@ session controls are required before real venue onboarding.
 | `STRATEGY_TIME_COMPRESSION` | `60` | Local VWAP time compression |
 | `VWAP_DEFAULT_BUCKETS` | `10` | Default VWAP child count |
 
+When `EXECUTION_VENUE_MODE=exchange-core` runs with the `prod` or `production`
+Spring profile, startup fails fast unless `EXCHANGE_CORE_STORAGE_DIRECTORY`
+points outside `.local-run` and `EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES` is
+greater than `0`.
+
 Metrics are available from `/actuator/prometheus`, including routed orders,
 routing rejects, and published fills.
 

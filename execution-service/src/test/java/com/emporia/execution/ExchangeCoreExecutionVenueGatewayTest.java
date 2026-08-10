@@ -636,6 +636,52 @@ class ExchangeCoreExecutionVenueGatewayTest {
     }
 
     @Test
+    void detectsProductionProfiles() {
+        assertThat(ExchangeCoreExecutionVenueGateway.isProductionProfile(Set.of("prod"))).isTrue();
+        assertThat(ExchangeCoreExecutionVenueGateway.isProductionProfile(Set.of("production"))).isTrue();
+        assertThat(ExchangeCoreExecutionVenueGateway.isProductionProfile(Set.of("local"))).isFalse();
+        assertThat(ExchangeCoreExecutionVenueGateway.isProductionProfile(Set.of())).isFalse();
+    }
+
+    @Test
+    void productionGuardrailsRejectLocalRunStorage() {
+        assertThatThrownBy(() -> ExchangeCoreExecutionVenueGateway.validateProductionGuardrails(
+                Path.of(".local-run/exchange-core-simulation"), 1024, Set.of("prod")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("cannot use local-run storage")
+                .hasMessageContaining("EXCHANGE_CORE_STORAGE_DIRECTORY");
+    }
+
+    @Test
+    void productionGuardrailsRejectEmptyStoragePath() {
+        assertThatThrownBy(() -> ExchangeCoreExecutionVenueGateway.validateProductionGuardrails(
+                Path.of(""), 1024, Set.of("production")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("storage-directory");
+    }
+
+    @Test
+    void productionGuardrailsRejectDisabledFreeSpaceFloor() {
+        assertThatThrownBy(() -> ExchangeCoreExecutionVenueGateway.validateProductionGuardrails(
+                Path.of("/var/lib/emporia/exchange-core"), 0, Set.of("prod")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES")
+                .hasMessageContaining("greater than 0");
+    }
+
+    @Test
+    void productionGuardrailsAllowExplicitPersistentStorage() {
+        ExchangeCoreExecutionVenueGateway.validateProductionGuardrails(
+                Path.of("/var/lib/emporia/exchange-core"), 1024, Set.of("prod"));
+    }
+
+    @Test
+    void productionGuardrailsAllowLocalDevelopmentDefaults() {
+        ExchangeCoreExecutionVenueGateway.validateProductionGuardrails(
+                Path.of(".local-run/exchange-core-simulation"), 0, Set.of("local"));
+    }
+
+    @Test
     void snapshotsPeriodicallyOnlyWhileRunning() {
         gateway.snapshotPeriodically();
         assertThat(venue.checkpoints).as("must not snapshot before start").isZero();

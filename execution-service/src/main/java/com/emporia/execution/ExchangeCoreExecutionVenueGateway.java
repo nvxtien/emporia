@@ -39,6 +39,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.springframework.boot.health.contributor.Health;
 import org.springframework.boot.health.contributor.HealthIndicator;
 import org.springframework.context.SmartLifecycle;
+import org.springframework.core.env.Environment;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -52,6 +53,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Locale;
 import java.util.Map;
@@ -137,7 +139,53 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             @Value("${emporia.execution.exchange-core.retained-checkpoints:2}") int retainedCheckpoints,
             @Value("${emporia.execution.exchange-core.min-free-storage-bytes:0}") long minFreeStorageBytes,
             @Value("${emporia.execution.sor.slippage-bps:10}") BigDecimal slippageBps,
+            MeterRegistry meters,
+            Environment environment)
+            throws IOException {
+        this(commands, tokenProvider, dataSource, recoverySource, exchangeId, storage, partitions,
+                accountingMode, portfolioUrl, portfolioTimeout, journaling, retainedCheckpoints,
+                minFreeStorageBytes, slippageBps, meters, activeProfiles(environment));
+    }
+
+    public ExchangeCoreExecutionVenueGateway(
+            ExecutionCommandPublisher commands,
+            ServiceAccessTokenProvider tokenProvider,
+            Optional<DataSource> dataSource,
+            TradingDataClient recoverySource,
+            String exchangeId,
+            Path storage,
+            int partitions,
+            String accountingMode,
+            String portfolioUrl,
+            Duration portfolioTimeout,
+            boolean journaling,
+            int retainedCheckpoints,
+            long minFreeStorageBytes,
+            BigDecimal slippageBps,
             MeterRegistry meters)
+            throws IOException {
+        this(commands, tokenProvider, dataSource, recoverySource, exchangeId, storage, partitions,
+                accountingMode, portfolioUrl, portfolioTimeout, journaling, retainedCheckpoints,
+                minFreeStorageBytes, slippageBps, meters, Set.of());
+    }
+
+    private ExchangeCoreExecutionVenueGateway(
+            ExecutionCommandPublisher commands,
+            ServiceAccessTokenProvider tokenProvider,
+            Optional<DataSource> dataSource,
+            TradingDataClient recoverySource,
+            String exchangeId,
+            Path storage,
+            int partitions,
+            String accountingMode,
+            String portfolioUrl,
+            Duration portfolioTimeout,
+            boolean journaling,
+            int retainedCheckpoints,
+            long minFreeStorageBytes,
+            BigDecimal slippageBps,
+            MeterRegistry meters,
+            Set<String> activeProfiles)
             throws IOException {
         this(GatewaySpec.builder(commands, buildVenue(ProductionVenueSpec.builder()
                         .exchangeId(exchangeId)
@@ -148,6 +196,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
                         .journaling(journaling)
                         .retainedCheckpoints(retainedCheckpoints)
                         .minFreeStorageBytes(minFreeStorageBytes)
+                        .activeProfiles(activeProfiles)
                         .build()))
                 .fullEquityRisk(ACCOUNTING_FULL_EQUITY.equalsIgnoreCase(accountingMode))
                 .recoverySource(recoverySource)
@@ -216,6 +265,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     }
 
     private static ExchangeCoreVenue buildVenue(ProductionVenueSpec spec) throws IOException {
+        validateProductionGuardrails(spec.storage(), spec.minFreeStorageBytes(), spec.activeProfiles());
         // exchange-core writes its snapshots straight into this directory and does
         // not create it. Only ExchangeCoreCheckpointStore.save did, and that runs
         // after the snapshot write has already failed.
@@ -233,6 +283,13 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
                     + "must use an explicit persistent volume.", spec.storage().toAbsolutePath().normalize());
         }
         return new ProductionSimulationVenue(spec);
+    }
+
+    private static Set<String> activeProfiles(Environment environment) {
+        if (environment == null) {
+            return Set.of();
+        }
+        return Set.copyOf(Arrays.asList(environment.getActiveProfiles()));
     }
 
     static GatewayBuilder builder(ExecutionCommandPublisher commands, ExchangeCoreVenue venue) {
@@ -897,6 +954,33 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         return false;
     }
 
+    static boolean isProductionProfile(Collection<String> activeProfiles) {
+        return activeProfiles.stream()
+                .filter(Objects::nonNull)
+                .map(profile -> profile.strip().toLowerCase(Locale.ROOT))
+                .anyMatch(profile -> "prod".equals(profile) || "production".equals(profile));
+    }
+
+    static void validateProductionGuardrails(
+            Path storage, long minFreeStorageBytes, Collection<String> activeProfiles) {
+        if (!isProductionProfile(activeProfiles)) {
+            return;
+        }
+        if (storage == null || storage.toString().isBlank()) {
+            throw new IllegalStateException("Production exchange-core mode requires "
+                    + "emporia.execution.exchange-core.storage-directory to point at persistent storage");
+        }
+        if (usesLocalRunStorage(storage)) {
+            throw new IllegalStateException("Production exchange-core mode cannot use local-run storage: "
+                    + storage.toAbsolutePath().normalize()
+                    + ". Set EXCHANGE_CORE_STORAGE_DIRECTORY to a persistent volume.");
+        }
+        if (minFreeStorageBytes <= 0) {
+            throw new IllegalStateException("Production exchange-core mode requires "
+                    + "EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES to be greater than 0");
+        }
+    }
+
     private record GatewaySpec(
             ExecutionCommandPublisher commands,
             ExchangeCoreVenue venue,
@@ -965,11 +1049,13 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             ProductionSimulationAccounting accounting,
             boolean journaling,
             int retainedCheckpoints,
-            long minFreeStorageBytes) {
+            long minFreeStorageBytes,
+            Set<String> activeProfiles) {
         private ProductionVenueSpec {
             exchangeId = Objects.requireNonNull(exchangeId, "exchangeId");
             storage = Objects.requireNonNull(storage, "storage");
             accounting = Objects.requireNonNull(accounting, "accounting");
+            activeProfiles = Set.copyOf(activeProfiles);
         }
 
         private static ProductionVenueSpecBuilder builder() {
@@ -985,6 +1071,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         private boolean journaling;
         private int retainedCheckpoints = 2;
         private long minFreeStorageBytes;
+        private Set<String> activeProfiles = Set.of();
 
         private ProductionVenueSpecBuilder exchangeId(String exchangeId) {
             this.exchangeId = exchangeId;
@@ -1021,9 +1108,14 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             return this;
         }
 
+        private ProductionVenueSpecBuilder activeProfiles(Set<String> activeProfiles) {
+            this.activeProfiles = Set.copyOf(activeProfiles);
+            return this;
+        }
+
         private ProductionVenueSpec build() {
             return new ProductionVenueSpec(exchangeId, storage, partitions, accounting,
-                    journaling, retainedCheckpoints, minFreeStorageBytes);
+                    journaling, retainedCheckpoints, minFreeStorageBytes, activeProfiles);
         }
     }
 
