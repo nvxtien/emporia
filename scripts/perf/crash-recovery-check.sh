@@ -125,11 +125,19 @@ curl -fsS -X POST "${GATEWAY_URL}/api/orders/${order_b}/cancel" \
     -H "Authorization: Bearer ${token}" \
     -H "Idempotency-Key: crash-recovery-cancel-b-$(date +%s%N)" >/dev/null \
     || fail "cancel of order B was rejected outright"
-sleep 5
 
+# Venue-confirmed cancellation, not an immediate DB write - and right after a
+# cold restart it competes with Kafka consumer-group rebalancing, so a fixed
+# short sleep here was producing false FAILs on a system that had actually
+# recovered correctly. Poll instead of guessing a single wait.
 status_b="$(order_status "$order_b")"
+for _ in $(seq 1 15); do
+    [ "$status_b" = "CANCELLED" ] && break
+    sleep 2
+    status_b="$(order_status "$order_b")"
+done
 [ "$status_b" = "CANCELLED" ] \
-    || fail "order B is ${status_b}, not CANCELLED. The venue could not act on an
+    || fail "order B is ${status_b}, not CANCELLED after 30s. The venue could not act on an
   order accepted after the last snapshot, which is the failure this checks for.
   Look for 'unknown lifecycle order' in .local-run/logs/execution-service.log."
 
