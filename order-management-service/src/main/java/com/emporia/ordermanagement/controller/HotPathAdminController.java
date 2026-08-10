@@ -32,7 +32,7 @@ class HotPathAdminController {
     @GetMapping("/status")
     HotPathStatusView status(@AuthenticationPrincipal Jwt jwt) {
         requireAdmin(jwt);
-        return new HotPathStatusView(pipeline.isAcceptingCommands());
+        return statusView(pipeline.isAcceptingCommands());
     }
 
     @PostMapping("/kill-switch")
@@ -40,21 +40,26 @@ class HotPathAdminController {
                              @RequestParam(defaultValue = "manual") String reason) {
         requireAdmin(jwt);
         pipeline.engageKillSwitch(reason);
-        return new HotPathStatusView(false);
+        return statusView(false);
     }
 
     @DeleteMapping("/kill-switch")
     HotPathStatusView release(@AuthenticationPrincipal Jwt jwt) {
         requireAdmin(jwt);
         pipeline.releaseKillSwitch();
-        return new HotPathStatusView(true);
+        return statusView(true);
     }
 
     @GetMapping("/shadow-report")
     OrderShadowComparisonService.ShadowComparisonReport shadowReport(@AuthenticationPrincipal Jwt jwt,
-                                                                     @RequestParam(defaultValue = "100") int limit) {
+                                                                     @RequestParam(defaultValue = "100") int limit,
+                                                                     @RequestParam(required = false) Long afterSequenceId) {
         requireAdmin(jwt);
-        return shadows.compare(Math.max(1, Math.min(limit, 1000)));
+        return shadows.compare(Math.max(1, Math.min(limit, 1000)), afterSequenceId);
+    }
+
+    private HotPathStatusView statusView(boolean acceptingCommands) {
+        return new HotPathStatusView(acceptingCommands, shadows.latestSequenceId());
     }
 
     private void requireAdmin(Jwt jwt) {
@@ -75,6 +80,6 @@ class HotPathAdminController {
         return List.of();
     }
 
-    record HotPathStatusView(boolean acceptingCommands) {
+    record HotPathStatusView(boolean acceptingCommands, long latestInputSequenceId) {
     }
 }

@@ -52,7 +52,11 @@ status_json() {
 }
 
 shadow_json() {
-    curl -fsS "${auth_header[@]}" "$OMS_URL/internal/hotpath/shadow-report?limit=$SHADOW_LIMIT"
+    local query="limit=$SHADOW_LIMIT"
+    if [ -n "${SHADOW_AFTER_SEQUENCE_ID:-}" ]; then
+        query="${query}&afterSequenceId=${SHADOW_AFTER_SEQUENCE_ID}"
+    fi
+    curl -fsS "${auth_header[@]}" "$OMS_URL/internal/hotpath/shadow-report?${query}"
 }
 
 engage_kill_switch() {
@@ -102,22 +106,15 @@ run_load() {
 echo "==> Checking hot-path status"
 status_json | tee "$OUT_DIR/status-before.json"
 
-echo "==> Comparing live outcomes against shadow replay"
-shadow_json | tee "$OUT_DIR/shadow-report.json"
-
-python3 - "$OUT_DIR/shadow-report.json" "$REQUIRED_SHADOW_PASS_RATE" <<'PY'
+SHADOW_AFTER_SEQUENCE_ID="$(python3 - "$OUT_DIR/status-before.json" <<'PY'
 import json, sys
-path, required = sys.argv[1], float(sys.argv[2])
-data = json.load(open(path))
-total = int(data.get("totalCommands", 0))
-rate = float(data.get("passRate", 0.0))
-print(f"    shadow commands: {total}")
-print(f"    shadow pass rate: {rate:.4f}")
-if total <= 0:
-    raise SystemExit("shadow replay did not compare any commands")
-if rate < required:
-    raise SystemExit(f"shadow pass rate {rate:.4f} < required {required:.4f}")
+try:
+    print(int(json.load(open(sys.argv[1])).get("latestInputSequenceId") or 0))
+except Exception:
+    print(0)
 PY
+)"
+echo "    shadow checkpoint sequence: ${SHADOW_AFTER_SEQUENCE_ID}"
 
 echo "==> Running load profile RATE=${RATE}/s DURATION=${DURATION}"
 run_load | tee "$OUT_DIR/k6-output.txt"
@@ -142,6 +139,24 @@ if max_p99 > 0 and p99 > max_p99:
     raise SystemExit(f"submit latency p99 {p99:.2f}ms exceeds max {max_p99:.2f}ms")
 PY
 cat "$OUT_DIR/summary.txt"
+
+echo "==> Comparing this run's live outcomes against shadow replay"
+sleep "${SHADOW_FLUSH_WAIT_SECONDS:-1}"
+shadow_json | tee "$OUT_DIR/shadow-report.json"
+
+python3 - "$OUT_DIR/shadow-report.json" "$REQUIRED_SHADOW_PASS_RATE" <<'PY'
+import json, sys
+path, required = sys.argv[1], float(sys.argv[2])
+data = json.load(open(path))
+total = int(data.get("totalCommands", 0))
+rate = float(data.get("passRate", 0.0))
+print(f"    shadow commands: {total}")
+print(f"    shadow pass rate: {rate:.4f}")
+if total <= 0:
+    raise SystemExit("shadow replay did not compare any commands")
+if rate < required:
+    raise SystemExit(f"shadow pass rate {rate:.4f} < required {required:.4f}")
+PY
 
 echo "==> Verifying controlled degradation with kill switch"
 engage_kill_switch

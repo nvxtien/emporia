@@ -22,8 +22,10 @@ class HotPathAdminControllerTest {
     @Test
     void adminCanEngageAndReleaseKillSwitch() {
         when(pipeline.isAcceptingCommands()).thenReturn(true, false, true);
+        when(shadows.latestSequenceId()).thenReturn(42L);
 
         assertThat(controller.status(adminJwt()).acceptingCommands()).isTrue();
+        assertThat(controller.status(adminJwt()).latestInputSequenceId()).isEqualTo(42L);
         assertThat(controller.engage(adminJwt(), "drill").acceptingCommands()).isFalse();
         assertThat(controller.release(adminJwt()).acceptingCommands()).isTrue();
 
@@ -35,9 +37,9 @@ class HotPathAdminControllerTest {
     void adminCanRequestShadowReport() {
         OrderShadowComparisonService.ShadowComparisonReport report =
                 new OrderShadowComparisonService.ShadowComparisonReport(1, 1, 0, 1.0d, List.of());
-        when(shadows.compare(100)).thenReturn(report);
+        when(shadows.compare(100, 42L)).thenReturn(report);
 
-        assertThat(controller.shadowReport(adminJwt(), 100)).isEqualTo(report);
+        assertThat(controller.shadowReport(adminJwt(), 100, 42L)).isEqualTo(report);
     }
 
     @Test

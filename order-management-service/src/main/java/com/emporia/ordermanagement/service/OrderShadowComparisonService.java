@@ -14,8 +14,11 @@ import com.emporia.ordermanagement.repository.ProcessedCommandRepository;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
@@ -26,11 +29,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 @Service
 public class OrderShadowComparisonService {
     private static final Field VERSION_FIELD = field(TradingOrder.class, "version");
+    private static final Set<String> VOLATILE_PAYLOAD_FIELDS =
+            Set.of("createdAt", "updatedAt", "occurredAt", "processedAt");
 
     private final OrderInputEventRepository inputEvents;
     private final ProcessedCommandRepository processed;
@@ -48,10 +54,12 @@ public class OrderShadowComparisonService {
     }
 
     public ShadowComparisonReport compare(int limit) {
-        List<OrderInputEvent> orderedInputs = inputEvents.findAllByOrderBySequenceIdAsc().stream()
-                .sorted(Comparator.comparing(OrderInputEvent::getSequenceId, Comparator.nullsLast(Long::compareTo)))
-                .limit(Math.max(1, limit))
-                .toList();
+        return compare(limit, null);
+    }
+
+    public ShadowComparisonReport compare(int limit, Long afterSequenceId) {
+        int boundedLimit = Math.max(1, limit);
+        List<OrderInputEvent> orderedInputs = orderedInputs(boundedLimit, afterSequenceId);
         ShadowSandbox sandbox = new ShadowSandbox();
         List<ShadowMismatch> mismatches = new ArrayList<>();
         int matched = 0;
@@ -80,26 +88,99 @@ public class OrderShadowComparisonService {
         );
     }
 
+    public long latestSequenceId() {
+        return inputEvents.maxSequenceId();
+    }
+
+    private List<OrderInputEvent> orderedInputs(int limit, Long afterSequenceId) {
+        PageRequest page = PageRequest.of(0, limit);
+        if (afterSequenceId != null) {
+            return inputEvents.findBySequenceIdGreaterThanOrderBySequenceIdAsc(afterSequenceId, page);
+        }
+        return inputEvents.findByOrderBySequenceIdDesc(page)
+                .stream()
+                .sorted(Comparator.comparing(OrderInputEvent::getSequenceId, Comparator.nullsLast(Long::compareTo)))
+                .toList();
+    }
+
     private ShadowSnapshot actual(OrderInputEvent inputEvent) {
         NormalizedResult result = processed.findById(inputEvent.getCommandId())
                 .map(ProcessedCommand::result)
-                .map(OrderShadowComparisonService::normalize)
+                .map(resultRecord -> normalize(resultRecord, objectMapper))
                 .orElse(null);
         List<NormalizedEvent> normalizedEvents = events.findByCommandIdOrderByOccurredAtAsc(inputEvent.getCommandId())
                 .stream()
                 .map(OrderEvent::domainEvent)
-                .map(OrderShadowComparisonService::normalize)
+                .map(event -> normalize(event, objectMapper))
                 .toList();
         return new ShadowSnapshot(result, normalizedEvents);
     }
 
-    private static NormalizedResult normalize(OrderCommandResult result) {
-        return new NormalizedResult(result.success(), result.status(), result.detail(), result.payload());
+    private static NormalizedResult normalize(OrderCommandResult result, ObjectMapper objectMapper) {
+        return new NormalizedResult(result.success(), result.status(), result.detail(),
+                normalizePayload(result.payload(), objectMapper));
     }
 
-    private static NormalizedEvent normalize(OrderDomainEvent event) {
+    private static NormalizedEvent normalize(OrderDomainEvent event, ObjectMapper objectMapper) {
         return new NormalizedEvent(event.commandId(), event.orderId(), event.userSubject(), event.deskId(),
-                event.eventType(), event.orderVersion(), event.status().name(), event.payload());
+                event.eventType(), event.orderVersion(), event.status().name(),
+                normalizePayload(event.payload(), objectMapper));
+    }
+
+    private static String normalizePayload(String payload, ObjectMapper objectMapper) {
+        if (payload == null || payload.isBlank()) return payload;
+        try {
+            JsonNode normalized = objectMapper.readTree(payload).deepCopy();
+            removeVolatilePayloadFields(normalized);
+            return canonicalJson(normalized, objectMapper);
+        } catch (Exception invalidJson) {
+            return payload;
+        }
+    }
+
+    private static void removeVolatilePayloadFields(JsonNode node) {
+        if (node == null) return;
+        if (node.isObject()) {
+            ObjectNode object = node.asObject();
+            object.remove(VOLATILE_PAYLOAD_FIELDS);
+            for (JsonNode child : object.values()) {
+                removeVolatilePayloadFields(child);
+            }
+        } else if (node.isArray()) {
+            for (JsonNode child : node) {
+                removeVolatilePayloadFields(child);
+            }
+        }
+    }
+
+    private static String canonicalJson(JsonNode node, ObjectMapper objectMapper) throws Exception {
+        if (node == null || node.isNull()) return "null";
+        if (node.isNumber()) return node.decimalValue().stripTrailingZeros().toPlainString();
+        if (node.isString()) return objectMapper.writeValueAsString(node.asString());
+        if (node.isBoolean()) return Boolean.toString(node.booleanValue());
+        if (node.isArray()) {
+            StringBuilder builder = new StringBuilder("[");
+            boolean first = true;
+            for (JsonNode child : node) {
+                if (!first) builder.append(',');
+                builder.append(canonicalJson(child, objectMapper));
+                first = false;
+            }
+            return builder.append(']').toString();
+        }
+        if (node.isObject()) {
+            StringBuilder builder = new StringBuilder("{");
+            boolean first = true;
+            for (String name : node.propertyNames().stream().sorted().toList()) {
+                if (!first) builder.append(',');
+                builder.append(objectMapper.writeValueAsString(name))
+                        .append(':')
+                        .append(canonicalJson(node.get(name), objectMapper));
+                first = false;
+            }
+            return builder.append('}').toString();
+        }
+        return node.toString();
     }
 
     private static Field field(Class<?> type, String name) {
@@ -201,7 +282,8 @@ public class OrderShadowComparisonService {
             );
             OrderMetrics metrics = new OrderMetrics(new SimpleMeterRegistry());
             OrderStateCache cache = new OrderStateCache(orders, processed, 1000, 1000);
-            AsyncDbWriter asyncDbWriter = new NoOpAsyncDbWriter(orders, events, processed);
+            AsyncDbWriter asyncDbWriter = new InMemoryAsyncDbWriter(
+                    orders, events, processed, storedOrders, eventsByCommand, processedCommands);
             handler = new OrderCommandHandler(orders, events, processed, new ObjectMapper(), ObservationRegistry.NOOP,
                     metrics, cache, asyncDbWriter, "emporia.orders.v1", "emporia.order.results.v1");
         }
@@ -211,8 +293,8 @@ public class OrderShadowComparisonService {
                 OrderCommand command = objectMapper.readValue(inputEvent.getPayload(), OrderCommand.class);
                 ProcessingOutcome outcome = handler.handle(command);
                 return new ShadowSnapshot(
-                        normalize(outcome.result()),
-                        outcome.events().stream().map(OrderShadowComparisonService::normalize).toList()
+                        normalize(outcome.result(), objectMapper),
+                        outcome.events().stream().map(event -> OrderShadowComparisonService.normalize(event, objectMapper)).toList()
                 );
             } catch (Exception exception) {
                 throw new IllegalStateException("Could not shadow-replay command " + inputEvent.getCommandId(), exception);
@@ -248,22 +330,37 @@ public class OrderShadowComparisonService {
         }
     }
 
-    private static final class NoOpAsyncDbWriter extends AsyncDbWriter {
-        private NoOpAsyncDbWriter(TradingOrderRepository orders, OrderEventRepository events,
-                                  ProcessedCommandRepository processed) {
+    private static final class InMemoryAsyncDbWriter extends AsyncDbWriter {
+        private final Map<UUID, TradingOrder> storedOrders;
+        private final Map<UUID, List<OrderEvent>> eventsByCommand;
+        private final Map<UUID, ProcessedCommand> processedCommands;
+
+        private InMemoryAsyncDbWriter(TradingOrderRepository orders, OrderEventRepository events,
+                                      ProcessedCommandRepository processed,
+                                      Map<UUID, TradingOrder> storedOrders,
+                                      Map<UUID, List<OrderEvent>> eventsByCommand,
+                                      Map<UUID, ProcessedCommand> processedCommands) {
             super(orders, events, processed);
+            this.storedOrders = storedOrders;
+            this.eventsByCommand = eventsByCommand;
+            this.processedCommands = processedCommands;
         }
 
         @Override
         public void enqueue(TradingOrder order) {
+            if (order != null) storedOrders.put(order.getId(), order);
         }
 
         @Override
         public void enqueue(OrderEvent event) {
+            if (event != null) {
+                eventsByCommand.computeIfAbsent(event.domainEvent().commandId(), ignored -> new ArrayList<>()).add(event);
+            }
         }
 
         @Override
         public void enqueue(ProcessedCommand command) {
+            if (command != null) processedCommands.put(command.result().commandId(), command);
         }
 
         @Override
