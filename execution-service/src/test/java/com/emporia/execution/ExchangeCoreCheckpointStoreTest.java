@@ -37,6 +37,28 @@ class ExchangeCoreCheckpointStoreTest {
     }
 
     @Test
+    void rejectsCorruptManifestWithClearIoFailure() throws IOException {
+        Files.writeString(directory.resolve("emporia-exchange-core.latest"),
+                "checkpointId=not-a-number\nsymbols=7\n");
+        ExchangeCoreCheckpointStore store = new ExchangeCoreCheckpointStore(directory);
+
+        assertThatThrownBy(store::load)
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("manifest is invalid");
+    }
+
+    @Test
+    void rejectsManifestWithoutPositiveCheckpoint() throws IOException {
+        Files.writeString(directory.resolve("emporia-exchange-core.latest"),
+                "checkpointId=0\nsymbols=7\n");
+        ExchangeCoreCheckpointStore store = new ExchangeCoreCheckpointStore(directory);
+
+        assertThatThrownBy(store::load)
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("no positive checkpointId");
+    }
+
+    @Test
     void rejectsInvalidCheckpointIds() {
         ExchangeCoreCheckpointStore store = new ExchangeCoreCheckpointStore(directory);
 

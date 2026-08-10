@@ -38,19 +38,23 @@ final class ExchangeCoreCheckpointStore {
         }
         long checkpointId = 0;
         Set<Integer> symbols = new TreeSet<>();
-        for (String line : Files.readAllLines(manifest, StandardCharsets.UTF_8)) {
-            if (line.startsWith("checkpointId=")) {
-                checkpointId = Long.parseLong(line.substring("checkpointId=".length()).trim());
-            } else if (line.startsWith("symbols=")) {
-                String value = line.substring("symbols=".length()).trim();
-                if (!value.isBlank()) {
-                    Arrays.stream(value.split(","))
-                            .map(String::trim)
-                            .filter(part -> !part.isBlank())
-                            .map(Integer::parseInt)
-                            .forEach(symbols::add);
+        try {
+            for (String line : Files.readAllLines(manifest, StandardCharsets.UTF_8)) {
+                if (line.startsWith("checkpointId=")) {
+                    checkpointId = Long.parseLong(line.substring("checkpointId=".length()).trim());
+                } else if (line.startsWith("symbols=")) {
+                    String value = line.substring("symbols=".length()).trim();
+                    if (!value.isBlank()) {
+                        Arrays.stream(value.split(","))
+                              .map(String::trim)
+                              .filter(part -> !part.isBlank())
+                              .map(Integer::parseInt)
+                              .forEach(symbols::add);
+                    }
                 }
             }
+        } catch (IllegalArgumentException invalidManifest) {
+            throw new IOException("Exchange-core checkpoint manifest is invalid", invalidManifest);
         }
         if (checkpointId <= 0) {
             throw new IOException("Exchange-core checkpoint manifest has no positive checkpointId");
@@ -64,11 +68,12 @@ final class ExchangeCoreCheckpointStore {
         }
         Files.createDirectories(directory);
         String content = "checkpointId=" + checkpointId + "\n"
-                + "symbols=" + symbols.stream()
-                .sorted()
-                .map(String::valueOf)
-                .reduce((left, right) -> left + "," + right)
-                .orElse("")
+                + "symbols="
+                + symbols.stream()
+                         .sorted()
+                         .map(String::valueOf)
+                         .reduce((left, right) -> left + "," + right)
+                         .orElse("")
                 + "\n";
         Path temporary = Files.createTempFile(directory, FILE_NAME, ".tmp");
         try {
