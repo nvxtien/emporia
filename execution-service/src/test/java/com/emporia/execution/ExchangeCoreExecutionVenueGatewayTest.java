@@ -852,6 +852,11 @@ class ExchangeCoreExecutionVenueGatewayTest {
         }
 
         @Override
+        public CompletableFuture<java.util.Set<Long>> openOrderIds(long clientId) {
+            return CompletableFuture.completedFuture(java.util.Set.of());
+        }
+
+        @Override
         public CompletableFuture<ProductionSimulationResult> submit(DmaLimitOrder order) {
             submits.add(order);
             return CompletableFuture.completedFuture(submitResponses.remove().apply(order));

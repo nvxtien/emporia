@@ -557,6 +557,15 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     }
 
     /**
+     * Order IDs the matching engine currently has resting for a client - see
+     * {@link ExchangeCoreVenue#openOrderIds}. Exposed for reconciliation
+     * against order-management's own record of live orders.
+     */
+    public CompletableFuture<Set<Long>> openOrderIds(long clientId) {
+        return venue.openOrderIds(clientId);
+    }
+
+    /**
      * Snapshots engine state on a timer rather than per order.
      *
      * <p>The journal alone is enough to recover, but replay time grows without
@@ -1172,6 +1181,14 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
          */
         CompletableFuture<Void> onboardPortfolio(long clientId);
 
+        /**
+         * Order IDs the matching engine currently has resting for this
+         * client, keyed the same way {@link #coreOrderId} derives them from
+         * an order-management order ID - for reconciling against an external
+         * order-lifecycle record.
+         */
+        CompletableFuture<Set<Long>> openOrderIds(long clientId);
+
         CompletableFuture<ProductionSimulationResult> submit(DmaLimitOrder order);
 
         CompletableFuture<ProductionSimulationResult> submitProtected(DmaProtectedMarketOrder order);
@@ -1253,6 +1270,11 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         @Override
         public CompletableFuture<Void> onboardPortfolio(long clientId) {
             return simulation.onboardPortfolio(clientId).thenApply(snapshot -> null);
+        }
+
+        @Override
+        public CompletableFuture<Set<Long>> openOrderIds(long clientId) {
+            return simulation.openOrderIds(clientId);
         }
 
         // Where durability comes from, and why the two are one switch.
