@@ -432,6 +432,15 @@ curl http://localhost:8087/actuator/health
 curl http://localhost:8087/actuator/prometheus
 ```
 
+In `exchange-core` mode, readiness also surfaces checkpoint persistence state.
+The health details include `checkpointStatusAvailable`,
+`checkpointFailuresSinceLastSuccess`, `lastCheckpointSuccessAt`,
+`checkpointAgeSeconds`, `checkpointStorageBytes`, and
+`checkpointUsableStorageBytes`. Prometheus exposes matching gauges for
+checkpoint age, latest checkpoint id, retained ids/files, stored bytes, usable
+storage bytes, and configured retention. Alert on any checkpoint failure, a stale
+checkpoint age for the configured snapshot interval, or low usable storage.
+
 Run the focused service tests:
 
 ```bash

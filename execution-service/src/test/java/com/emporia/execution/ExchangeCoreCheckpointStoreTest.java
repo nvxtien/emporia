@@ -131,6 +131,7 @@ class ExchangeCoreCheckpointStoreTest {
         assertThat(stats.checkpointIdCount()).isEqualTo(1);
         assertThat(stats.checkpointFileCount()).isEqualTo(3);
         assertThat(stats.storageBytes()).isGreaterThan(3L);
+        assertThat(stats.usableStorageBytes()).isPositive();
     }
 
     @Test

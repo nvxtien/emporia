@@ -117,6 +117,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     private final MeterRegistry meters;
     /** Checkpoint failures since the last successful snapshot; 0 means healthy. */
     private final AtomicLong checkpointFailures = new AtomicLong();
+    private volatile Instant lastCheckpointSuccess;
     private volatile Instant lastCheckpointFailure;
     private volatile String lastCheckpointFailureDetail;
 
@@ -716,9 +717,12 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
 
     private void recordCheckpointSuccess() {
         checkpointFailures.set(0);
+        lastCheckpointSuccess = Instant.now();
     }
 
     private void registerCheckpointGauges() {
+        meters.gauge("emporia.execution.venue.checkpoint.age.seconds", this,
+                ExchangeCoreExecutionVenueGateway::checkpointAgeSeconds);
         meters.gauge("emporia.execution.venue.checkpoint.latest.id", this,
                 gateway -> gateway.checkpointStatus()
                         .map(ExchangeCoreCheckpointStore.StorageStats::latestCheckpointIdOrZero)
@@ -735,6 +739,10 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
                 gateway -> gateway.checkpointStatus()
                         .map(ExchangeCoreCheckpointStore.StorageStats::storageBytes)
                         .orElse(0L));
+        meters.gauge("emporia.execution.venue.checkpoint.storage.usable.bytes", this,
+                gateway -> gateway.checkpointStatus()
+                        .map(ExchangeCoreCheckpointStore.StorageStats::usableStorageBytes)
+                        .orElse(0L));
         meters.gauge("emporia.execution.venue.checkpoint.retained.configured", this,
                 gateway -> gateway.venue.retainedCheckpoints());
     }
@@ -749,22 +757,40 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     @Override
     public Health health() {
         long failures = checkpointFailures.get();
-        Health.Builder status = failures == 0 ? Health.up() : Health.down();
+        Optional<ExchangeCoreCheckpointStore.StorageStats> checkpoint = checkpointStatus();
+        boolean checkpointStatusMissing = checkpoint.isEmpty() && venue.retainedCheckpoints() > 0;
+        Health.Builder status = failures == 0 && !checkpointStatusMissing ? Health.up() : Health.down();
         status.withDetail("venue", "exchange-core")
-                .withDetail("checkpointFailuresSinceLastSuccess", failures);
-        checkpointStatus().ifPresent(checkpoint -> status
-                .withDetail("checkpointStorageDirectory", checkpoint.directory().toString())
-                .withDetail("latestCheckpointId", checkpoint.latestCheckpointIdOrZero())
-                .withDetail("checkpointIdCount", checkpoint.checkpointIdCount())
-                .withDetail("checkpointFileCount", checkpoint.checkpointFileCount())
-                .withDetail("checkpointStorageBytes", checkpoint.storageBytes())
-                .withDetail("retainedCheckpointsConfigured", venue.retainedCheckpoints()));
+              .withDetail("checkpointFailuresSinceLastSuccess", failures)
+              .withDetail("checkpointStatusAvailable", checkpoint.isPresent())
+              .withDetail("checkpointAgeSeconds", checkpointAgeSeconds())
+              .withDetail("retainedCheckpointsConfigured", venue.retainedCheckpoints());
+        checkpoint.ifPresent(stats -> status.withDetail("checkpointStorageDirectory", stats.directory().toString())
+                                            .withDetail("latestCheckpointId", stats.latestCheckpointIdOrZero())
+                                            .withDetail("checkpointIdCount", stats.checkpointIdCount())
+                                            .withDetail("checkpointFileCount", stats.checkpointFileCount())
+                                            .withDetail("checkpointStorageBytes", stats.storageBytes())
+                                            .withDetail("checkpointUsableStorageBytes", stats.usableStorageBytes()));
+        if (checkpointStatusMissing) {
+            status.withDetail("checkpointStatusDetail", "unavailable");
+        }
+        if (lastCheckpointSuccess != null) {
+            status.withDetail("lastCheckpointSuccessAt", lastCheckpointSuccess.toString());
+        }
         if (lastCheckpointFailure != null) {
             status.withDetail("lastCheckpointFailureAt", lastCheckpointFailure.toString())
-                    .withDetail("lastCheckpointFailureDetail",
+                  .withDetail("lastCheckpointFailureDetail",
                             lastCheckpointFailureDetail == null ? "unknown" : lastCheckpointFailureDetail);
         }
         return status.build();
+    }
+
+    private long checkpointAgeSeconds() {
+        Instant checkpoint = lastCheckpointSuccess;
+        if (checkpoint == null) {
+            return 0L;
+        }
+        return Math.max(0L, Duration.between(checkpoint, Instant.now()).toSeconds());
     }
 
     private Optional<ExchangeCoreCheckpointStore.StorageStats> checkpointStatus() {
@@ -780,15 +806,15 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         int symbol = symbolId(listing);
         if (symbols.add(symbol)) {
             venue.addSymbols(Set.of(CoreSymbolSpecification.builder()
-                    .symbolId(symbol)
-                    .type(SymbolType.EQUITY)
-                    .baseCurrency(stableInt("asset:" + listing.marketSymbol()))
-                    .quoteCurrency(isoCurrencyCode(listing.currency()))
-                    .baseScaleK(1)
-                    .quoteScaleK(1)
-                    .takerFee(0)
-                    .makerFee(0)
-                    .build()));
+                                                           .symbolId(symbol)
+                                                           .type(SymbolType.EQUITY)
+                                                           .baseCurrency(stableInt("asset:" + listing.marketSymbol()))
+                                                           .quoteCurrency(isoCurrencyCode(listing.currency()))
+                                                           .baseScaleK(1)
+                                                           .quoteScaleK(1)
+                                                           .takerFee(0)
+                                                           .makerFee(0)
+                                                           .build()));
         }
     }
 
@@ -891,8 +917,8 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
 
     private static long positiveLong(UUID uuid) {
         ByteBuffer buffer = ByteBuffer.allocate(Long.BYTES * 2)
-                .putLong(uuid.getMostSignificantBits())
-                .putLong(uuid.getLeastSignificantBits());
+                                      .putLong(uuid.getMostSignificantBits())
+                                      .putLong(uuid.getLeastSignificantBits());
         buffer.flip();
         long value = buffer.getLong() & Long.MAX_VALUE;
         return value == 0 ? 1 : value;

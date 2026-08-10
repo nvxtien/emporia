@@ -97,12 +97,12 @@ final class ExchangeCoreCheckpointStore {
         long latestCheckpointId = latest.get().checkpointId();
         List<CheckpointFile> files = checkpointFiles();
         Set<Long> retainedIds = files.stream()
-                .map(CheckpointFile::checkpointId)
-                .filter(checkpointId -> checkpointId <= latestCheckpointId)
-                .distinct()
-                .sorted(Comparator.reverseOrder())
-                .limit(retainedCheckpoints)
-                .collect(Collectors.toCollection(HashSet::new));
+                                     .map(CheckpointFile::checkpointId)
+                                     .filter(checkpointId -> checkpointId <= latestCheckpointId)
+                                     .distinct()
+                                     .sorted(Comparator.reverseOrder())
+                                     .limit(retainedCheckpoints)
+                                     .collect(Collectors.toCollection(HashSet::new));
         retainedIds.add(latestCheckpointId);
 
         for (CheckpointFile file : files) {
@@ -116,17 +116,18 @@ final class ExchangeCoreCheckpointStore {
     StorageStats stats() throws IOException {
         Optional<LatestCheckpoint> latest = load();
         if (!Files.isDirectory(directory)) {
-            return new StorageStats(directory, latest.map(LatestCheckpoint::checkpointId), 0, 0, 0);
+            return new StorageStats(directory, latest.map(LatestCheckpoint::checkpointId), 0, 0, 0, 0);
         }
 
         List<CheckpointFile> checkpoints = checkpointFiles();
         long bytes = regularStorageBytes();
+        long usableBytes = Files.getFileStore(directory).getUsableSpace();
         long checkpointIds = checkpoints.stream()
-                .mapToLong(CheckpointFile::checkpointId)
-                .distinct()
-                .count();
+                                        .mapToLong(CheckpointFile::checkpointId)
+                                        .distinct()
+                                        .count();
         return new StorageStats(directory, latest.map(LatestCheckpoint::checkpointId),
-                                (int) checkpointIds, checkpoints.size(), bytes);
+                                (int) checkpointIds, checkpoints.size(), bytes, usableBytes);
     }
 
     long usableStorageBytes() throws IOException {
@@ -149,9 +150,9 @@ final class ExchangeCoreCheckpointStore {
     private List<CheckpointFile> checkpointFiles() throws IOException {
         try (Stream<Path> files = Files.list(directory)) {
             return files.filter(path -> Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
-                    .map(ExchangeCoreCheckpointStore::checkpointFile)
-                    .flatMap(Optional::stream)
-                    .toList();
+                        .map(ExchangeCoreCheckpointStore::checkpointFile)
+                        .flatMap(Optional::stream)
+                        .toList();
         }
     }
 
@@ -195,7 +196,8 @@ final class ExchangeCoreCheckpointStore {
             Optional<Long> latestCheckpointId,
             int checkpointIdCount,
             int checkpointFileCount,
-            long storageBytes) {
+            long storageBytes,
+            long usableStorageBytes) {
         long latestCheckpointIdOrZero() {
             return latestCheckpointId.orElse(0L);
         }

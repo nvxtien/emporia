@@ -97,7 +97,10 @@ points outside `.local-run` and `EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES` is
 greater than `0`.
 
 Metrics are available from `/actuator/prometheus`, including routed orders,
-routing rejects, and published fills.
+routing rejects, published fills, and exchange-core checkpoint age, retention,
+storage, and usable-storage gauges. In `exchange-core` mode, `/actuator/health`
+reports `DOWN` when retained checkpoint storage status is unavailable or when
+checkpoint failures have not yet been cleared by a successful snapshot.
 
 ## Verify
 

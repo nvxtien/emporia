@@ -590,6 +590,10 @@ class ExchangeCoreExecutionVenueGatewayTest {
         gateway.snapshotPeriodically();
 
         assertThat(gateway.health().getStatus().getCode()).isEqualTo("UP");
+        assertThat(gateway.health().getDetails())
+                .containsKeys("lastCheckpointSuccessAt", "checkpointAgeSeconds");
+        assertThat(meters.get("emporia.execution.venue.checkpoint.age.seconds").gauge().value())
+                .isGreaterThanOrEqualTo(0.0);
     }
 
     @Test
@@ -602,7 +606,8 @@ class ExchangeCoreExecutionVenueGatewayTest {
                 Optional.of(99L),
                 2,
                 6,
-                4096));
+                4096,
+                8192));
         ExchangeCoreExecutionVenueGateway gateway =
                 ExchangeCoreExecutionVenueGateway.builder(commands, reporting)
                         .meterRegistry(meters)
@@ -614,6 +619,8 @@ class ExchangeCoreExecutionVenueGatewayTest {
                 .containsEntry("checkpointIdCount", 2)
                 .containsEntry("checkpointFileCount", 6)
                 .containsEntry("checkpointStorageBytes", 4096L)
+                .containsEntry("checkpointUsableStorageBytes", 8192L)
+                .containsEntry("checkpointStatusAvailable", true)
                 .containsEntry("retainedCheckpointsConfigured", 2);
         assertThat(meters.get("emporia.execution.venue.checkpoint.latest.id").gauge().value())
                 .isEqualTo(99.0);
@@ -623,8 +630,25 @@ class ExchangeCoreExecutionVenueGatewayTest {
                 .isEqualTo(6.0);
         assertThat(meters.get("emporia.execution.venue.checkpoint.storage.bytes").gauge().value())
                 .isEqualTo(4096.0);
+        assertThat(meters.get("emporia.execution.venue.checkpoint.storage.usable.bytes").gauge().value())
+                .isEqualTo(8192.0);
         assertThat(meters.get("emporia.execution.venue.checkpoint.retained.configured").gauge().value())
                 .isEqualTo(2.0);
+    }
+
+    @Test
+    void readinessFailsWhenCheckpointStatusIsUnavailable() {
+        FakeVenue unavailable = new FakeVenue();
+        unavailable.retainedCheckpoints = 2;
+        ExchangeCoreExecutionVenueGateway gateway =
+                ExchangeCoreExecutionVenueGateway.builder(commands, unavailable)
+                        .build();
+
+        assertThat(gateway.health().getStatus().getCode()).isEqualTo("DOWN");
+        assertThat(gateway.health().getDetails())
+                .containsEntry("checkpointStatusAvailable", false)
+                .containsEntry("retainedCheckpointsConfigured", 2)
+                .containsEntry("checkpointStatusDetail", "unavailable");
     }
 
     @Test
