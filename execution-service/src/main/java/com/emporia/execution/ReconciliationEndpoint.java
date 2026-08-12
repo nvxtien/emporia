@@ -53,17 +53,33 @@ class ReconciliationEndpoint {
                 .collect(Collectors.groupingBy(ExchangeCoreExecutionVenueGateway::clientId));
 
         List<String> missing = new ArrayList<>();
+        List<String> ghostOrders = new ArrayList<>();
+
         for (Map.Entry<Long, List<OrderView>> entry : byClient.entrySet()) {
-            Set<Long> resting = gateway.openOrderIds(entry.getKey()).join();
+            Long clientId = entry.getKey();
+            Set<Long> restingOnVenue = gateway.openOrderIds(clientId).join();
+            
+            // Direction 1: OMS -> Venue check
+            Set<Long> expectedCoreIds = entry.getValue().stream()
+                    .map(ExchangeCoreExecutionVenueGateway::coreOrderId)
+                    .collect(Collectors.toSet());
+
             for (OrderView order : entry.getValue()) {
                 long expected = ExchangeCoreExecutionVenueGateway.coreOrderId(order);
-                if (!resting.contains(expected)) {
+                if (!restingOnVenue.contains(expected)) {
                     missing.add(order.id() + " (" + order.status() + ")");
+                }
+            }
+
+            // Direction 2: Reverse Venue -> OMS check (Ghost Order Detection)
+            for (Long restingCoreId : restingOnVenue) {
+                if (!expectedCoreIds.contains(restingCoreId)) {
+                    ghostOrders.add("ghost-core-order-" + restingCoreId);
                 }
             }
         }
 
-        return new Report(liveOrders.size(), byClient.size(), missing.size(), missing);
+        return new Report(liveOrders.size(), byClient.size(), missing.size(), missing, ghostOrders.size(), ghostOrders);
     }
 
     private static boolean isTerminal(OrderStatus status) {
@@ -72,6 +88,13 @@ class ReconciliationEndpoint {
                 || status == OrderStatus.REJECTED;
     }
 
-    public record Report(int ordersChecked, int clientsChecked, int missingCount, List<String> missingOrders) {
+    public record Report(
+            int ordersChecked,
+            int clientsChecked,
+            int missingCount,
+            List<String> missingOrders,
+            int ghostCount,
+            List<String> ghostOrders
+    ) {
     }
 }
