@@ -20,26 +20,30 @@ class SecurityConfigTest {
 
         HttpSecurity http = mock(HttpSecurity.class, RETURNS_DEEP_STUBS);
         when(http.csrf(any())).thenAnswer(inv -> {
-            org.springframework.security.config.Customizer customizer = inv.getArgument(0);
-            org.springframework.security.config.annotation.web.configurers.CsrfConfigurer csrfConfig = mock(org.springframework.security.config.annotation.web.configurers.CsrfConfigurer.class);
+            @SuppressWarnings("unchecked")
+            org.springframework.security.config.Customizer<org.springframework.security.config.annotation.web.configurers.CsrfConfigurer<HttpSecurity>> customizer = inv.getArgument(0);
+            org.springframework.security.config.annotation.web.configurers.CsrfConfigurer<HttpSecurity> csrfConfig = mock(org.springframework.security.config.annotation.web.configurers.CsrfConfigurer.class);
             customizer.customize(csrfConfig);
             return http;
         });
         when(http.sessionManagement(any())).thenAnswer(inv -> {
-            org.springframework.security.config.Customizer customizer = inv.getArgument(0);
-            org.springframework.security.config.annotation.web.configurers.SessionManagementConfigurer sessionConfig = mock(org.springframework.security.config.annotation.web.configurers.SessionManagementConfigurer.class);
+            @SuppressWarnings("unchecked")
+            org.springframework.security.config.Customizer<org.springframework.security.config.annotation.web.configurers.SessionManagementConfigurer<HttpSecurity>> customizer = inv.getArgument(0);
+            org.springframework.security.config.annotation.web.configurers.SessionManagementConfigurer<HttpSecurity> sessionConfig = mock(org.springframework.security.config.annotation.web.configurers.SessionManagementConfigurer.class);
             customizer.customize(sessionConfig);
             return http;
         });
         when(http.authorizeHttpRequests(any())).thenAnswer(inv -> {
-            org.springframework.security.config.Customizer customizer = inv.getArgument(0);
+            @SuppressWarnings("unchecked")
+            org.springframework.security.config.Customizer<org.springframework.security.config.annotation.web.configurers.AuthorizeHttpRequestsConfigurer<HttpSecurity>.AuthorizationManagerRequestMatcherRegistry> customizer = inv.getArgument(0);
             org.springframework.security.config.annotation.web.configurers.AuthorizeHttpRequestsConfigurer.AuthorizationManagerRequestMatcherRegistry registry = mock(org.springframework.security.config.annotation.web.configurers.AuthorizeHttpRequestsConfigurer.AuthorizationManagerRequestMatcherRegistry.class, RETURNS_DEEP_STUBS);
             customizer.customize(registry);
             return http;
         });
         when(http.oauth2ResourceServer(any())).thenAnswer(inv -> {
-            org.springframework.security.config.Customizer customizer = inv.getArgument(0);
-            org.springframework.security.config.annotation.web.configurers.oauth2.server.resource.OAuth2ResourceServerConfigurer serverConfig = mock(org.springframework.security.config.annotation.web.configurers.oauth2.server.resource.OAuth2ResourceServerConfigurer.class, RETURNS_DEEP_STUBS);
+            @SuppressWarnings("unchecked")
+            org.springframework.security.config.Customizer<org.springframework.security.config.annotation.web.configurers.oauth2.server.resource.OAuth2ResourceServerConfigurer<HttpSecurity>> customizer = inv.getArgument(0);
+            org.springframework.security.config.annotation.web.configurers.oauth2.server.resource.OAuth2ResourceServerConfigurer<HttpSecurity> serverConfig = mock(org.springframework.security.config.annotation.web.configurers.oauth2.server.resource.OAuth2ResourceServerConfigurer.class, RETURNS_DEEP_STUBS);
             customizer.customize(serverConfig);
             return http;
         });

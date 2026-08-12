@@ -20,6 +20,7 @@ import exchange.core2.core.common.cmd.CommandResultCode;
 import exchange.core2.core.simulation.ProductionSimulationResult;
 import exchange.core2.core.simulation.SimulationOperation;
 import org.junit.jupiter.api.Test;
+import com.emporia.journal.ExchangeCoreCheckpointStore;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
 

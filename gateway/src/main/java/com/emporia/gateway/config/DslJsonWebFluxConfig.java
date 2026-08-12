@@ -54,14 +54,19 @@ public class DslJsonWebFluxConfig implements WebFluxConfigurer {
         @Override
         public Mono<Object> decodeToMono(org.reactivestreams.Publisher<DataBuffer> inputStream, ResolvableType elementType, MimeType mimeType, Map<String, Object> hints) {
             return DataBufferUtils.join(inputStream)
-                    .map(dataBuffer -> {
+                    .flatMap(dataBuffer -> {
                         try {
-                            byte[] bytes = new byte[dataBuffer.readableByteCount()];
+                            int count = dataBuffer.readableByteCount();
+                            if (count == 0) {
+                                return Mono.empty();
+                            }
+                            byte[] bytes = new byte[count];
                             dataBuffer.read(bytes);
                             Class<?> clazz = elementType.toClass();
-                            return dslJson.deserialize(clazz, bytes, bytes.length);
+                            Object deserialized = dslJson.deserialize(clazz, bytes, bytes.length);
+                            return deserialized != null ? Mono.just(deserialized) : Mono.empty();
                         } catch (IOException e) {
-                            throw new IllegalArgumentException("DSL-JSON deserialization failed", e);
+                            return Mono.error(new IllegalArgumentException("DSL-JSON deserialization failed for " + elementType, e));
                         } finally {
                             DataBufferUtils.release(dataBuffer);
                         }

@@ -17,6 +17,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
+import com.emporia.strategy.sor.BestVenueSelector;
+import com.emporia.strategy.vwap.VwapSchedule;
 import org.springframework.context.event.EventListener;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -362,6 +364,9 @@ class ExecutionEventConsumer {
         List<BestVenueSelector.RouteSlice> plan = venues.plan(
                 parent.side(), parent.limitPrice(), data.listings(), data.quotes(),
                 available, parent.listing().sizeIncrement());
+        if (plan.isEmpty()) {
+            throw new IllegalStateException("No executable venue listing exists for the instrument");
+        }
         int firstIndex = state.children().size();
         for (int index = 0; index < plan.size(); index++) {
             BestVenueSelector.RouteSlice slice = plan.get(index);
@@ -515,8 +520,29 @@ class ExecutionEventConsumer {
         if (listings.isEmpty()) {
             throw new IllegalStateException("No executable venue listing exists for the instrument");
         }
-        return new RouteData(listings,
-                tradingData.quotes(listings.stream().map(ListingSnapshot::id).toList()));
+        List<TradingDataClient.MarketQuote> rawQuotes = tradingData.quotes(listings.stream().map(ListingSnapshot::id).toList());
+        List<BestVenueSelector.MarketQuoteView> quoteViews = mapQuotes(rawQuotes);
+        return new RouteData(listings, quoteViews);
+    }
+
+    private List<BestVenueSelector.MarketQuoteView> mapQuotes(List<TradingDataClient.MarketQuote> quotes) {
+        if (quotes == null || quotes.isEmpty()) return List.of();
+        List<BestVenueSelector.MarketQuoteView> views = new java.util.ArrayList<>();
+        for (TradingDataClient.MarketQuote q : quotes) {
+            int maxLen = Math.max(q.bids().size(), q.offers().size());
+            if (maxLen == 0) continue;
+            for (int i = 0; i < maxLen; i++) {
+                TradingDataClient.DepthLevel bid = i < q.bids().size() ? q.bids().get(i) : null;
+                TradingDataClient.DepthLevel offer = i < q.offers().size() ? q.offers().get(i) : null;
+                String mic = bid != null ? bid.exchangeMic() : (offer != null ? offer.exchangeMic() : "");
+                BigDecimal bidPrice = bid != null ? bid.price() : null;
+                BigDecimal bidSize = bid != null ? bid.size() : null;
+                BigDecimal askPrice = offer != null ? offer.price() : null;
+                BigDecimal askSize = offer != null ? offer.size() : null;
+                views.add(new BestVenueSelector.MarketQuoteView(q.listingId(), mic, bidPrice, bidSize, askPrice, askSize));
+            }
+        }
+        return views;
     }
 
     /**
@@ -734,7 +760,7 @@ class ExecutionEventConsumer {
     }
 
     private record RouteData(List<ListingSnapshot> listings,
-                             List<TradingDataClient.MarketQuote> quotes) {
+                             List<BestVenueSelector.MarketQuoteView> quotes) {
     }
 
     private record VwapPlan(Instant start, Instant end, List<VwapSchedule.Slice> slices) {

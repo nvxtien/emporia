@@ -1,9 +1,9 @@
-package com.emporia.execution;
+package com.emporia.journal;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.FileStore;
+import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -21,7 +21,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-final class ExchangeCoreCheckpointStore {
+public final class ExchangeCoreCheckpointStore {
     private static final String FILE_NAME = "emporia-exchange-core.latest";
     private static final Pattern SNAPSHOT_FILE = Pattern.compile(".+_snapshot_(\\d+)_[A-Z]+\\d+\\.ecs");
     private static final Pattern SNAPSHOT_PARTIAL_FILE =
@@ -33,12 +33,12 @@ final class ExchangeCoreCheckpointStore {
     private final Path directory;
     private final Path manifest;
 
-    ExchangeCoreCheckpointStore(Path directory) {
+    public ExchangeCoreCheckpointStore(Path directory) {
         this.directory = directory.toAbsolutePath().normalize();
         this.manifest = this.directory.resolve(FILE_NAME);
     }
 
-    Optional<LatestCheckpoint> load() throws IOException {
+    public Optional<LatestCheckpoint> load() throws IOException {
         if (!Files.isRegularFile(manifest)) {
             return Optional.empty();
         }
@@ -68,7 +68,7 @@ final class ExchangeCoreCheckpointStore {
         return Optional.of(new LatestCheckpoint(checkpointId, symbols));
     }
 
-    void save(long checkpointId, Set<Integer> symbols) throws IOException {
+    public void save(long checkpointId, Set<Integer> symbols) throws IOException {
         if (checkpointId <= 0) {
             throw new IllegalArgumentException("checkpointId must be positive");
         }
@@ -91,7 +91,7 @@ final class ExchangeCoreCheckpointStore {
         }
     }
 
-    void pruneRetainingLatest(int retainedCheckpoints) throws IOException {
+    public void pruneRetainingLatest(int retainedCheckpoints) throws IOException {
         if (retainedCheckpoints < 1) {
             throw new IllegalArgumentException("retainedCheckpoints must be at least 1");
         }
@@ -121,7 +121,7 @@ final class ExchangeCoreCheckpointStore {
         }
     }
 
-    StorageStats stats() throws IOException {
+    public StorageStats stats() throws IOException {
         Optional<LatestCheckpoint> latest = load();
         if (!Files.isDirectory(directory)) {
             return new StorageStats(directory, latest.map(LatestCheckpoint::checkpointId), 0, 0, 0, 0, 0);
@@ -145,13 +145,13 @@ final class ExchangeCoreCheckpointStore {
                                 (int) partialCheckpointFiles, bytes, usableBytes);
     }
 
-    long usableStorageBytes() throws IOException {
+    public long usableStorageBytes() throws IOException {
         Files.createDirectories(directory);
         FileStore store = Files.getFileStore(directory);
         return store.getUsableSpace();
     }
 
-    long maxCheckpointId() throws IOException {
+    public long maxCheckpointId() throws IOException {
         long maxCheckpointId = load().map(LatestCheckpoint::checkpointId).orElse(0L);
         if (!Files.isDirectory(directory)) {
             return maxCheckpointId;
@@ -162,7 +162,7 @@ final class ExchangeCoreCheckpointStore {
         return maxCheckpointId;
     }
 
-    void requireUsableSpace(long minFreeBytes) throws IOException {
+    public void requireUsableSpace(long minFreeBytes) throws IOException {
         if (minFreeBytes <= 0) {
             return;
         }
@@ -226,8 +226,8 @@ final class ExchangeCoreCheckpointStore {
         return generations;
     }
 
-    record LatestCheckpoint(long checkpointId, Set<Integer> symbols) {
-        LatestCheckpoint {
+    public record LatestCheckpoint(long checkpointId, Set<Integer> symbols) {
+        public LatestCheckpoint {
             if (checkpointId <= 0) {
                 throw new IllegalArgumentException("checkpointId must be positive");
             }
@@ -277,7 +277,7 @@ final class ExchangeCoreCheckpointStore {
         }
     }
 
-    record StorageStats(
+    public record StorageStats(
             Path directory,
             Optional<Long> latestCheckpointId,
             int checkpointIdCount,
@@ -285,7 +285,7 @@ final class ExchangeCoreCheckpointStore {
             int partialCheckpointFileCount,
             long storageBytes,
             long usableStorageBytes) {
-        long latestCheckpointIdOrZero() {
+        public long latestCheckpointIdOrZero() {
             return latestCheckpointId.orElse(0L);
         }
     }

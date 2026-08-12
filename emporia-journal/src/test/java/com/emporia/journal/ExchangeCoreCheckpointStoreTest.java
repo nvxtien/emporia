@@ -1,4 +1,4 @@
-package com.emporia.execution;
+package com.emporia.journal;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;

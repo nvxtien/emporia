@@ -42,6 +42,10 @@ public class PositionReconciliationAuditService {
      * Executes a full position-level holdings reconciliation check against the PostgreSQL ledger.
      */
     public PositionAuditReport performPositionAudit(Map<UserInstrumentKey, BigDecimal> inMemoryPositions) {
+        if (inMemoryPositions == null || inMemoryPositions.isEmpty()) {
+            return new PositionAuditReport(0L, 0L, 0L, List.of(), true);
+        }
+
         log.info("[Position Reconciliation] Starting position holdings audit for {} positions...", inMemoryPositions.size());
 
         long totalAudited = inMemoryPositions.size();
@@ -51,11 +55,11 @@ public class PositionReconciliationAuditService {
 
         for (Map.Entry<UserInstrumentKey, BigDecimal> entry : inMemoryPositions.entrySet()) {
             UserInstrumentKey key = entry.getKey();
-            BigDecimal engineQty = entry.getValue();
+            BigDecimal engineQty = entry.getValue() != null ? entry.getValue() : BigDecimal.ZERO;
 
             BigDecimal dbQty = fetchDbLedgerPositionQuantity(key.userId(), key.symbol());
 
-            if (dbQty != null && engineQty.compareTo(dbQty) == 0) {
+            if (engineQty.compareTo(dbQty) == 0) {
                 matched++;
             } else {
                 discrepancies++;
@@ -71,7 +75,7 @@ public class PositionReconciliationAuditService {
         log.info("[Position Reconciliation] Position audit complete. Matched: {}/{}, Discrepancies: {}",
                 matched, totalAudited, discrepancies);
 
-        return new PositionAuditReport(totalAudited, matched, discrepancies, details, consistent);
+        return new PositionAuditReport(totalAudited, matched, discrepancies, List.copyOf(details), consistent);
     }
 
     private BigDecimal fetchDbLedgerPositionQuantity(long userId, String symbol) {

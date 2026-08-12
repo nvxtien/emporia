@@ -64,6 +64,9 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import com.emporia.journal.ExchangeCoreCheckpointStore;
+import com.emporia.journal.ExchangeCoreCheckpointStore.LatestCheckpoint;
+import com.emporia.journal.ExchangeCoreCheckpointStore.StorageStats;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 

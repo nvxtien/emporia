@@ -40,6 +40,10 @@ public class BalanceReconciliationAuditService {
      * Executes a full balance-level reconciliation check against the PostgreSQL ledger.
      */
     public BalanceAuditReport performBalanceAudit(Map<Long, BigDecimal> inMemoryAccountBalances) {
+        if (inMemoryAccountBalances == null || inMemoryAccountBalances.isEmpty()) {
+            return new BalanceAuditReport(0L, 0L, 0L, List.of(), true);
+        }
+
         log.info("[Balance Reconciliation] Starting balance audit for {} accounts...", inMemoryAccountBalances.size());
 
         long totalAudited = inMemoryAccountBalances.size();
@@ -49,11 +53,11 @@ public class BalanceReconciliationAuditService {
 
         for (Map.Entry<Long, BigDecimal> entry : inMemoryAccountBalances.entrySet()) {
             Long userId = entry.getKey();
-            BigDecimal engineBalance = entry.getValue();
+            BigDecimal engineBalance = entry.getValue() != null ? entry.getValue() : BigDecimal.ZERO;
 
             BigDecimal dbBalance = fetchDbLedgerBalance(userId);
 
-            if (dbBalance != null && engineBalance.compareTo(dbBalance) == 0) {
+            if (engineBalance.compareTo(dbBalance) == 0) {
                 matched++;
             } else {
                 discrepancies++;
@@ -69,7 +73,7 @@ public class BalanceReconciliationAuditService {
         log.info("[Balance Reconciliation] Audit complete. Matched: {}/{}, Discrepancies: {}",
                 matched, totalAudited, discrepancies);
 
-        return new BalanceAuditReport(totalAudited, matched, discrepancies, details, consistent);
+        return new BalanceAuditReport(totalAudited, matched, discrepancies, List.copyOf(details), consistent);
     }
 
     private BigDecimal fetchDbLedgerBalance(Long userId) {

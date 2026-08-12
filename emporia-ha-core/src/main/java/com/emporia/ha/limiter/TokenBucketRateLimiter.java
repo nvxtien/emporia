@@ -47,6 +47,10 @@ public class TokenBucketRateLimiter {
      * @return {@code true} if allowed, {@code false} if throttled
      */
     public boolean tryAcquire(String key, long requestedTokens) {
+        if (key == null || key.isBlank() || requestedTokens <= 0) {
+            return false;
+        }
+
         AtomicReference<AccountBucketState> ref = buckets.computeIfAbsent(
                 key, k -> new AtomicReference<>(new AccountBucketState(defaultMaxCapacity, System.nanoTime())));
 
@@ -64,12 +68,23 @@ public class TokenBucketRateLimiter {
                 return false;
             }
 
-            AccountBucketState next = new AccountBucketState(refreshedTokens - requestedTokens, now);
+            long newLastRefill = addedTokens > 0 ? now : current.lastRefillNanos;
+            AccountBucketState next = new AccountBucketState(refreshedTokens - requestedTokens, newLastRefill);
             if (ref.compareAndSet(current, next)) {
                 return true;
             }
             // CAS retry loop (lock-free)
         }
+    }
+
+    public void remove(String key) {
+        if (key != null) {
+            buckets.remove(key);
+        }
+    }
+
+    public int getActiveBucketCount() {
+        return buckets.size();
     }
 
     public void clear() {

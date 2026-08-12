@@ -12,14 +12,18 @@ import java.util.concurrent.ArrayBlockingQueue;
  * <p>Allocates native off-heap Direct ByteBuffers during JVM bootstrap, eliminating GC pauses
  * and heap allocation overhead on the high-frequency trading hot path.
  */
-public class ZeroGcBufferPool {
+public class ZeroGcBufferPool implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(ZeroGcBufferPool.class);
 
     private final ArrayBlockingQueue<ByteBuffer> pool;
     private final int bufferCapacity;
     private final int poolSize;
+    private volatile boolean closed = false;
 
     public ZeroGcBufferPool(int poolSize, int bufferCapacity) {
+        if (poolSize <= 0 || bufferCapacity <= 0) {
+            throw new IllegalArgumentException("poolSize and bufferCapacity must be positive");
+        }
         this.poolSize = poolSize;
         this.bufferCapacity = bufferCapacity;
         this.pool = new ArrayBlockingQueue<>(poolSize);
@@ -37,6 +41,9 @@ public class ZeroGcBufferPool {
      * Borrow a pre-allocated direct off-heap ByteBuffer from the pool.
      */
     public ByteBuffer acquireBuffer() {
+        if (closed) {
+            throw new IllegalStateException("ZeroGcBufferPool is closed");
+        }
         ByteBuffer buf = pool.poll();
         if (buf == null) {
             log.warn("[Zero-GC Off-Heap Pool] Buffer pool exhausted! Falling back to temporary direct allocation.");
@@ -50,7 +57,7 @@ public class ZeroGcBufferPool {
      * Return a used ByteBuffer back to the pool for reuse.
      */
     public void releaseBuffer(ByteBuffer buffer) {
-        if (buffer != null && buffer.isDirect()) {
+        if (buffer != null && buffer.isDirect() && !closed) {
             buffer.clear();
             pool.offer(buffer);
         }
@@ -62,5 +69,22 @@ public class ZeroGcBufferPool {
 
     public int getPoolSize() {
         return poolSize;
+    }
+
+    public int getBufferCapacity() {
+        return bufferCapacity;
+    }
+
+    public boolean isClosed() {
+        return closed;
+    }
+
+    @Override
+    public void close() {
+        if (!closed) {
+            closed = true;
+            pool.clear();
+            log.info("[Zero-GC Off-Heap Pool] Closed. All off-heap buffers released.");
+        }
     }
 }

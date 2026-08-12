@@ -1,6 +1,5 @@
-{
-  "uid": "emporia-latency-percentiles",
-  "title": "Emporia Latency Percentiles",
+wrote deploy/otel/dashboards/latency-percentiles.json: 28 panels, 7 rows
+centiles",
   "tags": [
     "emporia",
     "latency",
