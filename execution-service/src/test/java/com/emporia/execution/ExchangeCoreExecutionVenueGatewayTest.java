@@ -473,7 +473,7 @@ class ExchangeCoreExecutionVenueGatewayTest {
     void rejectsFullEquityRiskAccountingWithoutPortfolioUrl() {
         assertThatThrownBy(() -> new ExchangeCoreExecutionVenueGateway(
                 commands, null, Optional.empty(), null, "ex-1", java.nio.file.Path.of("/tmp"), 1,
-                "full-equity-risk", "", Duration.ofSeconds(3), true, 2, 0L,
+                "full-equity-risk", "", Duration.ofSeconds(3), 2, 0L,
                 new BigDecimal("10"), new SimpleMeterRegistry()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("EXCHANGE_CORE_PORTFOLIO_URL is required");
@@ -484,7 +484,7 @@ class ExchangeCoreExecutionVenueGatewayTest {
     void initializesWithRealProductionSimulationVenue(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tempDir) throws Exception {
         ExchangeCoreExecutionVenueGateway realGateway = new ExchangeCoreExecutionVenueGateway(
                 commands, null, Optional.empty(), null, "ex-1", tempDir, 1,
-                "matching-only", null, Duration.ofSeconds(3), true, 2, 0L,
+                "matching-only", null, Duration.ofSeconds(3), 2, 0L,
                 new BigDecimal("10"), new SimpleMeterRegistry());
 
         assertThat(realGateway).isNotNull();

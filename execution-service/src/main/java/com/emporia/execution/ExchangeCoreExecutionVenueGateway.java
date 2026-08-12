@@ -133,11 +133,6 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             @Value("${emporia.execution.exchange-core.accounting-mode:matching-only}") String accountingMode,
             @Value("${emporia.execution.exchange-core.portfolio-url:}") String portfolioUrl,
             @Value("${emporia.execution.exchange-core.portfolio-request-timeout:3s}") Duration portfolioTimeout,
-            // Defaults off for conservative local/prod parity. When enabled,
-            // the journal restores the engine and startup rebuilds the DMA
-            // lifecycle from order-management; scripts/perf/crash-recovery-check.sh
-            // is the acceptance gate before relying on it in production.
-            @Value("${emporia.execution.exchange-core.journaling:false}") boolean journaling,
             @Value("${emporia.execution.exchange-core.retained-checkpoints:2}") int retainedCheckpoints,
             @Value("${emporia.execution.exchange-core.min-free-storage-bytes:0}") long minFreeStorageBytes,
             @Value("${emporia.execution.sor.slippage-bps:10}") BigDecimal slippageBps,
@@ -145,7 +140,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             Environment environment)
             throws IOException {
         this(commands, tokenProvider, dataSource, recoverySource, exchangeId, storage, partitions,
-                accountingMode, portfolioUrl, portfolioTimeout, journaling, retainedCheckpoints,
+                accountingMode, portfolioUrl, portfolioTimeout, retainedCheckpoints,
                 minFreeStorageBytes, slippageBps, meters, activeProfiles(environment));
     }
 
@@ -160,14 +155,13 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             String accountingMode,
             String portfolioUrl,
             Duration portfolioTimeout,
-            boolean journaling,
             int retainedCheckpoints,
             long minFreeStorageBytes,
             BigDecimal slippageBps,
             MeterRegistry meters)
             throws IOException {
         this(commands, tokenProvider, dataSource, recoverySource, exchangeId, storage, partitions,
-                accountingMode, portfolioUrl, portfolioTimeout, journaling, retainedCheckpoints,
+                accountingMode, portfolioUrl, portfolioTimeout, retainedCheckpoints,
                 minFreeStorageBytes, slippageBps, meters, Set.of());
     }
 
@@ -182,7 +176,6 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             String accountingMode,
             String portfolioUrl,
             Duration portfolioTimeout,
-            boolean journaling,
             int retainedCheckpoints,
             long minFreeStorageBytes,
             BigDecimal slippageBps,
@@ -195,7 +188,6 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
                         .partitions(partitions)
                         .accounting(buildAccounting(accountingMode, exchangeId, portfolioUrl,
                                 portfolioTimeout, tokenProvider, dataSource.orElse(null)))
-                        .journaling(journaling)
                         .retainedCheckpoints(retainedCheckpoints)
                         .minFreeStorageBytes(minFreeStorageBytes)
                         .activeProfiles(activeProfiles)
@@ -205,9 +197,9 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
                 .slippageBps(slippageBps)
                 .meterRegistry(meters)
                 .buildSpec());
-        log.info("Exchange-core venue started with accounting-mode={} journaling={} retained-checkpoints={} "
+        log.info("Exchange-core venue started with accounting-mode={} journaling=true retained-checkpoints={} "
                         + "min-free-storage-bytes={} slippage-bps={}",
-                accountingMode, journaling, retainedCheckpoints, minFreeStorageBytes, slippageBps);
+                accountingMode, retainedCheckpoints, minFreeStorageBytes, slippageBps);
     }
 
     private static ProductionSimulationAccounting buildAccounting(
@@ -1089,7 +1081,6 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             Path storage,
             int partitions,
             ProductionSimulationAccounting accounting,
-            boolean journaling,
             int retainedCheckpoints,
             long minFreeStorageBytes,
             Set<String> activeProfiles) {
@@ -1110,7 +1101,6 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         private Path storage;
         private int partitions;
         private ProductionSimulationAccounting accounting;
-        private boolean journaling;
         private int retainedCheckpoints = 2;
         private long minFreeStorageBytes;
         private Set<String> activeProfiles = Set.of();
@@ -1135,11 +1125,6 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             return this;
         }
 
-        private ProductionVenueSpecBuilder journaling(boolean journaling) {
-            this.journaling = journaling;
-            return this;
-        }
-
         private ProductionVenueSpecBuilder retainedCheckpoints(int retainedCheckpoints) {
             this.retainedCheckpoints = retainedCheckpoints;
             return this;
@@ -1157,7 +1142,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
 
         private ProductionVenueSpec build() {
             return new ProductionVenueSpec(exchangeId, storage, partitions, accounting,
-                    journaling, retainedCheckpoints, minFreeStorageBytes, activeProfiles);
+                    retainedCheckpoints, minFreeStorageBytes, activeProfiles);
         }
     }
 
@@ -1222,7 +1207,6 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         private final Set<Integer> restoredSymbols;
         private final Set<Integer> knownSymbols = ConcurrentHashMap.newKeySet();
         private final AtomicLong checkpointSequence;
-        private final boolean journaling;
         private final int retainedCheckpoints;
         private final long minFreeStorageBytes;
 
@@ -1233,12 +1217,11 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             if (spec.minFreeStorageBytes() < 0) {
                 throw new IllegalArgumentException("minFreeStorageBytes must not be negative");
             }
-            this.journaling = spec.journaling();
             this.retainedCheckpoints = spec.retainedCheckpoints();
             this.minFreeStorageBytes = spec.minFreeStorageBytes();
             ProductionSimulationConfiguration configuration =
                     ProductionSimulationConfiguration.create(
-                            spec.exchangeId(), spec.storage(), spec.partitions(), spec.journaling());
+                            spec.exchangeId(), spec.storage(), spec.partitions(), true);
             checkpointStore = new ExchangeCoreCheckpointStore(configuration.storageDirectory());
             ExchangeCoreCheckpointStore.LatestCheckpoint latest =
                     checkpointStore.load().orElse(null);
@@ -1361,15 +1344,8 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
 
         private CompletableFuture<ProductionSimulationResult> checkpointUnlessJournalled(
                 CompletableFuture<ProductionSimulationResult> operation) {
-            if (journaling) {
-                return operation;
-            }
-            return operation.thenApply(result -> {
-                checkpoint();
-                return result;
-            }).exceptionally(error -> {
-                throw new CompletionException(ExchangeCoreExecutionVenueGateway.unwrap(error));
-            });
+            // WAL Journaling is unconditionally enabled for production durability & HA Standby warm recovery.
+            return operation;
         }
     }
 
