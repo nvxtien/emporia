@@ -273,7 +273,9 @@ class ExecutionEventConsumer {
                     return "noop";
                 }
                 String outcome = advanceSmartState(state);
-                sweepFailures.remove(parentId);
+                if ("success".equals(outcome)) {
+                    sweepFailures.remove(parentId);
+                }
                 return outcome;
             });
         } catch (RuntimeException transientFailure) {
@@ -529,12 +531,33 @@ class ExecutionEventConsumer {
         if (quotes == null || quotes.isEmpty()) return List.of();
         List<BestVenueSelector.MarketQuoteView> views = new java.util.ArrayList<>();
         for (TradingDataClient.MarketQuote q : quotes) {
-            int maxLen = Math.max(q.bids().size(), q.offers().size());
-            if (maxLen == 0) continue;
-            for (int i = 0; i < maxLen; i++) {
-                TradingDataClient.DepthLevel bid = i < q.bids().size() ? q.bids().get(i) : null;
-                TradingDataClient.DepthLevel offer = i < q.offers().size() ? q.offers().get(i) : null;
-                String mic = bid != null ? bid.exchangeMic() : (offer != null ? offer.exchangeMic() : "");
+            Map<String, TradingDataClient.DepthLevel> bestBids = new java.util.LinkedHashMap<>();
+            for (TradingDataClient.DepthLevel bid : q.bids()) {
+                if (bid == null || bid.price() == null) continue;
+                String mic = bid.exchangeMic() != null ? bid.exchangeMic() : "";
+                TradingDataClient.DepthLevel existing = bestBids.get(mic);
+                if (existing == null || bid.price().compareTo(existing.price()) > 0) {
+                    bestBids.put(mic, bid);
+                }
+            }
+
+            Map<String, TradingDataClient.DepthLevel> bestOffers = new java.util.LinkedHashMap<>();
+            for (TradingDataClient.DepthLevel offer : q.offers()) {
+                if (offer == null || offer.price() == null) continue;
+                String mic = offer.exchangeMic() != null ? offer.exchangeMic() : "";
+                TradingDataClient.DepthLevel existing = bestOffers.get(mic);
+                if (existing == null || offer.price().compareTo(existing.price()) < 0) {
+                    bestOffers.put(mic, offer);
+                }
+            }
+
+            java.util.Set<String> mics = new java.util.LinkedHashSet<>();
+            mics.addAll(bestBids.keySet());
+            mics.addAll(bestOffers.keySet());
+
+            for (String mic : mics) {
+                TradingDataClient.DepthLevel bid = bestBids.get(mic);
+                TradingDataClient.DepthLevel offer = bestOffers.get(mic);
                 BigDecimal bidPrice = bid != null ? bid.price() : null;
                 BigDecimal bidSize = bid != null ? bid.size() : null;
                 BigDecimal askPrice = offer != null ? offer.price() : null;

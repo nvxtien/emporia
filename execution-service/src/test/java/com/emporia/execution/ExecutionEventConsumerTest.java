@@ -804,6 +804,37 @@ class ExecutionEventConsumerTest {
         );
     }
 
+    @Test
+    void mapQuotesGroupsByVenueMicWithoutCrossVenuePairing() throws Exception {
+        Method mapQuotesMethod = ExecutionEventConsumer.class.getDeclaredMethod("mapQuotes", List.class);
+        mapQuotesMethod.setAccessible(true);
+
+        // Failure scenario: bids = [XNAS@150.00], offers = [XNYS@150.25, XNAS@150.50]
+        DepthLevel bidXnas = new DepthLevel(new BigDecimal("150.00"), new BigDecimal("100"), "XNAS", "b1", 1L);
+        DepthLevel offerXnys = new DepthLevel(new BigDecimal("150.25"), new BigDecimal("100"), "XNYS", "o1", 1L);
+        DepthLevel offerXnas = new DepthLevel(new BigDecimal("150.50"), new BigDecimal("100"), "XNAS", "o2", 1L);
+
+        MarketQuote quote = new MarketQuote(1L, new BigDecimal("150.00"), List.of(bidXnas), List.of(offerXnys, offerXnas));
+
+        @SuppressWarnings("unchecked")
+        List<com.emporia.strategy.sor.BestVenueSelector.MarketQuoteView> views =
+                (List<com.emporia.strategy.sor.BestVenueSelector.MarketQuoteView>) mapQuotesMethod.invoke(consumer, List.of(quote));
+
+        assertThat(views).hasSize(2);
+
+        com.emporia.strategy.sor.BestVenueSelector.MarketQuoteView xnasView = views.stream()
+                .filter(v -> "XNAS".equals(v.exchangeMic()))
+                .findFirst().orElseThrow();
+        assertThat(xnasView.bidPrice()).isEqualByComparingTo("150.00");
+        assertThat(xnasView.askPrice()).isEqualByComparingTo("150.50");
+
+        com.emporia.strategy.sor.BestVenueSelector.MarketQuoteView xnysView = views.stream()
+                .filter(v -> "XNYS".equals(v.exchangeMic()))
+                .findFirst().orElseThrow();
+        assertThat(xnysView.bidPrice()).isNull();
+        assertThat(xnysView.askPrice()).isEqualByComparingTo("150.25");
+    }
+
     private static ListingSnapshot listing(long id, String mic, String exchange) {
         return new ListingSnapshot(
                 id, 1, "AAPL", "Apple Inc.", "AAPL", mic, exchange,
