@@ -75,6 +75,21 @@ mint_token() {
         || fail "could not mint an access token from $ORIGIN"
 }
 
+mint_multi_tokens() {
+    local tokens=()
+    local t
+    for u in admin trader_1 trader_2 trader_3 trader_4 trader_5 trader_6 trader_7 trader_8 trader_9 trader_10; do
+        t="$(EMPORIA_ORIGIN="$ORIGIN" EMPORIA_USERNAME="$u" EMPORIA_PASSWORD="admin123" node "$repo_root/scripts/perf/get-access-token.mjs" 2>/dev/null || true)"
+        if [ -n "$t" ]; then
+            tokens+=("$t")
+        fi
+    done
+    if [ ${#tokens[@]} -eq 0 ]; then
+        fail "could not mint any multi-user access tokens"
+    fi
+    (IFS=,; echo "${tokens[*]}")
+}
+
 promq() {
     local query="$1"
     curl -fsS --get "${PROM_URL}/api/v1/query" --data-urlencode "query=$query" 2>/dev/null \
@@ -283,8 +298,10 @@ PY
 }
 
 run_k6_step() {
-    local rate="$1" token="$2" summary="$3" log="$4"
+    local rate="$1" token="$2" summary="$3" log="$4" tokens="$5"
     EMPORIA_TOKEN="$token" \
+    EMPORIA_TOKENS="${tokens:-$token}" \
+    MIX_SIDES="${MIX_SIDES:-false}" \
     GATEWAY_URL="$GATEWAY_URL" \
     SUMMARY_OUT="$summary" \
         k6 run --quiet \
@@ -293,6 +310,7 @@ run_k6_step() {
             -e "LISTING_IDS=${LISTING_IDS}" \
             -e "QUANTITY=${QUANTITY}" \
             -e "LIMIT_PRICE=${LIMIT_PRICE}" \
+            -e "MIX_SIDES=${MIX_SIDES:-false}" \
             "$repo_root/scripts/perf/order-load.js" >"$log" 2>&1
 }
 
@@ -353,10 +371,14 @@ overall_status=0
 for rate in $RATES; do
     echo "  -- offered ${rate}/s"
     token="$(mint_token)"
+    tokens="$token"
+    if [ "${MULTI_USER:-false}" = "true" ]; then
+        tokens="$(mint_multi_tokens)"
+    fi
     summary="${OUT_DIR}/rate-${rate}.k6.json"
     log="${OUT_DIR}/rate-${rate}.k6.log"
     status=0
-    run_k6_step "$rate" "$token" "$summary" "$log" || status=$?
+    run_k6_step "$rate" "$token" "$summary" "$log" "$tokens" || status=$?
     tail -20 "$log" | sed 's/^/     /'
 
     capture_execution_health "rate-${rate}"

@@ -11,6 +11,8 @@
     <dependencies>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-opentelemetry</artifactId></dependency>
         <dependency><groupId>com.emporia</groupId><artifactId>trading-contracts</artifactId><version>${project.version}</version></dependency>
+        <dependency><groupId>com.emporia</groupId><artifactId>emporia-ha-core</artifactId><version>${project.version}</version></dependency>
+        <dependency><groupId>com.emporia</groupId><artifactId>emporia-reconciliation</artifactId><version>${project.version}</version></dependency>
         <dependency>
             <groupId>exchange.core2</groupId>
             <artifactId>exchange-core</artifactId>
@@ -49,7 +51,7 @@
         <dependency><groupId>net.jqwik</groupId><artifactId>jqwik</artifactId><scope>test</scope></dependency>
     </dependencies>
     <properties>
-        <exchange-core.jvm.args>--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED --add-exports=java.base/jdk.internal.ref=ALL-UNNAMED --add-exports=java.base/jdk.internal.util=ALL-UNNAMED --add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-exports=jdk.unsupported/sun.misc=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED</exchange-core.jvm.args>
+        <exchange-core.jvm.args>-XX:+UseZGC -XX:+AlwaysPreTouch -XX:MaxDirectMemorySize=1024m --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED --add-exports=java.base/jdk.internal.ref=ALL-UNNAMED --add-exports=java.base/jdk.internal.util=ALL-UNNAMED --add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-exports=jdk.unsupported/sun.misc=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED</exchange-core.jvm.args>
         <argLine>${exchange-core.jvm.args}</argLine>
     </properties>
     <build>

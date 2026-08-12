@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Exchange Core In-Memory Matching & Disruptor Pipeline Micro-Benchmark
-# Measures nanosecond-level submit/fill execution throughput & JIT warmup
+# Exchange Core / Disruptor Pipeline Correctness Smoke Test
+#
+# Runs DisruptorOrderPipelineTest and TradingOrderPropertyTest. These are
+# correctness tests, not a timing harness - this script does not measure
+# latency or throughput, and must not print a latency/TPS number it never
+# measured. For an actual latency measurement, profile a real run with
+# scripts/perf/jfr-run.sh and read gc-pauses.txt / hot-methods.txt, or write
+# a real JMH benchmark (there isn't one in this repo yet).
 # ==============================================================================
 
 set -euo pipefail
@@ -14,21 +20,20 @@ for arg in "$@"; do
     fi
 done
 
-echo "==> Exchange Core Single-Writer RingBuffer Micro-Benchmark"
+echo "==> Exchange Core / Disruptor Pipeline Correctness Smoke Test"
 echo "    Engine: LMAX Disruptor 64K RingBuffer"
 echo "    Arithmetic: Fixed-Point Primitive long (10^6 scale)"
-echo "    Clock: Monotonic System.nanoTime() (Sub-10ns zero syscall)"
-echo "    JIT Warmup: 2,048 startup iterations"
+echo "    This runs correctness tests only - no latency or throughput is measured."
 echo
 
 if [[ "$DRY_RUN" == "true" ]]; then
-    echo "[Exchange Core Benchmark] Dry-run mode. Engine configuration verified."
+    echo "[Exchange Core Smoke Test] Dry-run mode. Test selection verified."
     exit 0
 fi
 
-echo "Running in-process exchange core benchmark via Maven..."
+echo "Running DisruptorOrderPipelineTest and TradingOrderPropertyTest via Maven..."
 mvn -pl order-management-service test -Dtest=DisruptorOrderPipelineTest,TradingOrderPropertyTest -q
 
 echo
-echo "==> Exchange Core Benchmark Complete: 100% SUCCESS"
-echo "    Sub-microsecond matching verified (< 1.2 µs p99 latency)."
+echo "==> Correctness tests passed."
+echo "    No latency/throughput number was measured by this script."

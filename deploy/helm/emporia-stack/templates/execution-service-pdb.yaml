@@ -1,0 +1,14 @@
+{{- if .Values.executionService.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Values.executionService.name }}-pdb
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Values.executionService.name }}
+spec:
+  minAvailable: {{ .Values.executionService.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.executionService.name }}
+{{- end }}

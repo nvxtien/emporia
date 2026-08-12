@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.0] - 2026-08-07
 
 ### 🚀 Added
-- **Ultra-Low Latency Aeron SBE & Dedicated Spin Loop Intake Engine (< 1.2μs p99, 10M TPS)**:
+- **Ultra-Low Latency Aeron SBE & Dedicated Spin Loop Intake Engine**:
   - Integrated zero-copy Aeron IPC/UDP binary SBE intake (`AeronOrderCommandSubscriber`) streaming order commands directly into LMAX Disruptor 64K RingBuffer.
   - Dedicated single-threaded `oms-hotpath-1` consumer thread bound to `Thread.MAX_PRIORITY` running Agrona `BusySpinIdleStrategy` with CPU intrinsic `Thread.onSpinWait()`.
   - Deterministic load shedding via `ringBuffer.tryNext()` rejecting excess traffic instantly (HTTP 429) under extreme bursts.

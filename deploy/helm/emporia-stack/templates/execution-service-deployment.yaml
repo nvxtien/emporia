@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.executionService.name }}
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Values.executionService.name }}
+spec:
+  replicas: {{ .Values.executionService.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.executionService.name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Values.executionService.name }}
+    spec:
+      serviceAccountName: {{ .Values.executionService.name }}-sa
+      containers:
+        - name: {{ .Values.executionService.name }}
+          image: "{{ .Values.executionService.image.repository }}:{{ .Values.executionService.image.tag }}"
+          imagePullPolicy: {{ .Values.executionService.image.pullPolicy }}
+          env:
+            - name: EMPORIA_EXECUTION_HA_ENABLED
+              value: "{{ .Values.executionService.ha.enabled }}"
+            - name: EMPORIA_EXECUTION_HA_PROVIDER
+              value: "{{ .Values.executionService.ha.provider }}"
+            - name: EMPORIA_EXECUTION_HA_LOCK_KEY
+              value: "{{ .Values.executionService.ha.lockKey }}"
+            - name: JAVA_TOOL_OPTIONS
+              value: "{{ .Values.executionService.jvm.opts }}"
+          ports:
+            - containerPort: 8082
+              name: http
+          resources:
+            {{- toYaml .Values.executionService.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.executionService.probes.liveness.path }}
+              port: 8082
+            initialDelaySeconds: {{ .Values.executionService.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.executionService.probes.liveness.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.executionService.probes.readiness.path }}
+              port: 8082
+            initialDelaySeconds: {{ .Values.executionService.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.executionService.probes.readiness.periodSeconds }}
+          volumeMounts:
+            - name: journal-data
+              mountPath: /app/.local-run/exchange-core-simulation
+      volumes:
+        - name: journal-data
+          persistentVolumeClaim:
+            claimName: {{ .Values.executionService.name }}-pvc

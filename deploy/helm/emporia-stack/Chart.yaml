@@ -1,0 +1,6 @@
+apiVersion: v2
+name: emporia-stack
+description: Production High Availability Helm Chart for Emporia Trading Platform & Exchange-Core Matching Engine
+type: application
+version: 0.1.0
+appVersion: 0.1.0-SNAPSHOT

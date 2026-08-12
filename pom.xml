@@ -46,6 +46,8 @@
     <modules>
         <module>authentication</module>
         <module>trading-contracts</module>
+        <module>emporia-ha-core</module>
+        <module>emporia-reconciliation</module>
         <module>fix-simulator-contracts</module>
         <module>fix-market-simulator</module>
         <module>static-data-service</module>

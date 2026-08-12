@@ -112,14 +112,9 @@ emporia:
       # order-management at startup. Keep this off by default for conservative
       # local/prod parity, and verify with scripts/perf/crash-recovery-check.sh
       # before turning it on anywhere that matters.
-      journaling: ${EXCHANGE_CORE_JOURNALING:false}
+      journaling: ${EXCHANGE_CORE_JOURNALING:true}
       snapshot-interval: ${EXCHANGE_CORE_SNAPSHOT_INTERVAL:60s}
-      # Total checkpoint ids to retain, including the latest manifest
-      # checkpoint. 2 means latest + one previous recovery point.
       retained-checkpoints: ${EXCHANGE_CORE_RETAINED_CHECKPOINTS:2}
-      # Optional pre-checkpoint storage safety guard. 0 disables the guard;
-      # production internal matching should set this to a meaningful floor for
-      # the mounted exchange-core volume.
       min-free-storage-bytes: ${EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES:0}
 
 management:

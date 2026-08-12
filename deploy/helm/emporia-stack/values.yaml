@@ -1,0 +1,49 @@
+# Production Helm Values for Emporia Trading Platform & Exchange-Core
+global:
+  environment: production
+  namespace: emporia-trading
+
+executionService:
+  name: execution-service
+  replicaCount: 2
+  image:
+    repository: emporia/execution-service
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  ha:
+    enabled: true
+    provider: k8s
+    lockKey: emporia-execution-leader-lease
+    heartbeatIntervalMs: 2000
+    standbySyncIntervalMs: 500
+
+  jvm:
+    opts: "-XX:+UseZGC -XX:+AlwaysPreTouch -XX:MaxDirectMemorySize=1024m -Dfile.encoding=UTF-8"
+
+  resources:
+    limits:
+      cpu: "4000m"
+      memory: "4Gi"
+    requests:
+      cpu: "2000m"
+      memory: "2Gi"
+
+  probes:
+    liveness:
+      path: /actuator/health/liveness
+      initialDelaySeconds: 15
+      periodSeconds: 10
+    readiness:
+      path: /actuator/health/readiness
+      initialDelaySeconds: 10
+      periodSeconds: 5
+
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: gp3-ebs

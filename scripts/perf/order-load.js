@@ -12,6 +12,10 @@ import { Counter, Rate, Trend } from 'k6/metrics';
 
 const GATEWAY_URL = __ENV.GATEWAY_URL || 'http://localhost:8082';
 const TOKEN = __ENV.EMPORIA_TOKEN || '';
+const TOKENS = __ENV.EMPORIA_TOKENS
+    ? __ENV.EMPORIA_TOKENS.split(',').map((t) => t.trim()).filter((t) => t.length > 0)
+    : [TOKEN];
+const MIX_SIDES = __ENV.MIX_SIDES === 'true';
 const RATE = parseInt(__ENV.RATE || '10', 10);
 const DURATION = __ENV.DURATION || '60s';
 const LISTING_IDS = (__ENV.LISTING_IDS || '1').split(',').map((s) => parseInt(s.trim(), 10));
@@ -62,11 +66,13 @@ export const options = {
 
 function submitOrder() {
     const listingId = LISTING_IDS[Math.floor(Math.random() * LISTING_IDS.length)];
+    const token = TOKENS[Math.floor(Math.random() * TOKENS.length)];
+    const side = MIX_SIDES ? (Math.random() < 0.5 ? 'BUY' : 'SELL') : 'BUY';
     return http.post(
         `${GATEWAY_URL}/api/orders`,
         JSON.stringify({
             listingId: listingId,
-            side: 'BUY',
+            side: side,
             type: 'LIMIT',
             quantity: QUANTITY,
             limitPrice: LIMIT_PRICE,
@@ -74,7 +80,7 @@ function submitOrder() {
         }),
         {
             headers: {
-                Authorization: `Bearer ${TOKEN}`,
+                Authorization: `Bearer ${token}`,
                 'Content-Type': 'application/json',
                 // Required by the API. Each submission is a distinct intent, so
                 // each gets its own key; reusing one would make every order
