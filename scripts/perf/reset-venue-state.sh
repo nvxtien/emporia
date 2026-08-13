@@ -120,7 +120,7 @@ if [ "$restart_needed" = true ]; then
     EXECUTION_VENUE_MODE="${EXECUTION_VENUE_MODE:-exchange-core}" \
     EXCHANGE_CORE_ACCOUNTING_MODE="${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk}" \
     EXCHANGE_CORE_PORTFOLIO_URL="${EXCHANGE_CORE_PORTFOLIO_URL:-http://localhost:8088}" \
-    EXCHANGE_CORE_WAIT_STRATEGY="${EXCHANGE_CORE_WAIT_STRATEGY:-yielding}" \
+    EXCHANGE_CORE_WAIT_STRATEGY="${EXCHANGE_CORE_WAIT_STRATEGY:-blocking}" \
         start_service order-management-service order-management-service mvn -DskipTests spring-boot:run
     wait_http_health order-management-service http://localhost:8086/actuator/health \
         || fail "order-management-service did not come back up; see $log_dir/order-management-service.log"

@@ -109,11 +109,18 @@ emporia.execution:
     # directory beneath it, after which every checkpoint failed silently.
     storage-directory: ${EXCHANGE_CORE_STORAGE_DIRECTORY:.local-run/exchange-core-simulation}
     symbol-partitions: ${EXCHANGE_CORE_SYMBOL_PARTITIONS:2}
-    # busy-spin | yielding | blocking. busy-spin pins matching threads at 100%
-    # CPU indefinitely; fine when execution had a process to itself, but after
-    # the OMS/execution merge it now contends with OMS's own Disruptor writer
-    # thread and the order dispatcher's shard threads for the same cores.
-    wait-strategy: ${EXCHANGE_CORE_WAIT_STRATEGY:busy-spin}
+    # busy-spin | yielding | blocking. The spinning strategies were sized for
+    # execution having a process to itself; since the OMS/execution merge they
+    # contend with OMS's own Disruptor writer thread and the dispatcher's shard
+    # threads for the same cores. Measured on an 8-core box: yielding leaves 7
+    # threads burning ~68% of a core each (~490% total) with the process idle,
+    # blocking leaves ~73% total. That spin does not slow the work itself, but
+    # it delays when the writer thread gets scheduled, which only shows up once
+    # there is real queueing - at 120 orders/sec, ring queue wait p99 was 201ms
+    # under yielding vs 112ms under blocking (submit p99 224ms vs 134ms). Below
+    # ~100/s the two are indistinguishable against run-to-run noise.
+    # See CONFIGURATION.md.
+    wait-strategy: ${EXCHANGE_CORE_WAIT_STRATEGY:blocking}
     # Set to full-equity-risk to enable balance tracking and portfolio snapshots.
     accounting-mode: ${EXCHANGE_CORE_ACCOUNTING_MODE:matching-only}
     portfolio-url: ${EXCHANGE_CORE_PORTFOLIO_URL:}

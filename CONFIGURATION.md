@@ -5,53 +5,99 @@ so they don't have to be rediscovered. Add an entry when a config default
 silently produces misleading results and the fix isn't obvious from reading
 the code alone.
 
-## exchange-core `wait-strategy` must be `yielding`, not the `busy-spin` default
+## exchange-core `wait-strategy` defaults to `blocking`, not a spinning strategy
 
 - **Where**: `order-management-service/src/main/resources/application.yml`,
   key `emporia.execution.exchange-core.wait-strategy`
   (env override: `EXCHANGE_CORE_WAIT_STRATEGY`)
-- **Default in code**: `busy-spin`
-- **Required value for the current merged process**: `yielding`
+- **Default**: `blocking` (was `busy-spin`, briefly `yielding` in practice)
 
-**Why**: `busy-spin` was safe when `execution-service` ran as its own
+**Why**: the spinning strategies were sized for execution running in its own
 process. Since the 2026-08 rework merged execution routing in-process into
-`order-management-service`, `busy-spin` makes exchange-core's internal
-matching-engine threads spin at 100% CPU continuously, competing for the
-same cores as the OMS Disruptor writer thread and
-`ShardedOrderDispatcher`'s shard worker threads.
+`order-management-service`, exchange-core's internal threads contend with the
+OMS Disruptor writer thread and `ShardedOrderDispatcher`'s shard threads for
+the same cores.
 
-**Measured impact** (JFR-verified 2026-08-13; identical 40 orders/sec, 90s
-load, only this one env var changed between runs):
+**The reproducible effect is CPU burn, measured 5 times on an 8-core box with
+the process fully idle:**
 
-| | `busy-spin` (default) | `yielding` |
+| | `yielding` | `blocking` |
 |---|---:|---:|
-| p50 | 104 ms | 7 ms |
-| p99 | 1,018 ms | 31 ms |
-| Infra failure rate | 5.4% | 0% |
-| CPU samples in busy-spin loops | 88.5% | ~2% |
+| Whole-JVM CPU while idle | 422–490% | 72–74% |
+| Threads spinning | 7 × ~68% of a core | none (only `oms-hotpath-1`) |
 
-Three other explanations (JVM cold-start, one-sided vs. mixed order flow,
-`PROBE_STEP`/checkpoint-interval resonance) were tested and disproven before
-a JFR `hot-methods` view surfaced this directly — see
-`.local-run/jfr/<timestamp>/order-management-service/hot-methods.txt` from
-that run for the raw evidence style.
+That is ~5 of 8 cores consumed doing nothing. `busy-spin` is worse again: JFR
+showed 88.5% of all CPU samples inside busy-spin loops.
 
-**Confirmed gap (2026-08-13)**: `scripts/run-local.sh` and
-`scripts/run-infra-docker.sh` — the two documented "supported" ways to bring
-up the stack (see root `README.md`) — do **not** set this env var, so they
-inherit the bad default. Only `scripts/perf/reset-venue-state.sh` has been
-fixed to default to `yielding`.
+**The latency effect only appears once there is real queueing.** The spin does
+not slow the work itself — it delays *when the single Disruptor writer thread
+gets scheduled*. Measured at 120 orders/sec, submitting directly to
+order-management-service, clean book, 7,201 orders each, 100% accepted:
 
-**Action required**: always export `EXCHANGE_CORE_WAIT_STRATEGY=yielding`
-when starting or restarting `order-management-service`, by hand or in any
-script. Before trusting a latency/capacity benchmark result, verify the
-running process actually has it set rather than assuming a startup script
-got it right:
+| Layer (p50/p95/p99) | `yielding` | `blocking` |
+|---|---:|---:|
+| HTTP submit total | 3/62/**224** ms | 2/34/**134** ms |
+| └ Disruptor ring queue wait | 1/50/**201** ms | 1/22/**112** ms |
+| └ Disruptor handler | 2/8/17 ms | 2/7/14 ms |
+
+Note the difference is almost entirely queue wait; the handler is the same.
+
+**Below ~100 orders/sec the two are indistinguishable.** Do not expect to see
+this in a low-rate run: at 60–100/s, run-to-run variance swamps it. Two
+*identical* `yielding` runs at 60/s produced p99 of 650 ms and 30 ms — a 21x
+spread — so any single-run A/B at those rates measures noise. An earlier
+version of this document claimed a 4x latency win for `blocking` based on
+exactly that mistake; it was withdrawn after four repeated runs showed the
+configs trading places.
+
+**Verify before trusting a benchmark** — do not assume a startup script got it
+right:
 
 ```bash
 ps eww -p $(cat .local-run/pids/order-management-service.pid) \
   | tr ' ' '\n' | grep WAIT_STRATEGY
 ```
+
+**Not changed**: OMS's own ring (`emporia.disruptor.wait-strategy`, key at
+`application.yml:37`) still defaults to `yielding`, and its thread
+`oms-hotpath-1` still spins at ~89% of a core. Whether that should follow has
+not been measured.
+
+## A load test through the gateway cannot exceed 100 orders/sec per retail user
+
+- **Where**: `gateway/.../filter/OrderRateLimiterGatewayFilterFactory.java`
+
+**Why**: the limiter is a per-identity token bucket whose rate comes from the
+JWT `tier` claim, and **the tier branches ignore the configured values**:
+
+| `tier` claim | replenish | burst |
+|---|---:|---:|
+| `institutional` | 5,000/s | 10,000 |
+| `retail` | 100/s | 200 |
+| absent | `emporia.gateway.order-rate-limiter.*` (default 20/s, 40) | |
+
+The bootstrap `admin` user has `tier=retail`, so every k6 run that goes
+through the gateway is capped at 100/s no matter what `ORDER_PATH_RATES` says.
+Over the cap the gateway returns **429**, which `scripts/perf/order-load.js`
+buckets as a *business rejection* (any 4xx) — indistinguishable in its output
+from a genuine risk rejection.
+
+**Confirmed 2026-08-14** at 120/s offered through the gateway: 2,081 × 201,
+1,501 × 429, body `gateway_rate_limited: too many order commands`, while
+order-management-service's own `http_server_requests` recorded **only the
+2,081** — the rejected ones never reached it. The same workload submitted
+directly to `http://localhost:8086/orders` completed 7,201/7,201 at 100%.
+
+This invalidated an earlier reading of the capacity sweep: 80/s clean, 100/s
+~13% "business rejections", 120/s ~39% looked like a knee in the order path
+and was first attributed to the test account exhausting its buying power. It
+was the gateway all along — the account balance (~1e12 scaled, ~1,030 consumed
+per resting order) was never close to exhausted.
+
+**When measuring order-path capacity above 100/s**, either submit directly to
+order-management-service (bypassing gateway auth-edge behaviour), spread load
+across users via `EMPORIA_TOKENS` (the limiter is per identity), or use a
+token with `tier=institutional`.
 
 ## Re-seeding a portfolio balance has no effect until the outbox backlog is cleared
 
