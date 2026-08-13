@@ -171,6 +171,19 @@ resilience4j:
         waitDurationInOpenState: ${EMPORIA_GATEWAY_ORDER_CB_OPEN_DURATION:5s}
         permittedNumberOfCallsInHalfOpenState: ${EMPORIA_GATEWAY_ORDER_CB_HALF_OPEN_CALLS:5}
         automaticTransitionFromOpenToHalfOpenEnabled: true
+        # A full bulkhead is this gateway shedding its own excess load, not
+        # evidence that order-management-service is unhealthy - counting it as a
+        # failure lets a brief concurrency spike escalate into a five-second
+        # refusal of every order. It escalates easily because the two outcomes
+        # are recorded at different speeds: a rejection completes in 0ms and
+        # enters the 100-call window at once, while a success only lands when it
+        # finishes, so the window fills with rejections and crosses the 75%
+        # threshold even while most calls are succeeding. Measured on the old
+        # 25-call bulkhead at 120 orders/sec: 144 rejections dragged 601 further
+        # requests down with them. Ignored, not counted as success: the breaker
+        # still opens for real downstream failures.
+        ignoreExceptions:
+          - io.github.resilience4j.bulkhead.BulkheadFullException
   timelimiter:
     instances:
       orderCommands:

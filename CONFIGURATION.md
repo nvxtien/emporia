@@ -145,11 +145,28 @@ have succeeded.
 for 40s): 4,801/4,801 accepted, zero 503, zero circuit-breaker `ERROR` or
 `NOT_PERMITTED` events, p50 8ms / p95 376ms.
 
-**Still open**: the circuit breaker counts bulkhead rejections — deliberate load
-shedding, not a downstream failure — toward its failure rate. Raising the
-ceiling makes it much rarer but does not remove the amplification; the
-follow-up is `ignoreExceptions: [io.github.resilience4j.bulkhead.BulkheadFullException]`
-on the `orderCommands` circuit breaker.
+**The amplification is fixed separately**, because raising the ceiling only
+makes hitting it rarer — no ceiling is high enough forever, and what matters is
+how the system behaves when it *is* hit. The `orderCommands` circuit breaker now
+carries `ignoreExceptions: [io.github.resilience4j.bulkhead.BulkheadFullException]`,
+so a full bulkhead is neither a success nor a failure to the breaker; it still
+opens for genuine downstream failures.
+
+Measured A/B with the bulkhead forced down to 5 to guarantee it is hit,
+120 orders/sec for 30s, same book:
+
+| | Without `ignoreExceptions` | With |
+|---|---:|---:|
+| Accepted (201) | 2,942 | **3,483** |
+| Failed (503) | **659** (18.3%) | **118** (3.3%) |
+| Bulkhead rejections | 37 | 118 |
+| Blocked by open circuit | **622** | **0** |
+| Circuit opened | 3 times | never |
+
+37 rejections took 622 unrelated requests down with them — a 17x amplification.
+With the flag the bulkhead sheds exactly its excess and nothing else. (The
+rejection count is *higher* with the fix only because without it the open
+circuit stopped traffic from reaching the bulkhead at all.)
 
 **Gotcha when overriding by environment variable**: `resilience4j` instance
 names are map keys and case-sensitive.
