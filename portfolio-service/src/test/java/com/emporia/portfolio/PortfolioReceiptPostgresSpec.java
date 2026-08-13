@@ -2,12 +2,15 @@ package com.emporia.portfolio;
 
 import com.emporia.portfolio.PortfolioContracts.Balance;
 import com.emporia.portfolio.PortfolioContracts.Snapshot;
+import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase;
 import org.springframework.boot.jdbc.test.autoconfigure.JdbcTest;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Propagation;
@@ -44,6 +47,20 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 })
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 public class PortfolioReceiptPostgresSpec {
+
+    /**
+     * {@code @JdbcTest} only slices in JDBC-related auto-configuration, so
+     * PortfolioReceiptService's {@code @Autowired} constructor has no
+     * ObservationRegistry candidate without this - a NOOP registry is enough
+     * since this spec asserts persistence behavior, not observations.
+     */
+    @TestConfiguration
+    static class ObservationRegistryConfig {
+        @Bean
+        ObservationRegistry observationRegistry() {
+            return ObservationRegistry.NOOP;
+        }
+    }
 
     @Container
     @ServiceConnection
