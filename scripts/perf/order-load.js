@@ -11,6 +11,11 @@ import { check } from 'k6';
 import { Counter, Rate, Trend } from 'k6/metrics';
 
 const GATEWAY_URL = __ENV.GATEWAY_URL || 'http://localhost:8082';
+// Full URL to POST orders to. Defaults to the gateway, which is the path a
+// benchmark should measure: it exercises authentication and the whole edge.
+// Overriding it to hit a service directly isolates one layer for diagnosis,
+// but the result is no longer an end-to-end number - use it deliberately.
+const ORDERS_URL = __ENV.ORDERS_URL || `${GATEWAY_URL}/api/orders`;
 const TOKEN = __ENV.EMPORIA_TOKEN || '';
 const TOKENS = __ENV.EMPORIA_TOKENS
     ? __ENV.EMPORIA_TOKENS.split(',').map((t) => t.trim()).filter((t) => t.length > 0)
@@ -69,7 +74,7 @@ function submitOrder() {
     const token = TOKENS[Math.floor(Math.random() * TOKENS.length)];
     const side = MIX_SIDES ? (Math.random() < 0.5 ? 'BUY' : 'SELL') : 'BUY';
     return http.post(
-        `${GATEWAY_URL}/api/orders`,
+        ORDERS_URL,
         JSON.stringify({
             listingId: listingId,
             side: side,

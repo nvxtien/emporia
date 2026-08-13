@@ -2,6 +2,11 @@
 # Runs the gateway -> order-management order-path capacity probe (execution
 # routing is in-process inside order-management-service) and records latency
 # and exchange-core checkpoint health.
+#
+# Load always goes through the gateway so authentication and the full edge path
+# are exercised. To stop the gateway's order rate limiter from being the
+# ceiling, the benchmark user is promoted to the institutional tier (5000/s)
+# instead of the limiter being bypassed - it stays in the measured path.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -16,6 +21,17 @@ PROBE_STEP="${PROBE_STEP:-60s}"
 LISTING_IDS="${LISTING_IDS:-1}"
 QUANTITY="${QUANTITY:-1}"
 LIMIT_PRICE="${LIMIT_PRICE:-100.00}"
+# Always through the gateway: the run has to exercise the real edge, including
+# authentication, or it is not measuring the path orders actually take.
+ORDERS_URL="${GATEWAY_URL}/api/orders"
+# The gateway's order rate limiter is a per-identity token bucket whose rate
+# comes from the JWT `tier` claim, and the tier branches hard-code their limits
+# (retail = 100/s) ignoring the configured value. Rather than bypass the
+# limiter - which would take it out of the measured path - the benchmark user
+# is promoted to the institutional tier (5000/s), so the limiter stays in front
+# of every request but stops being the ceiling. See CONFIGURATION.md.
+BENCH_TIER="${BENCH_TIER:-INSTITUTIONAL}"
+AUTH_ADMIN_URL="${AUTH_ADMIN_URL:-http://localhost:9000}"
 RUN_LABEL="${ORDER_PATH_RUN_LABEL:-jdk21-hardened}"
 OUT_DIR="${ORDER_PATH_OUT_DIR:-$repo_root/.local-run/order-path-capacity/$(date +%Y%m%d-%H%M%S)-${RUN_LABEL}}"
 FINAL_DRAIN_SECONDS="${FINAL_DRAIN_SECONDS:-30}"
@@ -26,6 +42,13 @@ Usage: scripts/perf/order-path-capacity.sh [--dry-run]
 
 Environment:
   ORDER_PATH_RATES       Space-separated offered rates. Default: "5 10 20 40 60"
+  BENCH_TIER             Tier the benchmark users are promoted to so the gateway's
+                         order rate limiter is not the ceiling. Default: INSTITUTIONAL
+                         (5000/s). This is a persistent change to those accounts.
+                         Only INSTITUTIONAL raises the limit - INTERNAL and VIP fall
+                         through to the configured default, which is lower than retail.
+  AUTH_ADMIN_URL         Authentication service base URL for the tier promotion.
+                         Default: http://localhost:9000
   PROBE_STEP             Duration per rate. Default: 60s
   ORDER_PATH_OUT_DIR     Output directory. Default: .local-run/order-path-capacity/<timestamp>
   GATEWAY_URL            Gateway base URL. Default: http://localhost:8082
@@ -67,6 +90,45 @@ mint_token() {
     EMPORIA_PASSWORD="${EMPORIA_PASSWORD:-admin123}" \
         node "$repo_root/scripts/perf/get-access-token.mjs" 2>/dev/null \
         || fail "could not mint an access token from $ORIGIN"
+}
+
+# Promotes a benchmark user out of the retail tier so the gateway's per-identity
+# order rate limiter (retail = 100/s, hard-coded) is not what the run measures.
+# Idempotent: a user already on the target tier is left alone. Tokens minted
+# before this runs still carry the old tier claim, so callers must mint after.
+ensure_bench_tier() {
+    local username="$1" admin_token="$2"
+    local users user_id current
+    users="$(curl -fsS -H "Authorization: Bearer ${admin_token}" \
+        "${AUTH_ADMIN_URL}/admin/users" 2>/dev/null)" || {
+        echo "    WARN: could not read ${AUTH_ADMIN_URL}/admin/users; leaving '${username}' tier as-is." >&2
+        echo "          Rates above 100/s will be capped by the gateway rate limiter." >&2
+        return 0
+    }
+    user_id="$(printf '%s' "$users" | python3 -c "
+import json,sys
+u=[x for x in json.load(sys.stdin) if x.get('username')==sys.argv[1]]
+print(u[0]['id'] if u else '')" "$username" 2>/dev/null)"
+    current="$(printf '%s' "$users" | python3 -c "
+import json,sys
+u=[x for x in json.load(sys.stdin) if x.get('username')==sys.argv[1]]
+print(u[0].get('tier','') if u else '')" "$username" 2>/dev/null)"
+    if [ -z "$user_id" ]; then
+        echo "    WARN: user '${username}' not found; leaving tier as-is." >&2
+        return 0
+    fi
+    if [ "$current" = "$BENCH_TIER" ]; then
+        echo "    ${username} already on tier ${BENCH_TIER}"
+        return 0
+    fi
+    if curl -fsS -X PUT -H "Authorization: Bearer ${admin_token}" \
+        -H "Content-Type: application/json" \
+        -d "{\"tier\":\"${BENCH_TIER}\"}" \
+        "${AUTH_ADMIN_URL}/admin/users/${user_id}/tier" >/dev/null 2>&1; then
+        echo "    ${username} tier ${current:-unknown} -> ${BENCH_TIER} (persistent account change)"
+    else
+        echo "    WARN: could not set '${username}' to ${BENCH_TIER}; rates above 100/s will be rate-limited." >&2
+    fi
 }
 
 mint_multi_tokens() {
@@ -246,6 +308,7 @@ run_k6_step() {
     EMPORIA_TOKENS="${tokens:-$token}" \
     MIX_SIDES="${MIX_SIDES:-false}" \
     GATEWAY_URL="$GATEWAY_URL" \
+    ORDERS_URL="$ORDERS_URL" \
     SUMMARY_OUT="$summary" \
         k6 run --quiet \
             -e "RATE=${rate}" \
@@ -299,6 +362,18 @@ echo "==> Order path capacity benchmark"
 echo "    output: ${OUT_DIR}"
 echo "    rates: ${RATES}"
 echo "    duration per rate: ${PROBE_STEP}"
+echo "    target: ${ORDERS_URL}"
+
+# Before any token is minted, so every token below carries the new tier claim.
+echo "==> Ensuring benchmark users are not rate-limited at the retail tier"
+bench_admin_token="$(mint_token)"
+ensure_bench_tier "${EMPORIA_USERNAME:-admin}" "$bench_admin_token"
+if [ "${MULTI_USER:-false}" = "true" ]; then
+    for u in trader_1 trader_2 trader_3 trader_4 trader_5 \
+             trader_6 trader_7 trader_8 trader_9 trader_10; do
+        ensure_bench_tier "$u" "$bench_admin_token"
+    done
+fi
 
 capture_execution_health "before"
 

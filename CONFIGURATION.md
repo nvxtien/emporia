@@ -58,10 +58,10 @@ ps eww -p $(cat .local-run/pids/order-management-service.pid) \
   | tr ' ' '\n' | grep WAIT_STRATEGY
 ```
 
-**Not changed**: OMS's own ring (`emporia.disruptor.wait-strategy`, key at
-`application.yml:37`) still defaults to `yielding`, and its thread
-`oms-hotpath-1` still spins at ~89% of a core. Whether that should follow has
-not been measured.
+**OMS's own ring follows the same default.** `emporia.disruptor.wait-strategy`
+(env `EMPORIA_DISRUPTOR_WAIT_STRATEGY`) also defaults to `blocking`, for the
+same reason: its writer thread `oms-hotpath-1` was measured spinning at ~89% of
+a core, and it has not had a core to itself since the merge.
 
 ## A load test through the gateway cannot exceed 100 orders/sec per retail user
 
@@ -94,10 +94,20 @@ and was first attributed to the test account exhausting its buying power. It
 was the gateway all along — the account balance (~1e12 scaled, ~1,030 consumed
 per resting order) was never close to exhausted.
 
-**When measuring order-path capacity above 100/s**, either submit directly to
-order-management-service (bypassing gateway auth-edge behaviour), spread load
-across users via `EMPORIA_TOKENS` (the limiter is per identity), or use a
-token with `tier=institutional`.
+**How the benchmark handles it** (as of 2026-08-14): `order-path-capacity.sh`
+keeps every request going through the gateway — a benchmark that skips the edge
+is not measuring the path orders actually take, and loses authentication from
+the measurement — and instead promotes the benchmark user to the
+**institutional** tier (5000/s) before minting tokens. The limiter still runs in
+front of every request; it just stops being the ceiling. Controlled by
+`BENCH_TIER` / `AUTH_ADMIN_URL`; this is a persistent change to that account.
+
+Only `INSTITUTIONAL` raises the limit. `INTERNAL` and `VIP` are not special-cased
+in the filter and fall through to the configured default (20/s) — *lower* than
+retail.
+
+Verified at 120/s through the gateway after the change: 5,344 accepted, **0%**
+business rejections, versus ~39% 429s before.
 
 ## Re-seeding a portfolio balance has no effect until the outbox backlog is cleared
 

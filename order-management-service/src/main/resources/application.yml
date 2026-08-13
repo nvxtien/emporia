@@ -34,7 +34,12 @@ spring:
     jwk-set-uri: ${EMPORIA_AUTH_JWK_SET_URI:http://localhost:9000/oauth2/jwks}
 emporia.static-data.url: ${EMPORIA_STATIC_DATA_URL:http://localhost:8081}
 emporia.disruptor:
-  wait-strategy: ${EMPORIA_DISRUPTOR_WAIT_STRATEGY:yielding}
+  # busyspin | yielding | sleeping | blocking. Same reasoning as the
+  # exchange-core wait-strategy below: the writer thread does not have a core to
+  # itself since the OMS/execution merge, and a spinning strategy holds one
+  # (oms-hotpath-1 measured at ~89% of a core while idle) that the dispatcher
+  # shards and exchange-core threads are also competing for. See CONFIGURATION.md.
+  wait-strategy: ${EMPORIA_DISRUPTOR_WAIT_STRATEGY:blocking}
   min-remaining-capacity: ${EMPORIA_DISRUPTOR_MIN_REMAINING_CAPACITY:1024}
   warmup-iterations: ${EMPORIA_DISRUPTOR_WARMUP_ITERATIONS:2048}
   cpu-set: ${EMPORIA_DISRUPTOR_CPU_SET:}
