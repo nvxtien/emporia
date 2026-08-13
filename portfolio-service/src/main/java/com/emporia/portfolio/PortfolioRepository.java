@@ -123,6 +123,20 @@ class PortfolioRepository implements PortfolioStore {
     }
 
     @Override
+    public long lastDeliveryId(final long clientId, final String exchangeId) {
+        final List<Long> rows = jdbc.query(
+                """
+                SELECT last_delivery_id
+                FROM portfolio_delivery_cursor
+                WHERE client_id = ? AND exchange_id = ?
+                """,
+                (result, row) -> result.getLong("last_delivery_id"),
+                clientId,
+                exchangeId);
+        return rows.isEmpty() ? -1 : rows.getFirst();
+    }
+
+    @Override
     public PortfolioReceipt findReceipt(final String eventId) {
         final List<PortfolioReceipt> receipts = jdbc.query(
                 """
@@ -203,6 +217,20 @@ class PortfolioRepository implements PortfolioStore {
                 """,
                 Timestamp.from(updatedAt),
                 snapshot.clientId());
+        jdbc.update(
+                """
+                INSERT INTO portfolio_delivery_cursor (
+                    client_id,
+                    exchange_id,
+                    last_delivery_id
+                )
+                VALUES (?, ?, ?)
+                ON CONFLICT (client_id, exchange_id)
+                DO UPDATE SET last_delivery_id = EXCLUDED.last_delivery_id
+                """,
+                snapshot.clientId(),
+                snapshot.exchangeId(),
+                snapshot.deliveryId());
     }
 
     private StateRow findState(final long clientId) {

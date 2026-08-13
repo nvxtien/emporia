@@ -23,6 +23,14 @@ interface PortfolioStore {
 
     void lockClient(long clientId);
 
+    /**
+     * The highest delivery id already applied for this (clientId, exchangeId)
+     * pair, or -1 if none has been applied yet. Callers use this to reject a
+     * snapshot older than what is already in place, since replaceBalances
+     * itself has no ordering guarantee against the delivery transport.
+     */
+    long lastDeliveryId(long clientId, String exchangeId);
+
     PortfolioReceipt findReceipt(String eventId);
 
     void recordReceipt(

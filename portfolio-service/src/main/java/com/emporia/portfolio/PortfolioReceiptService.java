@@ -107,7 +107,12 @@ class PortfolioReceiptService {
      * idempotent redelivery does succeed, but collapsing it into
      * {@code success} would hide the redelivery rate, which is exactly what the
      * idempotency contract exists to control. Still a bounded, low-cardinality
-     * value.
+     * value. {@code outcome=stale} follows the same reasoning for a snapshot
+     * whose delivery id is not newer than what is already applied: the
+     * publisher's delivery transport (an async, multi-worker outbox) has no
+     * ordering guarantee, so an older snapshot can arrive after a newer one
+     * has already been applied. Applying it anyway would silently revert a
+     * correct balance to a stale one.
      */
     @Transactional
     ReceiptResult apply(
@@ -140,6 +145,13 @@ class PortfolioReceiptService {
                 }
                 outcome = "rejected";
                 throw new PortfolioIdempotencyConflictException(eventId);
+            }
+
+            if (pathDeliveryId <= portfolios.lastDeliveryId(
+                    pathClientId,
+                    validated.exchangeId())) {
+                outcome = "stale";
+                return ReceiptResult.STALE;
             }
 
             final Instant now = clock.instant();
@@ -215,6 +227,7 @@ class PortfolioReceiptService {
 
     enum ReceiptResult {
         APPLIED,
-        DUPLICATE
+        DUPLICATE,
+        STALE
     }
 }

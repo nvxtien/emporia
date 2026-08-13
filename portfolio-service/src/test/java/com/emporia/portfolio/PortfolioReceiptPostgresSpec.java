@@ -2,12 +2,15 @@ package com.emporia.portfolio;
 
 import com.emporia.portfolio.PortfolioContracts.Balance;
 import com.emporia.portfolio.PortfolioContracts.Snapshot;
+import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.jdbc.test.autoconfigure.AutoConfigureTestDatabase;
 import org.springframework.boot.jdbc.test.autoconfigure.JdbcTest;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Propagation;
@@ -45,6 +48,20 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 public class PortfolioReceiptPostgresSpec {
 
+    /**
+     * {@code @JdbcTest} only slices in JDBC-related auto-configuration, so
+     * PortfolioReceiptService's {@code @Autowired} constructor has no
+     * ObservationRegistry candidate without this - a NOOP registry is enough
+     * since this spec asserts persistence behavior, not observations.
+     */
+    @TestConfiguration
+    static class ObservationRegistryConfig {
+        @Bean
+        ObservationRegistry observationRegistry() {
+            return ObservationRegistry.NOOP;
+        }
+    }
+
     @Container
     @ServiceConnection
     static final PostgreSQLContainer postgres =
@@ -64,6 +81,7 @@ public class PortfolioReceiptPostgresSpec {
     @BeforeEach
     void seedPortfolio() {
         jdbc.update("DELETE FROM received_portfolio_event");
+        jdbc.update("DELETE FROM portfolio_delivery_cursor");
         jdbc.update("DELETE FROM portfolio_balance");
         jdbc.update("DELETE FROM portfolio_state");
         jdbc.update(
@@ -142,6 +160,26 @@ public class PortfolioReceiptPostgresSpec {
     }
 
     @Test
+    void rejectsAnOlderDeliveryIdAfterANewerOneWasAlreadyApplied() {
+        assertThat(applyDelivery(13, 999L, "newer".getBytes(StandardCharsets.UTF_8)))
+                .isEqualTo(PortfolioReceiptService.ReceiptResult.APPLIED);
+
+        assertThat(applyDelivery(5, 111L, "older".getBytes(StandardCharsets.UTF_8)))
+                .isEqualTo(PortfolioReceiptService.ReceiptResult.STALE);
+
+        assertThat(jdbc.queryForObject(
+                "SELECT count(*) FROM received_portfolio_event",
+                Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject(
+                """
+                SELECT available_balance
+                FROM portfolio_balance
+                WHERE client_id = 101 AND asset_id = 20001
+                """,
+                Long.class)).isEqualTo(999L);
+    }
+
+    @Test
     void rejectsConflictingContentWithoutChangingBalances() {
         apply("first".getBytes(StandardCharsets.UTF_8));
 
@@ -169,5 +207,24 @@ public class PortfolioReceiptPostgresSpec {
                         List.of(
                                 new Balance(840, 0L),
                                 new Balance(20_001, 5L))));
+    }
+
+    private PortfolioReceiptService.ReceiptResult applyDelivery(
+            final long deliveryId,
+            final long assetAmount,
+            final byte[] payload) {
+        return service.apply(
+                deliveryId,
+                101,
+                "exchange-1:" + deliveryId + ":101",
+                payload,
+                new Snapshot(
+                        PortfolioContracts.SCHEMA_VERSION,
+                        "exchange-1",
+                        deliveryId,
+                        101L,
+                        List.of(
+                                new Balance(840, 0L),
+                                new Balance(20_001, assetAmount))));
     }
 }
