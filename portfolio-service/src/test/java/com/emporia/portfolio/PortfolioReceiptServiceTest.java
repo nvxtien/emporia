@@ -121,41 +121,6 @@ class PortfolioReceiptServiceTest {
     }
 
     @Test
-    void treatsADeliveryIdNoNewerThanTheLastAppliedOneAsStale() {
-        final byte[] payload = "{}".getBytes(StandardCharsets.UTF_8);
-        final RecordingPortfolioStore store = new RecordingPortfolioStore();
-        store.lastDeliveryIdToReturn = 13;
-
-        final PortfolioReceiptService.ReceiptResult result =
-                service(store).apply(
-                        13,
-                        101,
-                        "exchange-1:13:101",
-                        payload,
-                        snapshot());
-
-        assertThat(result)
-                .isEqualTo(PortfolioReceiptService.ReceiptResult.STALE);
-        assertThat(store.recordedEventId).isNull();
-        assertThat(store.applied).isNull();
-    }
-
-    @Test
-    void recordsTheStaleOutcomeObservation() {
-        final RecordingPortfolioStore store = new RecordingPortfolioStore();
-        store.lastDeliveryIdToReturn = 13;
-
-        service(store).apply(
-                13,
-                101,
-                "exchange-1:13:101",
-                "{}".getBytes(StandardCharsets.UTF_8),
-                snapshot());
-
-        assertThat(observationCount("stale")).isEqualTo(1);
-    }
-
-    @Test
     void rejectsAnEventIdReusedWithDifferentContent() {
         final RecordingPortfolioStore store =
                 new RecordingPortfolioStore();
@@ -298,7 +263,6 @@ class PortfolioReceiptServiceTest {
         private List<Balance> provisionedBalances;
         private Instant provisionedAt;
         private long lockedClientId;
-        private long lastDeliveryIdToReturn = -1;
         private PortfolioReceipt existing;
         private String recordedEventId;
         private String recordedDigest;
@@ -344,13 +308,6 @@ class PortfolioReceiptServiceTest {
         @Override
         public void lockClient(final long clientId) {
             lockedClientId = clientId;
-        }
-
-        @Override
-        public long lastDeliveryId(
-                final long clientId,
-                final String exchangeId) {
-            return lastDeliveryIdToReturn;
         }
 
         @Override
