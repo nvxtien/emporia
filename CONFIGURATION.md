@@ -109,6 +109,55 @@ retail.
 Verified at 120/s through the gateway after the change: 5,344 accepted, **0%**
 business rejections, versus ~39% 429s before.
 
+## The gateway's order bulkhead is a concurrency limit, and it defaulted to 25
+
+- **Where**: `gateway/src/main/resources/application.yml`,
+  `resilience4j.bulkhead.instances.orderCommands.maxConcurrentCalls`
+  (env `EMPORIA_GATEWAY_ORDER_BULKHEAD_MAX_CONCURRENT`)
+- **Was**: unset, so Resilience4j's default of **25** applied
+- **Now**: 200
+
+**Why it is easy to misread**: the `orderCommands` route carries three limits
+that constrain different things, and only the first is a rate:
+
+| Filter | Limits | Value |
+|---|---|---|
+| `OrderRateLimiter` | orders **per second** | per tier (retail 100/s) |
+| Bulkhead (implicit) | orders **in flight at once** | 25 (default) → 200 |
+| `CircuitBreaker` | trips on failure rate | 75% of last 100 calls |
+
+In-flight count is `rate x latency`, so it is *latency*, not offered rate, that
+pushes into the bulkhead. At 120 orders/sec, a p95 of 200ms already means ~24
+concurrent calls — at the default ceiling.
+
+**The failure amplifies rather than sheds.** Measured at 120/s on the default,
+745 of 3,601 requests failed, but only **144** came from the bulkhead itself;
+the other **601** came from the circuit breaker opening behind it and refusing
+everything for 5s — while p50 was 7-9ms and the system was nowhere near
+overloaded. The mechanism: a `BulkheadFullException` completes in **0 ms** and
+is recorded into the circuit breaker's 100-call window immediately, while a
+successful call is only recorded when it finishes. During a latency spike the
+window therefore fills with instant rejections far faster than with slow
+successes, and the failure rate crosses 75% even though most requests would
+have succeeded.
+
+**Measured after raising it to 200** (clean book, ~7.2k resting orders, 120/s
+for 40s): 4,801/4,801 accepted, zero 503, zero circuit-breaker `ERROR` or
+`NOT_PERMITTED` events, p50 8ms / p95 376ms.
+
+**Still open**: the circuit breaker counts bulkhead rejections — deliberate load
+shedding, not a downstream failure — toward its failure rate. Raising the
+ceiling makes it much rarer but does not remove the amplification; the
+follow-up is `ignoreExceptions: [io.github.resilience4j.bulkhead.BulkheadFullException]`
+on the `orderCommands` circuit breaker.
+
+**Gotcha when overriding by environment variable**: `resilience4j` instance
+names are map keys and case-sensitive.
+`RESILIENCE4J_BULKHEAD_INSTANCES_ORDERCOMMANDS_MAXCONCURRENTCALLS` binds a *new*
+instance named `ordercommands` and silently does nothing to `orderCommands` —
+it looks exactly like the setting having no effect. Use the env var declared in
+`application.yml` above, or `-Dresilience4j.bulkhead.instances.orderCommands.maxConcurrentCalls=...`.
+
 ## Re-seeding a portfolio balance has no effect until the outbox backlog is cleared
 
 - **Where**: `emporia_execution.exchange_core_portfolio_outbox` (execution DB,

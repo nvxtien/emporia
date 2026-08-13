@@ -148,6 +148,19 @@ emporia:
     portfolio-url: ${EMPORIA_PORTFOLIO_URL:http://localhost:8088}
 
 resilience4j:
+  # Concurrency limit, not a rate limit: it caps how many order commands are
+  # in flight at once, and in-flight count is rate x latency, so it is latency
+  # that pushes into it. Resilience4j's default of 25 is reached at 120
+  # orders/sec as soon as p95 approaches 200ms, which the order path does under
+  # load - measured 745 of 3601 requests failing at 120/s on the default, only
+  # 144 of them from the bulkhead itself and the other 601 from the circuit
+  # breaker opening behind it. 200 covers ~4x the concurrency 120/s needs at a
+  # 300ms p99, while still bounding what a stalled downstream can pile up.
+  # See CONFIGURATION.md.
+  bulkhead:
+    instances:
+      orderCommands:
+        maxConcurrentCalls: ${EMPORIA_GATEWAY_ORDER_BULKHEAD_MAX_CONCURRENT:200}
   circuitbreaker:
     instances:
       orderCommands:
