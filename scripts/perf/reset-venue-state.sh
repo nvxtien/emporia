@@ -11,9 +11,15 @@
 # reproducible, and cancelling thousands of orders one at a time would take
 # longer than the measurement and distort the very state being reset.
 #
-# THIS IS DESTRUCTIVE. It force-cancels every working order and discards the
-# venue's entire engine state. It is a local performance-testing tool, not an
-# operational procedure.
+# Also clears the exchange-core portfolio outbox backlog (the durable queue
+# that publishes exchange-core's own balance snapshots back to
+# portfolio-service). Without this, a stale queued snapshot from before the
+# reset can silently overwrite a freshly seeded balance minutes later,
+# making a portfolio re-seed look like it "didn't take" - see CONFIGURATION.md.
+#
+# THIS IS DESTRUCTIVE. It force-cancels every working order, discards the
+# venue's entire engine state, and drops its portfolio outbox backlog. It is
+# a local performance-testing tool, not an operational procedure.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -27,6 +33,9 @@ source "$repo_root/scripts/lib/run-common.sh"
 PG_CONTAINER="${PG_CONTAINER:-emporia-order-management-postgres}"
 PG_DB="${PG_DB:-emporia_order_management}"
 PG_USER="${PG_USER:-postgres}"
+EXECUTION_PG_CONTAINER="${EXECUTION_PG_CONTAINER:-emporia-execution-postgres}"
+EXECUTION_PG_DB="${EXECUTION_PG_DB:-emporia_execution}"
+EXECUTION_PG_USER="${EXECUTION_PG_USER:-postgres}"
 # Execution routing runs in-process inside order-management-service, so its
 # exchange-core storage lives under that service's own working directory.
 STORAGE_DIR="${EXCHANGE_CORE_STORAGE_DIRECTORY:-$repo_root/order-management-service/.local-run/exchange-core-simulation}"
@@ -35,15 +44,19 @@ REASON="${RESET_REASON:-Force-cancelled by scripts/perf/reset-venue-state.sh bef
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 [ "${1:-}" = "--yes" ] || fail "refusing to run without --yes.
-  This force-cancels every working order and deletes the exchange-core engine
+  This force-cancels every working order, deletes the exchange-core engine
   state at:
     ${STORAGE_DIR}
+  and drops the exchange-core portfolio outbox backlog.
   Intended for local performance testing only."
 
 psql_q() { docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc "$1" 2>/dev/null; }
+execution_psql_q() { docker exec "$EXECUTION_PG_CONTAINER" psql -U "$EXECUTION_PG_USER" -d "$EXECUTION_PG_DB" -tAc "$1" 2>/dev/null; }
 
 docker exec "$PG_CONTAINER" true >/dev/null 2>&1 \
     || fail "postgres container '${PG_CONTAINER}' is not running"
+docker exec "$EXECUTION_PG_CONTAINER" true >/dev/null 2>&1 \
+    || fail "postgres container '${EXECUTION_PG_CONTAINER}' is not running"
 
 working="$(psql_q "select count(*) from emporia_order_data.trading_order where order_status in ('LIVE','PARTIALLY_FILLED');")"
 echo "==> Resetting venue state"
@@ -72,6 +85,14 @@ echo "==> Clearing exchange-core engine state"
 rm -rf "$STORAGE_DIR"
 echo "    removed ${STORAGE_DIR}"
 
+# A queued-but-undelivered snapshot from before this reset would otherwise
+# survive it (this table is Postgres-backed, not part of $STORAGE_DIR) and
+# get drained by the background publisher after restart, overwriting a
+# freshly seeded portfolio balance with exchange-core's stale pre-reset one.
+echo "==> Clearing exchange-core portfolio outbox backlog"
+dropped="$(execution_psql_q "delete from emporia_execution.exchange_core_portfolio_outbox returning 1;" | grep -c 1 || true)"
+echo "    dropped ${dropped:-0} queued/dead outbox records"
+
 # Reconcile OMS in one statement. Without this, order-management keeps thousands
 # of orders it believes are working against an engine that has never heard of
 # them, and the next strategy tick tries to act on every one.
@@ -99,6 +120,7 @@ if [ "$restart_needed" = true ]; then
     EXECUTION_VENUE_MODE="${EXECUTION_VENUE_MODE:-exchange-core}" \
     EXCHANGE_CORE_ACCOUNTING_MODE="${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk}" \
     EXCHANGE_CORE_PORTFOLIO_URL="${EXCHANGE_CORE_PORTFOLIO_URL:-http://localhost:8088}" \
+    EXCHANGE_CORE_WAIT_STRATEGY="${EXCHANGE_CORE_WAIT_STRATEGY:-yielding}" \
         start_service order-management-service order-management-service mvn -DskipTests spring-boot:run
     wait_http_health order-management-service http://localhost:8086/actuator/health \
         || fail "order-management-service did not come back up; see $log_dir/order-management-service.log"
