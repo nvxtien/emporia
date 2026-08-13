@@ -7,9 +7,10 @@ import com.emporia.events.TradingEvents.OrderCommandResult;
 import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderType;
+import com.emporia.events.TradingEvents.OrderDomainEvent;
+import com.emporia.execution.ShardedOrderDispatcher;
 import com.emporia.ordermanagement.dto.ProcessingOutcome;
 import com.emporia.ordermanagement.model.OrderEvent;
-import com.emporia.ordermanagement.model.OrderOutboxRecord;
 import com.emporia.ordermanagement.model.ProcessedCommand;
 import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.OrderEventRepository;
@@ -53,9 +54,9 @@ class OrderCommandHandlerTest {
     private final OrderMetrics metrics = new OrderMetrics(new SimpleMeterRegistry());
     private final OrderStateCache cache = new OrderStateCache(orders, processed, 1000, 1000);
     private final AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
+    private final ShardedOrderDispatcher dispatcher = mock(ShardedOrderDispatcher.class);
     private final OrderCommandHandler handler =
-            new OrderCommandHandler(orders, events, processed, new ObjectMapper(), observations, metrics, cache, asyncDbWriter,
-                    "orders-topic", "results-topic");
+            new OrderCommandHandler(orders, events, processed, new ObjectMapper(), observations, metrics, cache, asyncDbWriter, dispatcher);
 
     /**
      * Wiring a meter handler turns observations into timers, so they can be
@@ -98,8 +99,8 @@ class OrderCommandHandlerTest {
         assertThat(outcome.events()).hasSize(1);
         assertThat(outcome.events().getFirst().eventType()).isEqualTo("CREATED");
         verify(asyncDbWriter).enqueue(any(ProcessedCommand.class));
-        // One outbox row for the CREATED event, one for the result.
-        verify(asyncDbWriter, times(2)).enqueue(any(OrderOutboxRecord.class));
+        // One outbox row for the CREATED event.
+        verify(dispatcher, times(1)).dispatch(any(OrderDomainEvent.class));
     }
 
     @Test
@@ -162,7 +163,7 @@ class OrderCommandHandlerTest {
         assertThat(outcome.result().success()).isFalse();
         assertThat(outcome.result().status()).isEqualTo(400);
         verify(orders, never()).save(any());
-        verify(asyncDbWriter, never()).enqueue(any(OrderOutboxRecord.class));
+        verify(dispatcher, never()).dispatch(any(OrderDomainEvent.class));
     }
 
     @Test
@@ -297,7 +298,7 @@ class OrderCommandHandlerTest {
         assertThat(outcome.result().success()).isTrue();
         assertThat(outcome.result().status()).isEqualTo(200);
         assertThat(outcome.events().getFirst().eventType()).isEqualTo("MODIFIED");
-        verify(asyncDbWriter, times(2)).enqueue(any(OrderOutboxRecord.class));
+        verify(dispatcher, times(1)).dispatch(any(OrderDomainEvent.class));
     }
 
     @Test
@@ -386,7 +387,7 @@ class OrderCommandHandlerTest {
         assertThat(outcome.events()).hasSize(1);
         assertThat(outcome.events().getFirst().eventType()).isEqualTo("CANCEL_REQUESTED");
         assertThat(order.getTargetStatus()).isEqualTo(OrderStatus.CANCELLED);
-        verify(asyncDbWriter, times(2)).enqueue(any(OrderOutboxRecord.class));
+        verify(dispatcher, times(1)).dispatch(any(OrderDomainEvent.class));
     }
 
     @Test
@@ -440,8 +441,8 @@ class OrderCommandHandlerTest {
         assertThat(outcome.events()).hasSize(2);
         assertThat(first.getTargetStatus()).isEqualTo(OrderStatus.CANCELLED);
         assertThat(second.getTargetStatus()).isEqualTo(OrderStatus.CANCELLED);
-        // Two child CANCEL_REQUESTED events, plus one for the result.
-        verify(asyncDbWriter, times(3)).enqueue(any(OrderOutboxRecord.class));
+        // Two child CANCEL_REQUESTED events.
+        verify(dispatcher, times(2)).dispatch(any(OrderDomainEvent.class));
     }
 
     @Test
@@ -514,7 +515,7 @@ class OrderCommandHandlerTest {
 
         assertThat(replayed.result()).isEqualTo(first.result());
         verify(orders, never()).existsById(any());
-        verify(asyncDbWriter, never()).enqueue(any(OrderOutboxRecord.class));
+        verify(dispatcher, never()).dispatch(any(OrderDomainEvent.class));
     }
 
     // -------------------------------------------------------------------------

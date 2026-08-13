@@ -134,13 +134,6 @@ panels.append(stat(
      '/ clamp_min(sum(rate(emporia_order_submit_seconds_count' + sel() + '[$__rate_interval])), 0.001)'),
     "percentunit", [{"color": "green", "value": None}, {"color": "yellow", "value": 0.01}, {"color": "red", "value": 0.05}],
     desc="A falling p99 during failures can mean the path stopped doing work rather than got faster. Read them together."))
-panels.append(stat(
-    "Kafka lag (stable groups)", 1, 18, 6,
-    'sum(clamp_min(kafka_consumergroup_lag{consumergroup=~"order-data-service-v1|emporia-execution-service-v1|order-management-executions-v1"}, 0))',
-    "short", [{"color": "green", "value": None}, {"color": "yellow", "value": 50}, {"color": "red", "value": 200}],
-    desc="Broker-side exporter lag, clamped: the exporter reports -1 for partitions with no committed offset. "
-         "Full detail on the Kafka Consumer Lag dashboard."))
-
 panels.append(timeseries(
     "Order submit latency", 6, 0, 12,
     pct_targets("emporia_order_submit", ["service"], ""),
@@ -162,8 +155,8 @@ panels.append(timeseries(
     "Risk check latency by service", 15, 12, 12,
     pct_targets("emporia_risk_check", ["service", "decision", "reason"],
                 "{{service}} {{decision}}/{{reason}}"),
-    desc="Grouped by service deliberately: emporia.risk.check is emitted by BOTH order-command-service "
-         "(reason=permission) and order-management-service (reason=quantity|symbol). Without the service "
+    desc="Grouped by service deliberately: emporia.risk.check carries different reason values "
+         "(reason=permission vs. reason=quantity|symbol) depending on which check fired. Without the service "
          "label two unrelated checks average into one line."))
 panels.append(timeseries(
     "Submit rate by operation, destination, outcome", 23, 0, 12,
@@ -191,13 +184,6 @@ panels.append(timeseries(
     pct_targets("jdbc_query", ["service"], "{{service}}"),
     desc="jdbc_query_seconds_bucket, not jdbc_query_active_seconds_bucket. The _active_ family is a long-task "
          "timer measuring work still in flight, and produces plausible-looking but wrong percentiles."))
-panels.append(timeseries(
-    "Kafka listener processing latency by consumer group", 40, 12, 12,
-    pct_targets("spring_kafka_listener", ["service", "messaging_kafka_consumer_group"],
-                "{{service}} {{messaging_kafka_consumer_group}}"),
-    desc="spring_kafka_* metrics carry messaging_kafka_consumer_group and report each topic once. The dotted/"
-         "underscored duplication and the topic=~\"emporia\\\\..+\" filter apply to kafka_consumer_* client "
-         "metrics only; the label here is messaging_source_name, so that filter would match nothing."))
 
 # ---------------------------------------------------------------- execution
 row("Execution path", 48)
@@ -258,25 +244,16 @@ panels.append(timeseries(
     pct_targets("jdbc_connection", ["service"], "conn {{service}}")
     + [target('histogram_quantile(0.95, sum by (le, service) (rate(jdbc_result_set_seconds_bucket' + sel() + '[$__rate_interval])))',
               "p95 result-set {{service}}", exemplar=True, refid="D")]))
-panels.append(timeseries(
-    "Kafka producer send latency by topic", 83, 12, 12,
-    pct_targets("spring_kafka_template", ["service", "messaging_destination_name"],
-                "{{service}} {{messaging_destination_name}}")))
 
 # -------------------------------------------------------------- baseline
 row("Baseline comparison (Phase 1_2, laptop-derived)", 91)
 panels.append(timeseries(
-    "Order submit p99 against the measured knee", 92, 0, 12,
+    "Order submit p99 against the measured knee", 92, 0, 24,
     [target(f'histogram_quantile(0.99, sum by (le) (rate(emporia_order_submit_seconds_bucket{sel()}[$__rate_interval])))',
             "p99", exemplar=True)],
     thresholds=[{"color": "green", "value": None}, {"color": "yellow", "value": 0.5}, {"color": "red", "value": 2}],
     desc="Phase 1_2 measured: <=40 orders/sec p99 under ~100ms with lag ~0; 48/sec p50 3137ms with sustained "
          "lag 123-199; 80/sec 7.7% infra failures. These are one laptop's numbers and warning-only context."))
-panels.append(timeseries(
-    "Stable-group lag beside submit p99", 92, 12, 12,
-    [target('sum by (consumergroup) (clamp_min(kafka_consumergroup_lag{consumergroup=~"order-data-service-v1|emporia-execution-service-v1|order-management-executions-v1"}, 0))',
-            "{{consumergroup}}")], unit="short",
-    desc="Lag climbing while p99 climbs indicates consumers falling behind rather than a slow single request."))
 panels.append(timeseries(
     "Accepted rate vs failure rate", 100, 0, 24,
     [target('sum(rate(emporia_order_submit_seconds_count' + SUCCEEDED + '[$__rate_interval]))', "accepted/s"),

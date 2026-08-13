@@ -1,7 +1,7 @@
 #!/bin/bash
 # Dumps and stops active JFR recordings (REWORK_NOTE Phase 1_4).
 #
-# Usage: scripts/perf/jfr-stop.sh order-management-service execution-service
+# Usage: scripts/perf/jfr-stop.sh order-management-service
 #
 # Knobs: JFR_NAME, JFR_OUT_DIR (defaults to the directory jfr-start.sh last used)
 #

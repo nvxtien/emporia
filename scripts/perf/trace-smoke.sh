@@ -1,12 +1,14 @@
 #!/bin/bash
-# REWORK_NOTE Phase 1_1, step 8: submit an order and confirm the resulting trace
-# spans order-management and execution.
+# REWORK_NOTE Phase 1_1, step 8: submit an order and confirm one connected
+# trace reaches Tempo for it.
 #
-# This is the check that proves trace context propagates across BOTH HTTP and
-# Kafka. Kafka observations are off by default in Spring Boot; without them each
-# service still produces perfectly good local spans, so everything looks healthy
-# while the order actually fragments into several disconnected traces. Only an
-# end-to-end assertion catches that.
+# Execution routing runs in-process inside order-management-service now, so
+# there is no longer a cross-service hop on the order path to lose trace
+# context across. What can still silently break: order submission dispatches
+# to ShardedOrderDispatcher's async shard-executor thread, and trace context
+# does not cross an executor boundary for free - a regression there would
+# still produce perfectly good local spans while the order's trace loses the
+# work done on the shard thread. Only an end-to-end assertion catches that.
 #
 # Usage: scripts/perf/trace-smoke.sh
 #
@@ -27,8 +29,13 @@ GATEWAY_URL="${GATEWAY_URL:-http://localhost:8082}"
 TEMPO_URL="${TEMPO_URL:-http://localhost:3200}"
 LISTING_ID="${SMOKE_LISTING_ID:-1}"
 
-# Services that must appear in the trace for propagation to be considered working.
-REQUIRED_SERVICES=(order-management-service execution-service)
+# Services that must appear in the trace for propagation to be considered
+# working. The gateway is deliberately not required here: its application.yml
+# has no management.opentelemetry.tracing.export.otlp.endpoint configured, so
+# it never exports spans at all - a real, pre-existing gap, unrelated to this
+# check. order-management-service is the only service that can appear now
+# that execution routing runs in-process inside it.
+REQUIRED_SERVICES=(order-management-service)
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -63,7 +70,8 @@ order_id="$(printf '%s' "$order_response" \
 echo "    order ${order_id}"
 
 # Tempo needs a moment to ingest, and execution spans land after the HTTP
-# response since they arrive via Kafka.
+# response since order routing is dispatched to a background shard thread
+# rather than completed inline before the response is returned.
 echo "==> Waiting for spans to reach Tempo"
 trace_id=""
 trace=""
@@ -140,17 +148,10 @@ if [ ${#missing[@]} -gt 0 ]; then
     echo "FAIL: the order did not produce one connected trace." >&2
     echo "Missing spans from: ${missing[*]}" >&2
     echo >&2
-    echo "Two causes account for almost every occurrence:" >&2
-    echo >&2
-    echo "  1. Kafka trace propagation disabled - both of these must be set in" >&2
-    echo "     the affected services (they default to false):" >&2
-    echo "        spring.kafka.template.observation-enabled: true" >&2
-    echo "        spring.kafka.listener.observation-enabled: true" >&2
-    echo >&2
-    echo "  2. The wrong OTLP endpoint property. Boot 4 deprecated" >&2
-    echo "     management.otlp.tracing.endpoint at level=error, so it is no" >&2
-    echo "     longer bound and is silently ignored. The live name is:" >&2
-    echo "        management.opentelemetry.tracing.export.otlp.endpoint" >&2
+    echo "The most common cause is the wrong OTLP endpoint property. Boot 4" >&2
+    echo "deprecated management.otlp.tracing.endpoint at level=error, so it is" >&2
+    echo "no longer bound and is silently ignored. The live name is:" >&2
+    echo "   management.opentelemetry.tracing.export.otlp.endpoint" >&2
     exit 1
 fi
 

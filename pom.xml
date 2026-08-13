@@ -56,7 +56,6 @@
         <module>user-preferences-service</module>
         <module>market-data-service</module>
         <module>order-management-service</module>
-        <module>execution-service</module>
         <module>portfolio-service</module>
         <module>gateway</module>
     </modules>

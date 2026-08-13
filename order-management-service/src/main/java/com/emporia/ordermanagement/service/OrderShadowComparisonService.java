@@ -285,7 +285,7 @@ public class OrderShadowComparisonService {
             AsyncDbWriter asyncDbWriter = new InMemoryAsyncDbWriter(
                     orders, events, processed, storedOrders, eventsByCommand, processedCommands);
             handler = new OrderCommandHandler(orders, events, processed, new ObjectMapper(), ObservationRegistry.NOOP,
-                    metrics, cache, asyncDbWriter, "emporia.orders.v1", "emporia.order.results.v1");
+                    metrics, cache, asyncDbWriter);
         }
 
         private ShadowSnapshot replay(OrderInputEvent inputEvent, ObjectMapper objectMapper) {
@@ -361,10 +361,6 @@ public class OrderShadowComparisonService {
         @Override
         public void enqueue(ProcessedCommand command) {
             if (command != null) processedCommands.put(command.result().commandId(), command);
-        }
-
-        @Override
-        public void enqueue(com.emporia.ordermanagement.model.OrderOutboxRecord outboxRecord) {
         }
 
         @Override

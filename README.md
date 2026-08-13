@@ -9,7 +9,7 @@
 
 > 📖 **Comprehensive Platform Documentation & Architectural Specifications are published on the [Emporia GitHub Wiki](https://github.com/nvxtien/emporia/wiki)!**
 
-Emporia is an enterprise-grade, distributed stock trading platform built with **Java 21**, **Spring Boot 4.0.7**, **React 19**, **Apache Kafka**, **gRPC**, and **PostgreSQL**. Its deployable boundaries strictly follow business capabilities: static data, user preferences, market data, and order management are independent services, with execution routing isolated behind its own service.
+Emporia is an enterprise-grade, distributed stock trading platform built with **Java 21**, **Spring Boot 4.0.7**, **React 19**, **gRPC**, and **PostgreSQL**. Its deployable boundaries strictly follow business capabilities: static data, user preferences, market data, order management, and portfolio are independent services; execution routing runs in-process inside order-management to remove the network hop between order intake and venue submission.
 
 ---
 
@@ -20,7 +20,7 @@ For in-depth architectural guides, domain design patterns, microservice deep div
 | Section | Description |
 |---|---|
 | 📖 **[Trading Terminology Glossary](https://github.com/nvxtien/emporia/wiki/Trading-Terminology-Glossary)** | Financial terms: Order types (Limit, Market, Stop, TIF), BBO/NBBO, SOR, VWAP, P&L. |
-| 📐 **[Architecture & Order Flow](https://github.com/nvxtien/emporia/wiki/Architecture-and-Order-Flow)** | System architecture flow, port matrix, REST vs. Kafka EDA, database ownership. |
+| 📐 **[Architecture & Order Flow](https://github.com/nvxtien/emporia/wiki/Architecture-and-Order-Flow)** | System architecture flow, port matrix, service boundaries, database ownership. |
 | ⚙️ **[Order Management Service](https://github.com/nvxtien/emporia/wiki/Order-Management-Service)** | State machine authority, `OrderCommandHandler`, `ExecutionCommandHandler`, idempotency. |
 | 🎯 **[Execution Service](https://github.com/nvxtien/emporia/wiki/Execution-Service)** | Algorithmic routing (`DMA`, `SMART` NBBO selector, `VWAP` slicer), venue gateways. |
 | 📜 **[Order Lifecycle & Invariants](https://github.com/nvxtien/emporia/wiki/Business-Logic-Order-Lifecycle)** | State machine invariants, tick/lot size checks, late fill accounting. |
@@ -44,9 +44,8 @@ flowchart TD
     Gateway --> Static[Static data :8081]
     Gateway --> Preferences[User preferences :8083]
     Gateway --> Market[Market data :8084]
-    Gateway -->|POST/PUT /api/orders| Orders
+    Gateway -->|POST/PUT /api/orders| Orders[Order Management Service :8086]
     Gateway -->|GET /api/orders| Orders
-    Execution[Execution :8087] -->|client credentials| Auth
     ExchangeCore[exchange-core simulation] -->|risk seed + durable snapshots| Portfolio[Portfolio :8088]
     ExchangeCore -->|bearer token| Auth
 
@@ -56,36 +55,23 @@ flowchart TD
     Fix[FIX simulator gRPC sources] -->|incremental books| Market
     Alpaca[Alpaca IEX] -->|snapshot + WebSocket| Market
     Orders -->|validate listing| Static
-
-    Orders -->|order_outbox CDC via Kafka Connect| OrderLog[[emporia.orders.v1]]
-    Execution -->|SMART/VWAP child CREATE| Commands[[emporia.order.commands.v1]]
-    Commands --> Orders
-    Orders -->|correlated result| Results[[emporia.order.results.v1]]
-    OrderLog --> Execution
-    Execution -->|FILL / REJECT / venue CANCEL| ExecutionCommands[[emporia.execution.commands.v1]]
-    ExecutionCommands --> Orders
-    Execution -->|recover active parents and children| Orders
-    Execution -->|same-instrument listings| Static
-    Execution -->|venue quotes| Market
+    Orders -->|same-instrument listings| Static
+    Orders -->|venue quotes| Market
 
     Auth --> AuthDb[(PostgreSQL\nemporia_authentication)]
     Static --> StaticDb[(PostgreSQL\nemporia_static_data)]
     Preferences --> PreferencesDb[(PostgreSQL\nemporia_client_config)]
-    Orders --> OrderDb[(PostgreSQL\nemporia_order_data)]
-    Execution --> ExecutionDb[(PostgreSQL\nemporia_execution)]
+    Orders --> OrderDb[(PostgreSQL\nemporia_order_data & emporia_execution)]
     Portfolio --> PortfolioDb[(PostgreSQL\nemporia_portfolio)]
 ```
 
 The browser sees one `/api` surface. The gateway routes requests by path and
 HTTP method to the service that owns each business capability. Mutating order
 calls (`POST`/`PUT /api/orders/**`) go directly to `order-management`, which
-handles them on an in-process LMAX Disruptor and writes `order_outbox` records
-in the same persistence boundary as the order transition. Kafka Connect
-Debezium CDC-relays those records to `emporia.orders.v1` asynchronously for
-execution and audit, so Kafka is not on the browser request critical path. The
-same Kafka command path also carries `execution`'s internally generated
-SMART/VWAP child orders — see
-[Kafka command path](#kafka-command-path-execution-child-orders) below.
+handles them on an in-process LMAX Disruptor ring buffer and dispatches order domain
+events to an in-process sharded dispatcher. The execution
+engine, SMART/VWAP algorithmic strategies, and venue gateways run directly
+in-process within `order-management-service` for zero network-hop execution.
 
 ## Service ownership
 
@@ -95,12 +81,11 @@ SMART/VWAP child orders — see
 | `static-data` | 8081 | Instruments and exchange listings |
 | `user-preferences` | 8083 | Per-user watchlists and persisted workspace layouts |
 | `market-data` | 8084 HTTP / 50551 gRPC | Simulated, Alpaca IEX, or FIX-simulator market data; venue/composite books; REST, SSE, and gRPC distribution |
-| `order-management` | 8086 | Order command hot path (Disruptor), lifecycle, state, history, executions, and idempotency |
-| `execution` | 8087 internal | DMA venue access, best-venue SMART routing, scheduled VWAP child orders, and execution reports |
+| `order-management` | 8086 | Order command hot path (Disruptor), lifecycle, state, history, executions, sharded in-process SOR routing (DMA, SMART, VWAP), and venue gateways |
 | `portfolio` | 8088 internal | Fully funded cash/equity balances and idempotent exchange snapshot receipts |
 | `gateway` | 8082 | Browser security boundary and routing |
 | `frontend` | 3001 | React trading workspace |
-| `trading-contracts` | not deployed | Versioned Java/Kafka contracts shared at build time |
+| `trading-contracts` | not deployed | Versioned Java contracts shared at build time |
 | `fix-simulator-contracts` | not deployed | Generated FIX-simulator protobuf/gRPC contracts, consumed by `market-data` and `fix-market-simulator` |
 | `fix-market-simulator` | 9876 FIX / 50051 gRPC / 8501 REST | Standalone FIX/gRPC market simulator (QuickFIX/J + Guice + Jetty), an optional data source for `market-data`'s `FIX_SIMULATOR_CONNECTIONS` mode |
 
@@ -120,30 +105,26 @@ cross-schema foreign key.
 3. `OrderCommandHandler` applies the transition against the in-memory order
    cache, enqueues write-behind persistence, and returns the correlated result
    to the waiting HTTP request.
-4. OMS writes order domain events to `order_outbox` with the order transition.
-   The Debezium Kafka Connect connector CDC-relays them to `emporia.orders.v1`
-   asynchronously for `execution` and audit consumers.
+4. OMS passes order domain events directly to the in-process `ShardedOrderDispatcher`
+   (`entry-mode: direct`), partitioning events by order ID hash across dedicated
+   shard worker threads without network overhead or broker dependency.
 
-### Kafka command path (execution child orders)
+### In-Process 3-Leg Direct Pipeline
 
-There is no external REST ingress onto this path anymore — `execution` is
-the only producer left. SMART venue splits and VWAP time slices it creates
-internally reuse the same Kafka command path and `order-management` handler
-the gateway hot path uses:
+The execution pipeline operates completely in-process via three direct zero-hop legs,
+with no message broker on any of them:
 
-1. `execution` builds a versioned child `OrderCommand` (SMART venue split or
-   VWAP time slice) and publishes it to `emporia.order.commands.v1`, keyed by
-   the parent order ID so all of one parent's children stay on one partition.
-2. `order-management` consumes the command, validates the transition, and
-   updates its projection via the same handler path as the gateway hot path.
-3. The command result is stored in `processed_order_command`. A redelivered
-   Kafka command therefore returns the same result instead of applying the
-   change twice.
-4. `order-management` publishes the state transition to `emporia.orders.v1`,
-   which `execution` consumes to track parent/child fill state.
+1. **Leg 1 (order → execution)**: `ShardedOrderDispatcher` dispatches order events
+   to `ExecutionEventConsumer.processEvent(event)` on single-threaded shard workers.
+2. **Leg 2 (execution → child order)**: SMART venue splits and VWAP time slices
+   generated by `ExecutionEventConsumer` submit child `OrderCommand`s directly to the
+   `DisruptorOrderPipeline` for single-writer WAL persistence.
+3. **Leg 3 (fill/reject/cancel → order management)**: Venue gateway fills, rejections,
+   and cancels are passed directly to `ExecutionCommandHandler.handle(command)` in-memory.
 
-The six Kafka partitions can process independent orders in parallel while
-maintaining the order of commands for one key.
+`ShardedOrderDispatcher`'s shard workers (default 8, `emporia.execution.dispatcher.shards`)
+process independent orders in parallel while maintaining strict in-order processing
+for commands sharing the same order ID.
 
 ## Execution flow
 
@@ -170,8 +151,9 @@ maintaining the order of commands for one key.
 
 See the [DMA, SMART, and VWAP execution guide](docs/execution/README.md) for
 strategy behavior, order examples, cancellation, recovery, and current
-boundaries. Service-level configuration is collected in
-[execution/README.md](execution-service/README.md).
+boundaries. Execution runs in-process inside `order-management-service` (see
+[order-management/README.md](order-management-service/README.md)) rather than
+as its own deployable.
 
 Gateway routing, order-route circuit breaker and rate limiter behavior, and the
 internal service-account token policy are documented in
@@ -182,8 +164,7 @@ internal service-account token policy are documented in
 - Java 21 or newer
 - Maven 3.9+
 - Node.js and npm
-- PostgreSQL running at `localhost:5432` for non-Docker local runs, with
-  logical replication enabled for Debezium outbox CDC
+- PostgreSQL running at `localhost:5432` for non-Docker local runs
 - Docker with Compose for Docker-managed infrastructure or full-stack deployment
 - **Exchange-Core Engine**: Clone and install [`exchange-core`](https://github.com/nvxtien/exchange-core) (`mvn clean install`) into your local Maven repository before building Emporia.
 
@@ -195,8 +176,6 @@ Non-Docker local PostgreSQL settings:
   `scripts/seed-portfolio-client.sh` default `DB_USERNAME` accordingly;
   override `DB_USERNAME` if your local Postgres uses a different role
 - Password: `admin123`
-- Logical replication: `wal_level=logical`, `max_replication_slots >= 1`, and
-  `max_wal_senders >= 1`; restart PostgreSQL after changing these settings
 
 Flyway creates these service-owned schemas in the local `emporia` database:
 `emporia_authentication`, `emporia_static_data`, `emporia_client_config`,
@@ -211,9 +190,6 @@ Flyway creates these service-owned schemas in the local `emporia` database:
 | Full Docker | Docker containers | Docker containers | One PostgreSQL database/container per service that owns persistent data |
 
 See [Start locally](#start-locally) below for how each mode is brought up.
-Every supported mode starts Kafka Connect on container port `8083` and exposes
-it on host port `18083` where needed, leaving host port `8083` available for
-`user-preferences-service`.
 
 ## Start locally
 
@@ -281,9 +257,7 @@ gRPC sources, export `MARKET_DATA_PROVIDER=fix-simulator` and
 connection string format and behavior.
 
 Each script logs every service to `.local-run/logs/<service>.log` and tracks
-its pid in `.local-run/pids/<service>.pid`. Both scripts start Kafka Connect
-and register the `order-outbox-connector` after `order-management` is healthy
-but before `execution`, `gateway`, and the frontend start accepting traffic.
+its pid in `.local-run/pids/<service>.pid`.
 
 #### Check service status
 
@@ -293,7 +267,7 @@ token):
 ```bash
 for pair in "authentication:9000" "static-data:8081" "user-preferences:8083" \
             "market-data:8084" "order-management:8086" \
-            "execution:8087" "portfolio:8088" "gateway:8082"; do
+            "portfolio:8088" "gateway:8082"; do
   name="${pair%%:*}"; port="${pair##*:}"
   echo "$name: $(curl -fsS http://localhost:$port/actuator/health)"
 done
@@ -304,12 +278,10 @@ Other useful checks:
 
 ```bash
 cat .local-run/pids/*.pid                                      # pid recorded per running service
-tail -f .local-run/logs/execution-service.log                    # live logs for one service
-docker compose ps kafka kafka-connect                            # Kafka/Connect container health
-curl -fsS http://localhost:18083/connectors/order-outbox-connector/status
+tail -f .local-run/logs/order-management-service.log              # live logs (includes execution routing)
 ```
 
-Stop everything either script started, including the Kafka and/or
+Stop everything either script started, including the
 per-service PostgreSQL containers:
 
 ```bash
@@ -327,25 +299,20 @@ scripts/seed-portfolio-client.sh <username>
 ### Manual, per-service startup
 
 Running one service by hand (for example under a debugger) is still
-supported. Kafka and Kafka Connect must already be running
-(`docker compose up -d kafka kafka-connect`), and `authentication` should start
-before any service that validates its own OAuth tokens. After
-`order-management` is healthy, run `scripts/register-outbox-connector.sh`
-before starting `execution` or `gateway`; that connector is what relays
-`order_outbox` to `emporia.orders.v1`. Each service's own README documents its
+supported. `authentication` should start before any service that validates its own OAuth
+tokens. `order-management-service` now includes execution routing in-process
+(see [Order command flow](#order-command-flow) above) - there is no separate
+`execution` service to start. Each service's own README documents its
 environment variables and `mvn spring-boot:run` / `npm run dev` command:
 [`authentication`](authentication/README.md),
 [`static-data`](static-data-service/README.md),
 [`user-preferences`](user-preferences-service/README.md),
 [`market-data`](market-data-service/README.md),
-[`order-management`](order-management-service/README.md),
-[`execution`](execution-service/README.md),
+[`order-management`](order-management-service/README.md) (includes execution),
 [`portfolio`](portfolio-service/README.md),
 [`gateway`](gateway/README.md), and [`frontend`](frontend/README.md).
 
-Every service supports `GET /actuator/health` without a token. Kafka and Kafka
-Connect are healthy when `docker compose ps kafka kafka-connect` reports
-`healthy`.
+Every service supports `GET /actuator/health` without a token.
 
 ---
 
@@ -355,7 +322,7 @@ The full verification runbook lives in the
 [Testing & Verification wiki](https://github.com/nvxtien/emporia/wiki/Testing-and-Verification).
 It covers Maven `verify`, PMD reports, frontend checks, property tests,
 PostgreSQL integration tests, Fray concurrency checks, TLA+ model checking, and
-the OIDC/Kafka smoke test.
+the OIDC smoke test.
 
 Run `scripts/install-git-hooks.sh` once per clone to enable local CI: a
 pre-push hook that runs the same `mvn verify` + frontend checks before code
@@ -375,18 +342,20 @@ starting containers or services by hand.
 
 This is Mode 2 from [Start locally](#start-locally): `scripts/run-infra-docker.sh`
 starts one PostgreSQL 16 container per service that owns persistent data
-(ports `5433`-`5438`) plus Apache Kafka 4.3.1 (`9092`) and Kafka Connect
-(`18083` on the host), then runs every Spring Boot service and the frontend on
-your host JVM against those containers.
+(ports `5433`-`5438`), then runs every Spring
+Boot service and the frontend on your host JVM against those containers.
+`order-management-service` connects to two of the databases below directly
+(`order-management` for its own state, `execution` for venue/execution state)
+since execution now runs in-process inside it rather than as its own service.
 
-| Service | Host port | Database | Schema |
+| Database | Host port | Schema | Owned by |
 |---|---:|---|---|
-| `authentication` | `5433` | `emporia_authentication` | `emporia_authentication` |
-| `static-data` | `5434` | `emporia_static_data` | `emporia_static_data` |
-| `user-preferences` | `5435` | `emporia_user_preferences` | `emporia_client_config` |
-| `order-management` | `5436` | `emporia_order_management` | `emporia_order_data` |
-| `execution` | `5437` | `emporia_execution` | `emporia_execution` |
-| `portfolio` | `5438` | `emporia_portfolio` | `emporia_portfolio` |
+| `emporia_authentication` | `5433` | `emporia_authentication` | `authentication` |
+| `emporia_static_data` | `5434` | `emporia_static_data` | `static-data` |
+| `emporia_user_preferences` | `5435` | `emporia_client_config` | `user-preferences` |
+| `emporia_order_management` | `5436` | `emporia_order_data` | `order-management` |
+| `emporia_execution` | `5437` | `emporia_execution` | `order-management` (execution routing) |
+| `emporia_portfolio` | `5438` | `emporia_portfolio` | `portfolio` |
 
 ```bash
 scripts/run-infra-docker.sh
@@ -402,11 +371,10 @@ docker compose ps
 
 ### 2. Full-Stack Docker Container Deployment
 
-To launch all 8 microservices, API Gateway, React UI, service-owned PostgreSQL
-instances, Kafka, Kafka Connect, and the outbox connector registrar in
-containers, build the Maven jars first — each Dockerfile copies a pre-built
-`target/*.jar` rather than building from source — then run
-`scripts/local-deploy.sh`:
+To launch all 7 microservices, API Gateway, React UI, and service-owned
+PostgreSQL instances in containers, build the Maven jars first — each
+Dockerfile copies a pre-built `target/*.jar` rather than building from source
+— then run `scripts/local-deploy.sh`:
 
 ```bash
 # 1. Build and install exchange-core into your local Maven repo
@@ -437,5 +405,4 @@ scripts/stop-services.sh
 ```
 
 Do not add `-v` to the `docker compose` commands inside it unless you
-intentionally want to delete the local per-service database volumes and the
-Kafka volume.
+intentionally want to delete the local per-service database volumes.

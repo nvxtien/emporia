@@ -1,13 +1,14 @@
 #!/bin/bash
 # Run mode 2 (Infrastructure-only Docker), automated: every Spring service
-# in the host JVM against per-service PostgreSQL containers and a
-# Dockerized Kafka broker -- see the "Infrastructure-Only Docker Setup"
-# section in README.md for the port map this script uses.
+# in the host JVM against per-service PostgreSQL containers -- see the
+# "Infrastructure-Only Docker Setup" section in README.md for the port map
+# this script uses.
 #
-# execution-service defaults to EXECUTION_VENUE_MODE=exchange-core; export a
-# different value before running this script to override. market-data-service
-# defaults to MARKET_DATA_PROVIDER=simulated; export MARKET_DATA_PROVIDER=alpaca-iex
-# plus APCA_API_KEY_ID/APCA_API_SECRET_KEY to use live Alpaca IEX data instead.
+# order-management-service (execution routing merged in) defaults to
+# EXECUTION_VENUE_MODE=exchange-core; export a different value before running
+# this script to override. market-data-service defaults to
+# MARKET_DATA_PROVIDER=simulated; export MARKET_DATA_PROVIDER=alpaca-iex plus
+# APCA_API_KEY_ID/APCA_API_SECRET_KEY to use live Alpaca IEX data instead.
 #
 # Stop the Spring services with scripts/stop-services.sh, then
 # `docker compose down` to stop the containers (add -v only if you want to
@@ -29,10 +30,10 @@ check_exchange_core
 BOOTSTRAP_ADMIN_USERNAME="${BOOTSTRAP_ADMIN_USERNAME:-admin}"
 MAVEN_TEST_SKIP_ARGS=(${MAVEN_TEST_SKIP_ARGS:--DskipTests})
 
-echo "==> Starting per-service PostgreSQL containers and Kafka (Docker)"
+echo "==> Starting per-service PostgreSQL containers (Docker)"
 docker compose up -d
 for c in authentication-postgres static-data-postgres user-preferences-postgres \
-         order-management-postgres execution-postgres portfolio-postgres kafka kafka-connect; do
+         order-management-postgres execution-postgres portfolio-postgres; do
     wait_docker_healthy "$c" docker-compose.yml
 done
 
@@ -68,6 +69,14 @@ start_service market-data-service market-data-service mvn "${MAVEN_TEST_SKIP_ARG
 
 DB_URL=jdbc:postgresql://localhost:5436/emporia_order_management \
 DB_PASSWORD=admin123 \
+EXECUTION_VENUE_MODE=${EXECUTION_VENUE_MODE:-exchange-core} \
+EXCHANGE_CORE_ACCOUNTING_MODE=${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk} \
+EXCHANGE_CORE_PORTFOLIO_URL=${EXCHANGE_CORE_PORTFOLIO_URL:-http://localhost:8088} \
+EXCHANGE_CORE_JOURNALING=${EXCHANGE_CORE_JOURNALING:-false} \
+EXCHANGE_CORE_SNAPSHOT_INTERVAL=${EXCHANGE_CORE_SNAPSHOT_INTERVAL:-60s} \
+EXCHANGE_CORE_RETAINED_CHECKPOINTS=${EXCHANGE_CORE_RETAINED_CHECKPOINTS:-2} \
+EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES=${EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES:-0} \
+JAVA_TOOL_OPTIONS="-XX:+UseZGC -XX:+AlwaysPreTouch -XX:MaxDirectMemorySize=1024m --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED --add-exports=java.base/jdk.internal.ref=ALL-UNNAMED --add-exports=java.base/jdk.internal.util=ALL-UNNAMED --add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-exports=jdk.unsupported/sun.misc=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.locks=ALL-UNNAMED" \
 start_service order-management-service order-management-service mvn "${MAVEN_TEST_SKIP_ARGS[@]}" spring-boot:run
 
 DB_URL=jdbc:postgresql://localhost:5438/emporia_portfolio \
@@ -77,29 +86,6 @@ start_service portfolio-service portfolio-service mvn "${MAVEN_TEST_SKIP_ARGS[@]
 wait_http_health portfolio-service http://localhost:8088/actuator/health
 PGPASSWORD=admin123 provision_portfolio_client "$BOOTSTRAP_ADMIN_USERNAME" psql -h localhost -p 5438 -U postgres -d emporia_portfolio
 
-# execution-service rebuilds its venue lifecycle projection from
-# order-management before it opens for trading, and fails closed when it cannot
-# reach it - opening with an empty projection would treat redelivered commands
-# as new ones. It therefore has to start after order-management is serving, not
-# merely after it has been launched.
-wait_http_health order-management-service http://localhost:8086/actuator/health
-
-# CDC-drains order_outbox after Flyway has created the table, but before
-# execution/gateway/frontend start accepting traffic.
-echo "==> Registering the order_outbox CDC connector"
-"$repo_root/scripts/register-outbox-connector.sh"
-
-DB_URL=jdbc:postgresql://localhost:5437/emporia_execution \
-DB_PASSWORD=admin123 \
-EXECUTION_VENUE_MODE=${EXECUTION_VENUE_MODE:-exchange-core} \
-EXCHANGE_CORE_ACCOUNTING_MODE=${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk} \
-EXCHANGE_CORE_PORTFOLIO_URL=${EXCHANGE_CORE_PORTFOLIO_URL:-http://localhost:8088} \
-EXCHANGE_CORE_JOURNALING=${EXCHANGE_CORE_JOURNALING:-false} \
-EXCHANGE_CORE_SNAPSHOT_INTERVAL=${EXCHANGE_CORE_SNAPSHOT_INTERVAL:-60s} \
-EXCHANGE_CORE_RETAINED_CHECKPOINTS=${EXCHANGE_CORE_RETAINED_CHECKPOINTS:-2} \
-EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES=${EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES:-0} \
-start_service execution-service execution-service mvn "${MAVEN_TEST_SKIP_ARGS[@]}" spring-boot:run
-
 SERVER_PORT=8082 \
 EMPORIA_AUTH_ISSUER=http://localhost:3001 \
 start_service gateway gateway mvn "${MAVEN_TEST_SKIP_ARGS[@]}" spring-boot:run
@@ -108,7 +94,6 @@ wait_http_health static-data-service http://localhost:8081/actuator/health
 wait_http_health user-preferences-service http://localhost:8083/actuator/health
 wait_http_health market-data-service http://localhost:8084/actuator/health
 wait_http_health order-management-service http://localhost:8086/actuator/health
-wait_http_health execution-service http://localhost:8087/actuator/health
 wait_http_health gateway http://localhost:8082/actuator/health
 
 [ -d frontend/node_modules ] || (cd frontend && npm install)
@@ -126,7 +111,7 @@ cat <<EOF
     Execution venue:  ${EXECUTION_VENUE_MODE:-exchange-core} (accounting: ${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk}, journaling: ${EXCHANGE_CORE_JOURNALING:-false})
     Market data:      ${MARKET_DATA_PROVIDER:-simulated}
     Traces/metrics:   http://localhost:3300  (Grafana: Tempo + Prometheus)
-    Postgres/Kafka:   docker compose ps
+    Postgres:         docker compose ps
     Logs:             $log_dir
     Stop Spring services with: scripts/stop-services.sh
     Stop containers with:      docker compose down

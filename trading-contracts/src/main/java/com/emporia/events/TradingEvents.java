@@ -10,7 +10,6 @@ public final class TradingEvents {
 
     public static final int SCHEMA_VERSION = 1;
     public static final String ORDER_COMMANDS_TOPIC = "emporia.order.commands.v1";
-    public static final String ORDER_RESULTS_TOPIC = "emporia.order.results.v1";
     public static final String ORDERS_TOPIC = "emporia.orders.v1";
     public static final String EXECUTION_COMMANDS_TOPIC = "emporia.execution.commands.v1";
 

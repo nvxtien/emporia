@@ -106,11 +106,11 @@ provision_portfolio_client() {
         return 0
     fi
 
-    local balance="${PORTFOLIO_SEED_BALANCE:-1000000}"
+    local balance="${PORTFOLIO_SEED_BALANCE:-10000000000}"
     local sql="INSERT INTO emporia_portfolio.portfolio_state (client_id, first_transaction_id)
 VALUES ($client_id, 1) ON CONFLICT (client_id) DO NOTHING;
 INSERT INTO emporia_portfolio.portfolio_balance (client_id, asset_id, available_balance)
-VALUES ($client_id, 840, $balance) ON CONFLICT (client_id, asset_id) DO NOTHING;"
+VALUES ($client_id, 840, $balance) ON CONFLICT (client_id, asset_id) DO UPDATE SET available_balance = EXCLUDED.available_balance;"
 
     if ! command -v psql >/dev/null 2>&1; then
         echo "    psql not found -- run this manually to seed the portfolio balance for '$username' (client $client_id):" >&2

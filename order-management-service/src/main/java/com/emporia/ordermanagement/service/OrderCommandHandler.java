@@ -7,11 +7,8 @@ import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.events.risk.OrderRiskChecks;
-import com.emporia.events.KafkaRoutingKeys;
-import com.emporia.events.sbe.SbeEncoderDecoder;
 import com.emporia.ordermanagement.dto.ProcessingOutcome;
 import com.emporia.ordermanagement.model.OrderEvent;
-import com.emporia.ordermanagement.model.OrderOutboxRecord;
 import com.emporia.ordermanagement.model.ProcessedCommand;
 import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.OrderEventRepository;
@@ -19,7 +16,6 @@ import com.emporia.ordermanagement.repository.ProcessedCommandRepository;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.ObjectMapper;
@@ -42,21 +38,26 @@ public class OrderCommandHandler {
     private final OrderMetrics metrics;
     private final OrderStateCache cache;
     private final AsyncDbWriter asyncDbWriter;
-    private final String ordersTopic;
-    private final String resultsTopic;
+    private final com.emporia.execution.ShardedOrderDispatcher shardedOrderDispatcher;
 
     public OrderCommandHandler(TradingOrderRepository orders, OrderEventRepository events,
                         ProcessedCommandRepository processed, ObjectMapper objectMapper,
                         ObservationRegistry observations, OrderMetrics metrics, OrderStateCache cache,
+                        AsyncDbWriter asyncDbWriter) {
+        this(orders, events, processed, objectMapper, observations, metrics, cache, asyncDbWriter, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public OrderCommandHandler(TradingOrderRepository orders, OrderEventRepository events,
+                        ProcessedCommandRepository processed, ObjectMapper objectMapper,
+                        ObservationRegistry observations, OrderMetrics metrics, OrderStateCache cache,
                         AsyncDbWriter asyncDbWriter,
-                        @Value("${emporia.kafka.orders-topic:emporia.orders.v1}") String ordersTopic,
-                        @Value("${emporia.kafka.results-topic:emporia.order.results.v1}") String resultsTopic) {
+                        com.emporia.execution.ShardedOrderDispatcher shardedOrderDispatcher) {
         this.orders = orders; this.events = events;
         this.objectMapper = objectMapper;
         this.observations = observations; this.metrics = metrics; this.cache = cache;
         this.asyncDbWriter = asyncDbWriter;
-        this.ordersTopic = ordersTopic;
-        this.resultsTopic = resultsTopic;
+        this.shardedOrderDispatcher = shardedOrderDispatcher;
     }
 
     /**
@@ -111,20 +112,21 @@ public class OrderCommandHandler {
     }
 
     /**
-     * Decides what this command makes eligible for Kafka, in the same place and
-     * at the same time as the rows that make it durable, so a crash before the
-     * outbox is flushed - including one during WAL replay, which calls
-     * {@code handle} directly - cannot leave a durable order nobody was told
-     * about. Only on success: a rejection never reaches Kafka today either.
+     * Hands each domain event this command produced to the in-process
+     * dispatcher, in the same place and at the same time as the rows that
+     * make the command durable, so a crash before the WAL flush - including
+     * one during replay, which calls {@code handle} directly - cannot leave a
+     * durable order nobody was told about. Only on success: a rejection never
+     * reaches execution today either.
      */
+    @SuppressWarnings("PMD.UnusedFormalParameter")
     private void enqueueOutbox(OrderCommand command, ProcessingOutcome outcome) {
         if (!outcome.result().success()) return;
         for (OrderDomainEvent event : outcome.events()) {
-            asyncDbWriter.enqueue(new OrderOutboxRecord(ordersTopic, KafkaRoutingKeys.orderEvent(event),
-                    OrderOutboxRecord.PayloadType.ORDER_EVENT, SbeEncoderDecoder.encodeOrderDomainEvent(event)));
+            if (shardedOrderDispatcher != null) {
+                shardedOrderDispatcher.dispatch(event);
+            }
         }
-        asyncDbWriter.enqueue(new OrderOutboxRecord(resultsTopic, KafkaRoutingKeys.orderResult(command),
-                OrderOutboxRecord.PayloadType.ORDER_RESULT, SbeEncoderDecoder.encodeOrderCommandResult(outcome.result())));
     }
 
     private ProcessingOutcome create(OrderCommand command) {

@@ -1,9 +1,8 @@
 #!/bin/bash
 # Run mode 1 (Local), automated: every Spring service in the host JVM
-# against a single local non-Docker PostgreSQL instance, plus a Dockerized
-# Kafka broker. Mirrors the "Start locally" walkthrough in README.md but
-# launches each service in the background so one command brings up the
-# whole stack.
+# against a single local non-Docker PostgreSQL instance. Mirrors the "Start
+# locally" walkthrough in README.md but launches each service in the
+# background so one command brings up the whole stack.
 #
 # Prerequisite: the non-Docker local PostgreSQL described in README.md
 # (database `emporia`, password `admin123`) must already be running on
@@ -11,10 +10,11 @@
 # role Homebrew's postgresql formula creates by default (not "postgres");
 # export DB_USERNAME to override if your local Postgres uses a different role.
 #
-# execution-service defaults to EXECUTION_VENUE_MODE=exchange-core; export a
-# different value before running this script to override. market-data-service
-# defaults to MARKET_DATA_PROVIDER=simulated; export MARKET_DATA_PROVIDER=alpaca-iex
-# plus APCA_API_KEY_ID/APCA_API_SECRET_KEY to use live Alpaca IEX data instead.
+# order-management-service (execution routing merged in) defaults to
+# EXECUTION_VENUE_MODE=exchange-core; export a different value before running
+# this script to override. market-data-service defaults to
+# MARKET_DATA_PROVIDER=simulated; export MARKET_DATA_PROVIDER=alpaca-iex plus
+# APCA_API_KEY_ID/APCA_API_SECRET_KEY to use live Alpaca IEX data instead.
 #
 # Stop everything this script started with scripts/stop-services.sh.
 set -e
@@ -35,11 +35,6 @@ BOOTSTRAP_ADMIN_USERNAME="${BOOTSTRAP_ADMIN_USERNAME:-admin}"
 BOOTSTRAP_ADMIN_PASSWORD="${BOOTSTRAP_ADMIN_PASSWORD:-admin123}"
 DB_USERNAME="${DB_USERNAME:-$(whoami)}"
 DB_PASSWORD="${DB_PASSWORD:-admin123}"
-
-echo "==> Starting Kafka and Kafka Connect (Docker)"
-docker compose up -d kafka kafka-connect kafka-connect-exporter
-wait_docker_healthy kafka docker-compose.yml
-wait_docker_healthy kafka-connect docker-compose.yml
 
 # Observability stack (REWORK_NOTE Phase 1_1). Not health-waited: services
 # export OTLP best-effort and start fine if the collector lags.
@@ -74,32 +69,16 @@ wait_http_health authentication http://localhost:9000/actuator/health
 DB_USERNAME="$DB_USERNAME" DB_PASSWORD="$DB_PASSWORD" start_service static-data-service static-data-service mvn spring-boot:run
 DB_USERNAME="$DB_USERNAME" DB_PASSWORD="$DB_PASSWORD" start_service user-preferences-service user-preferences-service mvn spring-boot:run
 start_service market-data-service market-data-service mvn spring-boot:run
-DB_USERNAME="$DB_USERNAME" DB_PASSWORD="$DB_PASSWORD" start_service order-management-service order-management-service mvn spring-boot:run
+DB_USERNAME="$DB_USERNAME" DB_PASSWORD="$DB_PASSWORD" \
+EXECUTION_VENUE_MODE=${EXECUTION_VENUE_MODE:-exchange-core} \
+EXCHANGE_CORE_ACCOUNTING_MODE=${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk} \
+EXCHANGE_CORE_PORTFOLIO_URL=${EXCHANGE_CORE_PORTFOLIO_URL:-http://localhost:8088} \
+JAVA_TOOL_OPTIONS="-XX:+UseZGC -XX:+AlwaysPreTouch -XX:MaxDirectMemorySize=1024m --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED --add-exports=java.base/jdk.internal.ref=ALL-UNNAMED --add-exports=java.base/jdk.internal.util=ALL-UNNAMED --add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-exports=jdk.unsupported/sun.misc=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.locks=ALL-UNNAMED" \
+start_service order-management-service order-management-service mvn spring-boot:run
 DB_USERNAME="$DB_USERNAME" DB_PASSWORD="$DB_PASSWORD" start_service portfolio-service portfolio-service mvn spring-boot:run
 
 wait_http_health portfolio-service http://localhost:8088/actuator/health
 PGPASSWORD="$DB_PASSWORD" provision_portfolio_client "$BOOTSTRAP_ADMIN_USERNAME" psql -h localhost -p 5432 -U "$DB_USERNAME" -d emporia
-
-# execution-service rebuilds its venue lifecycle projection from
-# order-management before it opens for trading, and fails closed when it cannot
-# reach it, so it has to start after order-management is serving.
-wait_http_health order-management-service http://localhost:8086/actuator/health
-
-echo "==> Registering the order_outbox CDC connector"
-CONNECT_URL="${KAFKA_CONNECT_URL:-http://localhost:18083}" \
-DB_HOST="${DEBEZIUM_DB_HOST:-host.docker.internal}" \
-DB_PORT="${DB_PORT:-5432}" \
-DB_NAME="${DB_NAME:-emporia}" \
-DB_USERNAME="$DB_USERNAME" \
-DB_PASSWORD="$DB_PASSWORD" \
-"$repo_root/scripts/register-outbox-connector.sh"
-
-DB_USERNAME="$DB_USERNAME" \
-DB_PASSWORD="$DB_PASSWORD" \
-EXECUTION_VENUE_MODE=${EXECUTION_VENUE_MODE:-exchange-core} \
-EXCHANGE_CORE_ACCOUNTING_MODE=${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk} \
-EXCHANGE_CORE_PORTFOLIO_URL=${EXCHANGE_CORE_PORTFOLIO_URL:-http://localhost:8088} \
-start_service execution-service execution-service mvn spring-boot:run
 
 SERVER_PORT=8082 \
 EMPORIA_AUTH_ISSUER=http://localhost:3001 \
@@ -109,7 +88,6 @@ wait_http_health static-data-service http://localhost:8081/actuator/health
 wait_http_health user-preferences-service http://localhost:8083/actuator/health
 wait_http_health market-data-service http://localhost:8084/actuator/health
 wait_http_health order-management-service http://localhost:8086/actuator/health
-wait_http_health execution-service http://localhost:8087/actuator/health
 wait_http_health gateway http://localhost:8082/actuator/health
 
 [ -d frontend/node_modules ] || (cd frontend && npm install)

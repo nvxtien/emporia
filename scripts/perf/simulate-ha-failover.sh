@@ -20,9 +20,12 @@ echo "   Gateway URL: $ORIGIN"
 echo "   HA Lock Providers: Local FileLock / Redis Redlock / K8s Lease API"
 echo
 
-# Step 1: Run emporia-ha-core & execution-service Unit & Integration Tests
+# Step 1: Run emporia-ha-core & order-management-service (execution routing,
+# in-process) Unit & Integration Tests
 echo "==> Step 1: Running HA Leadership & Warm-Standby Unit Tests..."
-if mvn -pl emporia-ha-core,execution-service test -Dtest=LeaderElectionServiceTest,HotStandbyJournalReplayerTest; then
+if mvn -pl emporia-ha-core,order-management-service -am \
+        -Dtest=LeaderElectionServiceTest,HotStandbyJournalReplayerTest \
+        -Dsurefire.failIfNoSpecifiedTests=false test; then
     echo "✅ HA Core Unit Tests Passed (100% SUCCESS)."
 else
     echo "❌ HA Unit Tests Failed!" >&2
@@ -45,10 +48,10 @@ if curl -fsS "$ORIGIN/actuator/health" >/dev/null 2>&1; then
         PROBE_RATES="30" PROBE_STEP="10s" EXCHANGE_CORE_JOURNALING=true "$script_dir/order-path-capacity.sh" || true
 
         echo "==> Simulating Primary Node Abrupt Failure (kill -9)"
-        exec_pid="$(pgrep -f "execution-service" || true)"
-        if [ -n "$exec_pid" ]; then
-            echo "    Found execution-service PID(s): $exec_pid. Sending SIGKILL (-9)..."
-            kill -9 $exec_pid || true
+        oms_pid="$(pgrep -f "com.emporia.ordermanagement.OrderManagementServiceApplication" || true)"
+        if [ -n "$oms_pid" ]; then
+            echo "    Found order-management-service PID(s): $oms_pid. Sending SIGKILL (-9)..."
+            kill -9 $oms_pid || true
             echo "    Primary process killed successfully."
         fi
 

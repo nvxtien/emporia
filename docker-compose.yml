@@ -51,9 +51,6 @@ services:
   order-management-postgres:
     image: postgres:16-alpine
     container_name: emporia-order-management-postgres
-    # logical replication for Debezium to CDC-drain order_outbox - see
-    # deploy/debezium/order-outbox-connector.json.
-    command: postgres -c wal_level=logical -c max_replication_slots=4 -c max_wal_senders=4
     environment:
       <<: *postgres-env
       POSTGRES_DB: emporia_order_management
@@ -90,84 +87,6 @@ services:
     healthcheck:
       <<: *postgres-healthcheck
 
-  kafka:
-    image: apache/kafka:4.3.1
-    container_name: emporia-kafka
-    ports:
-      - "9092:9094"
-    environment:
-      KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-    volumes:
-      - emporia-kafka-data:/var/lib/kafka/data
-    healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list >/dev/null 2>&1"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-      start_period: 10s
-
-  # CDC-drains order_outbox (see deploy/debezium/order-outbox-connector.json)
-  # instead of order-management-service polling and writing a status column
-  # back itself - ties "produce to Kafka" and "advance my own read position"
-  # into one Kafka-internal transaction via exactly-once source support, so a
-  # crash between them aborts the whole thing rather than resending.
-  kafka-connect:
-    image: debezium/connect:3.0.0.Final
-    container_name: emporia-kafka-connect
-    depends_on:
-      kafka:
-        condition: service_healthy
-    ports:
-      # 8083 is user-preferences-service in host-JVM run modes.
-      - "18083:8083"
-    environment:
-      BOOTSTRAP_SERVERS: kafka:9092
-      GROUP_ID: emporia-outbox-connect
-      CONFIG_STORAGE_TOPIC: connect-configs
-      OFFSET_STORAGE_TOPIC: connect-offsets
-      STATUS_STORAGE_TOPIC: connect-status
-      CONFIG_STORAGE_REPLICATION_FACTOR: 1
-      OFFSET_STORAGE_REPLICATION_FACTOR: 1
-      STATUS_STORAGE_REPLICATION_FACTOR: 1
-      CONNECT_EXACTLY_ONCE_SOURCE_SUPPORT: enabled
-    extra_hosts:
-      # Lets the local-mode connector reach the host PostgreSQL on Linux.
-      # Docker Desktop also provides this name on macOS.
-      - "host.docker.internal:host-gateway"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/connectors"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-      start_period: 10s
-
-  # kafka-connect exposes connector/task state only via its REST API (no
-  # built-in Prometheus endpoint, JMX needs a javaagent jar this repo doesn't
-  # carry) - this polls that REST API so a FAILED order-outbox-connector task
-  # actually surfaces as a metric/alert instead of only being visible to
-  # someone who thinks to curl it.
-  kafka-connect-exporter:
-    image: python:3.12-slim
-    container_name: emporia-kafka-connect-exporter
-    command: ["python3", "/exporter/kafka-connect-status-exporter.py"]
-    volumes:
-      - ./deploy/otel/kafka-connect-status-exporter.py:/exporter/kafka-connect-status-exporter.py:ro
-    ports:
-      - "9405:9405"
-    depends_on:
-      kafka-connect:
-        condition: service_healthy
-
   # --- Observability (REWORK_NOTE Phase 1_1) -------------------------------
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.116.1
@@ -191,22 +110,6 @@ services:
       - emporia-tempo-data:/var/tempo
     ports:
       - "3200:3200"
-
-  # Broker-side consumer group lag (REWORK_NOTE Phase 1_2). Required because
-  # application-side Kafka metrics disappear exactly when a consumer is down,
-  # which is when lag matters most. This also supplies the consumer group
-  # dimension, which the client metrics do not expose at all.
-  kafka-exporter:
-    image: danielqsj/kafka-exporter:v1.8.0
-    container_name: emporia-kafka-exporter
-    command:
-      - --kafka.server=kafka:9092
-      - --web.listen-address=:9308
-    ports:
-      - "9308:9308"
-    depends_on:
-      kafka:
-        condition: service_healthy
 
   prometheus:
     image: prom/prometheus:v3.1.0
@@ -257,7 +160,6 @@ volumes:
   emporia-order-management-postgres-data:
   emporia-execution-postgres-data:
   emporia-portfolio-postgres-data:
-  emporia-kafka-data:
   emporia-tempo-data:
   emporia-prometheus-data:
   emporia-grafana-data:

@@ -9,57 +9,51 @@ Emporia supports three execution destinations:
 | `VWAP` | Releases scheduled quantities and sends each release to the current best venue | One strategy parent and scheduled DMA children |
 
 All three destinations use the same authenticated order API, durable order
-projection, Kafka event flow, cancellation semantics, and execution accounting.
+projection, in-process execution routing, cancellation semantics, and
+execution accounting.
 
 ## End-to-end flow
 
 ```mermaid
 flowchart LR
     Browser["React order ticket"]
-    Management["Order management (Disruptor)"]
-    OrderTopic[["emporia.orders.v1"]]
-    Execution["Execution service"]
-    Venue["Simulated or FIX venue"]
-    ExecutionTopic[["emporia.execution.commands.v1"]]
-    CommandTopic[["emporia.order.commands.v1"]]
-    Database[("PostgreSQL order projection")]
+    Management["order-management-service\n(Disruptor intake + execution routing, in-process)"]
+    Venue["Simulated, FIX, or exchange-core venue"]
+    Database[("PostgreSQL: emporia_order_data + emporia_execution")]
 
     Browser -->|"POST /api/orders"| Management
     Management --> Database
-    Management -->|async| OrderTopic
-    OrderTopic --> Execution
-    Execution -->|"DMA submit / modify / cancel"| Venue
-    Execution -->|"SMART or VWAP DMA child"| CommandTopic
-    CommandTopic --> Management
-    Venue -->|"fill / reject / cancel acknowledgement"| Execution
-    Execution --> ExecutionTopic
-    ExecutionTopic --> Management
+    Management -->|"DMA submit / modify / cancel"| Venue
+    Venue -->|"fill / reject / cancel acknowledgement"| Management
 ```
 
 Gateway order mutations land on `order-management-service`, which validates the
 authenticated trader, resolves an immutable listing snapshot, and applies the
-command on the Disruptor hot path before returning. Domain events are published
-asynchronously to `emporia.orders.v1`. The execution service then dispatches DMA
+command on the Disruptor hot path before returning. Order domain events are
+dispatched directly, in-process, to execution routing (`ShardedOrderDispatcher`
+→ `ExecutionEventConsumer`) within the same JVM, which then dispatches DMA
 orders or starts a SMART/VWAP strategy.
 
-Venue outcomes return as `FILL`, `REJECT`, or `CANCEL` commands. Order management
-applies each outcome transactionally and records the resulting order event and
+Venue outcomes return as `FILL`, `REJECT`, or `CANCEL` commands, applied
+directly in-memory via `ExecutionCommandHandler`. Order management applies
+each outcome transactionally and records the resulting order event and
 execution.
 
 ## Boundary contract (Phase 1)
 
-This service follows a strict orchestration boundary so low-latency work can be
-split from control and I/O paths safely.
+This service follows a strict internal orchestration boundary so low-latency
+work stays separated from control and I/O paths, even though order intake,
+execution orchestration, and state authority all now run in the same JVM.
 
 1. Ingress (`order-management-service` gateway hot path)
 - Validates auth, request shape, and listing snapshot.
 - Applies versioned `OrderCommand` handling on the Disruptor pipeline.
-- Publishes domain events asynchronously; does not wait on Kafka for the HTTP response.
-- Optional alternate ingress: `order-command-service` still publishes to `emporia.order.commands.v1` for direct/Kafka callers.
+- Dispatches domain events directly, in-process, to execution routing; does
+  not block the HTTP response on it.
 
-2. Execution orchestration (`execution-service`)
+2. Execution orchestration (`ExecutionEventConsumer`, in-process)
 - Consumes `OrderDomainEvent` and decides DMA, SMART, or VWAP actions.
-- May call venue adapters and publish `ExecutionCommand` events.
+- May call venue adapters and dispatch `ExecutionCommand`s directly.
 - Does not persist or directly mutate order status.
 
 3. State authority (`order-management-service`)
@@ -328,18 +322,20 @@ SMART and VWAP children:
 
 ### Partitioning and ordering contract
 
-- Strategy child `CREATE` commands are published with the parent order id as
-  Kafka key.
-- This keeps all children of one strategy parent on the same command-topic
-  partition and preserves parent-local ordering under consumer concurrency.
+- Strategy child `CREATE` commands, and the resulting order-domain events and
+  execution commands, all carry the parent (or target) order id.
+- `ShardedOrderDispatcher` hashes that id to pick one of its shard worker
+  threads (default 8, `emporia.execution.dispatcher.shards`), so every event
+  for one order - and every child of one strategy parent - is processed
+  strictly in order on the same shard, without a cross-thread race.
 - Resulting order-domain events and execution commands remain keyed by the
   target order id, so order-level sequencing stays stable end to end.
 
 A child fill is written to the child and rolled up through every parent ancestor
 inside one database transaction. Each execution reference is unique, and
-deterministic roll-up references prevent a retried Kafka record from counting
-the same fill twice. Parent traded quantity and weighted-average price therefore
-remain consistent with their children.
+deterministic roll-up references prevent a retried execution command from
+counting the same fill twice. Parent traded quantity and weighted-average price
+therefore remain consistent with their children.
 
 ## Cancellation
 
@@ -398,7 +394,7 @@ files older than the latest manifest checkpoint can be removed during pruning,
 but files newer than the manifest are left in place for manual inspection.
 Journals, manifest temp files, and unrelated files are never pruned
 automatically. Manual storage cleanup must be done only while
-`execution-service` is stopped.
+`order-management-service` is stopped.
 
 For production operations, use the
 [exchange-core production runbook](EXCHANGE_CORE_PRODUCTION_RUNBOOK.md).
@@ -410,13 +406,10 @@ seconds.
 
 | Environment variable | Default | Purpose |
 |---|---|---|
-| `SERVER_PORT` | `8087` | Execution actuator port |
-| `KAFKA_BROKERS` | `localhost:9092` | Kafka bootstrap servers |
 | `EMPORIA_STATIC_DATA_URL` | `http://localhost:8081` | Same-instrument listing lookup |
 | `EMPORIA_MARKET_DATA_URL` | `http://localhost:8084` | Venue depth lookup |
-| `EMPORIA_ORDER_MANAGEMENT_URL` | `http://localhost:8086` | Strategy state and recovery |
+| `EMPORIA_ORDER_MANAGEMENT_URL` | `http://localhost:8086` | Strategy state and recovery (self, over HTTP) |
 | `EXECUTION_VENUE_MODE` | `simulated` | `simulated`, `fix`, or `exchange-core` |
-| `EXECUTION_ORDERS_CONSUMER_CONCURRENCY` | `6` | Kafka listener concurrency for `emporia.orders.v1`; defaults to the topic partition count |
 | `EXECUTION_FILL_DELAY` | `100ms` | Simulated fill delay |
 | `FIX_EXECUTION_VENUES` | empty | FIX session definitions by MIC |
 | `EXCHANGE_CORE_EXCHANGE_ID` | `emporia-simulation` | Exchange-core snapshot namespace |
@@ -432,17 +425,18 @@ Spring profile, startup fails fast unless `EXCHANGE_CORE_STORAGE_DIRECTORY`
 points outside `.local-run` and `EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES` is
 greater than `0`.
 
-The execution service uses the `emporia-execution` OAuth client for internal
-static-data, market-data, and order-management requests.
+Execution routing uses the `emporia-execution` OAuth client for internal
+static-data, market-data, and order-management (self) requests.
 
 ## Observability and verification
 
 Execution publishes Micrometer counters for routed orders, routing rejects, and
-fills. Health and Prometheus endpoints are available on port `8087`:
+fills. Health and Prometheus endpoints are available on
+`order-management-service`'s port `8086`:
 
 ```bash
-curl http://localhost:8087/actuator/health
-curl http://localhost:8087/actuator/prometheus
+curl http://localhost:8086/actuator/health
+curl http://localhost:8086/actuator/prometheus
 ```
 
 In `exchange-core` mode, readiness also surfaces checkpoint persistence state.
@@ -455,10 +449,10 @@ files, stored bytes, usable storage bytes, and configured retention. Alert on an
 checkpoint failure, a stale checkpoint age for the configured snapshot interval,
 low usable storage, or a non-zero partial checkpoint file count.
 
-Run the focused service tests:
+Run the focused execution tests:
 
 ```bash
-mvn -f emporia/pom.xml -pl execution-service -am test
+mvn -f emporia/pom.xml -pl order-management-service -am -Dtest='com.emporia.execution.**' -Dsurefire.failIfNoSpecifiedTests=false test
 ```
 
 The suite covers best-price selection, limit protection, multi-venue depth
@@ -466,7 +460,7 @@ walking, quantity conservation, VWAP cumulative targets, child creation,
 cancellation acknowledgment, and restart recovery.
 
 With the complete application running, exercise all three destinations through
-the authenticated HTTP and Kafka flow:
+the authenticated HTTP flow:
 
 ```bash
 EMPORIA_ORIGIN=http://localhost:3001 \
@@ -496,16 +490,18 @@ node emporia/scripts/oidc-smoke-test.mjs
 ## Implementation map
 
 - Strategy orchestration:
-  [`ExecutionEventConsumer.java`](../../execution-service/src/main/java/com/emporia/execution/ExecutionEventConsumer.java)
+  [`ExecutionEventConsumer.java`](../../order-management-service/src/main/java/com/emporia/execution/ExecutionEventConsumer.java)
+- Sharded in-process dispatch (replaces the old Kafka hop):
+  [`ShardedOrderDispatcher.java`](../../order-management-service/src/main/java/com/emporia/execution/ShardedOrderDispatcher.java)
 - SMART price and depth selection:
-  [`BestVenueSelector.java`](../../execution-service/src/main/java/com/emporia/execution/BestVenueSelector.java)
+  [`BestVenueSelector.java`](../../emporia-algorithmic-strategies/src/main/java/com/emporia/strategy/sor/BestVenueSelector.java)
 - VWAP schedule:
-  [`VwapSchedule.java`](../../execution-service/src/main/java/com/emporia/execution/VwapSchedule.java)
+  [`VwapSchedule.java`](../../emporia-algorithmic-strategies/src/main/java/com/emporia/strategy/vwap/VwapSchedule.java)
 - Venue abstraction:
-  [`ExecutionVenueGateway.java`](../../execution-service/src/main/java/com/emporia/execution/ExecutionVenueGateway.java)
+  [`ExecutionVenueGateway.java`](../../order-management-service/src/main/java/com/emporia/execution/ExecutionVenueGateway.java)
 - Simulated venue:
-  [`SimulatedExecutionVenueGateway.java`](../../execution-service/src/main/java/com/emporia/execution/SimulatedExecutionVenueGateway.java)
+  [`SimulatedExecutionVenueGateway.java`](../../order-management-service/src/main/java/com/emporia/execution/SimulatedExecutionVenueGateway.java)
 - FIX venue:
-  [`FixExecutionVenueGateway.java`](../../execution-service/src/main/java/com/emporia/execution/FixExecutionVenueGateway.java)
+  [`FixExecutionVenueGateway.java`](../../order-management-service/src/main/java/com/emporia/execution/FixExecutionVenueGateway.java)
 - Transactional fill roll-up:
   [`ExecutionCommandHandler.java`](../../order-management-service/src/main/java/com/emporia/ordermanagement/service/ExecutionCommandHandler.java)

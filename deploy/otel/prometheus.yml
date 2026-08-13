@@ -1,6 +1,6 @@
-# Prometheus — scrapes the Emporia services' /actuator/prometheus endpoints
-# and the Kafka exporter. Phase 1_1 keeps the actuator endpoints during the
-# transition rather than moving metrics onto OTLP.
+# Prometheus — scrapes the Emporia services' /actuator/prometheus endpoints.
+# Phase 1_1 keeps the actuator endpoints during the transition rather than
+# moving metrics onto OTLP.
 global:
   scrape_interval: 10s
   evaluation_interval: 10s
@@ -9,21 +9,7 @@ rule_files:
   - /etc/prometheus/alerts/*.yml
 
 scrape_configs:
-  # Broker-side consumer group lag. This is the source of truth for lag
-  # dashboards: it keeps reporting when a consumer process is down, and it
-  # carries the consumergroup label that Kafka client metrics do not expose.
-  - job_name: kafka-exporter
-    static_configs:
-      - targets: ['kafka-exporter:9308']
-
-  # order-outbox Debezium connector's own RUNNING/FAILED state - see
-  # deploy/otel/kafka-connect-status-exporter.py. Docker-only service, so one
-  # target regardless of host-JVM vs full-Docker service deployment mode.
-  - job_name: kafka-connect-exporter
-    static_configs:
-      - targets: ['kafka-connect-exporter:9405']
-
-  # Each target carries an explicit `service` label. Kafka client metrics
+  # Each target carries an explicit `service` label. Client metrics
   # identify a consumer only by client_id, so without this there is no way to
   # group application-side panels by service.
   #
@@ -33,8 +19,6 @@ scrape_configs:
     static_configs:
       - targets: ['order-management-service:8086']
         labels: { service: order-management-service, deployment: docker }
-      - targets: ['execution-service:8087']
-        labels: { service: execution-service, deployment: docker }
       - targets: ['portfolio-service:8088']
         labels: { service: portfolio-service, deployment: docker }
       - targets: ['market-data-service:8084']
@@ -49,8 +33,6 @@ scrape_configs:
     static_configs:
       - targets: ['host.docker.internal:8086']
         labels: { service: order-management-service, deployment: host }
-      - targets: ['host.docker.internal:8087']
-        labels: { service: execution-service, deployment: host }
       - targets: ['host.docker.internal:8088']
         labels: { service: portfolio-service, deployment: host }
       - targets: ['host.docker.internal:8084']

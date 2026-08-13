@@ -3,12 +3,13 @@ package com.emporia.ordermanagement.service;
 import com.emporia.events.TradingEvents.ExecutionCommand;
 import com.emporia.events.TradingEvents.ExecutionCommandType;
 import com.emporia.events.TradingEvents.ListingSnapshot;
+import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderType;
+import com.emporia.execution.ShardedOrderDispatcher;
 import com.emporia.ordermanagement.model.Execution;
 import com.emporia.ordermanagement.model.OrderEvent;
-import com.emporia.ordermanagement.model.OrderOutboxRecord;
 import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.ExecutionRepository;
 import com.emporia.ordermanagement.repository.OrderEventRepository;
@@ -43,9 +44,9 @@ class ExecutionCommandHandlerTest {
     private final OrderMetrics metrics = new OrderMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
     private final OrderStateCache cache = new OrderStateCache(orders, processed, 1000, 1000);
     private final AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
+    private final ShardedOrderDispatcher dispatcher = mock(ShardedOrderDispatcher.class);
     private final ExecutionCommandHandler handler =
-            new ExecutionCommandHandler(orders, executions, new ObjectMapper(), metrics, cache, asyncDbWriter,
-                    "orders-topic");
+            new ExecutionCommandHandler(orders, executions, new ObjectMapper(), metrics, cache, asyncDbWriter, dispatcher);
 
     @Test
     void recordsAPartialFillAndPublishesTheNewOrderState() {
@@ -71,7 +72,7 @@ class ExecutionCommandHandlerTest {
         assertThat(persisted.getValue().getExecutionReference()).isEqualTo("venue-fill-1");
         assertThat(persisted.getValue().getVenue()).isEqualTo("XNAS");
         verify(asyncDbWriter).enqueue(order);
-        verify(asyncDbWriter, times(1)).enqueue(any(OrderOutboxRecord.class));
+        verify(dispatcher, times(1)).dispatch(any(OrderDomainEvent.class));
     }
 
     @Test
@@ -89,7 +90,7 @@ class ExecutionCommandHandlerTest {
         assertThat(order.getErrorMessage()).isEqualTo("Venue is closed");
         assertThat(event.eventType()).isEqualTo("REJECTED");
         verify(executions, never()).save(any());
-        verify(asyncDbWriter, times(1)).enqueue(any(OrderOutboxRecord.class));
+        verify(dispatcher, times(1)).dispatch(any(OrderDomainEvent.class));
     }
 
     @Test
@@ -117,7 +118,7 @@ class ExecutionCommandHandlerTest {
         assertThat(order.getTradedQuantity()).isEqualByComparingTo("1");
         verify(asyncDbWriter).enqueue(order);
         // The duplicate reference produced no event and no outbox row; only the late fill did.
-        verify(asyncDbWriter, times(1)).enqueue(any(OrderOutboxRecord.class));
+        verify(dispatcher, times(1)).dispatch(any(OrderDomainEvent.class));
     }
 
     @Test
@@ -155,7 +156,7 @@ class ExecutionCommandHandlerTest {
         verify(executions, org.mockito.Mockito.times(2)).save(persisted.capture());
         assertThat(persisted.getAllValues()).extracting(Execution::getOrder)
                 .containsExactly(child, parent);
-        verify(asyncDbWriter, times(2)).enqueue(any(OrderOutboxRecord.class));
+        verify(dispatcher, times(2)).dispatch(any(OrderDomainEvent.class));
     }
 
     @Test
@@ -179,7 +180,7 @@ class ExecutionCommandHandlerTest {
         assertThat(order.getTradedQuantity()).isEqualByComparingTo("4");
         assertThat(order.getRemainingQuantity()).isEqualByComparingTo("6");
         // One outbox row for the partial fill, one for the cancel confirmation.
-        verify(asyncDbWriter, times(2)).enqueue(any(OrderOutboxRecord.class));
+        verify(dispatcher, times(2)).dispatch(any(OrderDomainEvent.class));
     }
 
     @Test
@@ -214,7 +215,7 @@ class ExecutionCommandHandlerTest {
         var cancelResult = handler.handle(command(order, ExecutionCommandType.CANCEL, "cnl-term", null, null, "venue cancel"));
         assertThat(cancelResult).isEmpty();
 
-        verify(asyncDbWriter, never()).enqueue(any(OrderOutboxRecord.class));
+        verify(dispatcher, never()).dispatch(any(OrderDomainEvent.class));
     }
 
     @Test
@@ -235,7 +236,7 @@ class ExecutionCommandHandlerTest {
         var result = handler.handle(command(parent, ExecutionCommandType.CANCEL, "strategy-cancel-1", null, null, null));
         assertThat(result).isEmpty();
         assertThat(parent.getStatus()).isEqualTo(OrderStatus.LIVE);
-        verify(asyncDbWriter, never()).enqueue(any(OrderOutboxRecord.class));
+        verify(dispatcher, never()).dispatch(any(OrderDomainEvent.class));
     }
 
     private static TradingOrder order() {

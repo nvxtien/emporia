@@ -1,7 +1,7 @@
 #!/bin/bash
 # Stops everything any run/deploy script might have started, regardless of
 # which mode you used: host-JVM/npm processes from scripts/run-local.sh or
-# scripts/run-infra-docker.sh, the Kafka and/or per-service PostgreSQL
+# scripts/run-infra-docker.sh, the per-service PostgreSQL
 # containers from docker-compose.yml (Mode 1/2), and the full-stack
 # containers from docker-compose.full.yml (Full Docker /
 # scripts/local-deploy.sh). `docker compose down` is a no-op for containers
@@ -29,7 +29,7 @@ else
     echo "No host-JVM/npm services to stop (no $pid_dir pid files)."
 fi
 
-echo "==> Stopping Kafka and per-service PostgreSQL containers (Mode 1/2)"
+echo "==> Stopping per-service PostgreSQL containers (Mode 1/2)"
 docker compose down
 
 echo "==> Stopping full-stack Docker containers (Full Docker)"

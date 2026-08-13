@@ -5,16 +5,11 @@ execution records, and command-idempotency results.
 
 ## Responsibility and integration
 
-The service runs on port `8086`. It consumes `CREATE`, `MODIFY`, `CANCEL`, and
-`CANCEL_ALL` commands from `emporia.order.commands.v1`, applies the order
-lifecycle rules in a database transaction, and publishes:
-
-- correlated results to `emporia.order.results.v1`;
-- immutable state events to `emporia.orders.v1`.
-
-Browser mutations do not call this service directly. They enter through
-`order-command-service`, which waits for the correlated Kafka result. Read
-requests are routed directly here:
+The service runs on port `8086`. Browser mutations
+(`POST`/`PUT`/`DELETE /api/orders/**`) are handled directly here: they land on
+a single-writer LMAX Disruptor ring buffer, apply the order lifecycle rules in
+a database transaction, and the correlated result is returned to the waiting
+HTTP request. Read requests are also routed directly here:
 
 ```text
 GET /api/orders
@@ -30,23 +25,28 @@ from the former service identity so existing orders remain available.
 
 All reads and mutations are desk-scoped using the signed JWT `desk` claim.
 `GET /api/orders/stream` sends the current desk projection followed by
-continuous Kafka-backed SSE updates. Orders retain their creating user as
-`ownerSubject`, so users on one desk see shared flow without losing attribution.
+continuous SSE updates, published directly by `ShardedOrderDispatcher`'s shard
+workers as each order domain event is processed. Orders retain their creating
+user as `ownerSubject`, so users on one desk see shared flow without losing
+attribution.
 
-Execution commands from `execution-service` apply fills, venue rejects, and
-venue cancellations. Execution references are unique, fills use the same
+Execution routing (DMA, SMART, VWAP algorithmic strategies, and venue
+gateways) runs in-process inside this same service rather than as a separate
+deployable - see [Order command flow](../README.md#order-command-flow) in the
+repository root README and the
+[DMA, SMART, and VWAP execution guide](../docs/execution/README.md). Fills,
+venue rejects, and venue cancellations apply directly in-memory via
+`ExecutionCommandHandler`. Execution references are unique, fills use the same
 aggregate invariants as user commands, and each accepted transition produces an
 immutable order event. A child fill and all ancestor roll-ups are saved in one
 transaction, so a partial strategy fill is immediately visible on its parent.
 
 The authenticated internal endpoints under `/internal/execution/**` expose
-active direct orders and SMART/VWAP parent/child state to `execution-service`.
-They are the durable source for restart recovery and are not routed to browsers.
-
-The Kafka consumer group also intentionally remains `order-data-service-v1`.
-Changing it as part of a cosmetic rename would create a new consumer group and
-replay retained commands. Topic names and the public `/api/orders/**` contract
-are likewise stable.
+active direct orders and SMART/VWAP parent/child state. The execution side of
+this same service still reaches them over HTTP (via `TradingDataClient`, using
+its own OAuth2 client-credentials token) rather than an in-process call - that
+boundary predates the OMS/execution merge and has not been collapsed. They are
+the durable source for restart recovery and are not routed to browsers.
 
 ## Order invariants
 
@@ -189,5 +189,5 @@ build has no Fray startup cost.
 
 This test covers in-process Java interleavings only. PostgreSQL optimistic
 locking still decides races between separate entity instances or service
-processes; Kafka ordering, database scheduling, and network timing require
-integration tests.
+processes; `ShardedOrderDispatcher`'s per-order-ID shard ordering, database
+scheduling, and network timing require integration tests.

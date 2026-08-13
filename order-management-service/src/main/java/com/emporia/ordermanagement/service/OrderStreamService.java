@@ -40,7 +40,7 @@ public class OrderStreamService {
         return emitter;
     }
 
-    void publish(OrderDomainEvent event) {
+    public void publish(OrderDomainEvent event) {
         String deskId = event.deskId();
         if (deskId == null || deskId.isBlank()) deskId = event.userSubject();
         if (deskId == null || deskId.isBlank()) return;

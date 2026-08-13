@@ -62,8 +62,6 @@ services:
   order-management-postgres:
     image: postgres:16-alpine
     container_name: emporia-order-management-postgres
-    # logical replication for Debezium to CDC-drain order_outbox.
-    command: postgres -c wal_level=logical -c max_replication_slots=4 -c max_wal_senders=4
     environment:
       <<: *postgres-env
       POSTGRES_DB: emporia_order_management
@@ -99,70 +97,6 @@ services:
       - emporia-portfolio-postgres-data:/var/lib/postgresql/data
     healthcheck:
       <<: *postgres-healthcheck
-
-  kafka:
-    image: apache/kafka:4.3.1
-    container_name: emporia-kafka
-    ports:
-      - "9092:9094"
-    environment:
-      KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-    volumes:
-      - emporia-kafka-data:/var/lib/kafka/data
-    healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list >/dev/null 2>&1"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-      start_period: 10s
-
-  kafka-connect:
-    image: debezium/connect:3.0.0.Final
-    container_name: emporia-kafka-connect
-    depends_on:
-      kafka:
-        condition: service_healthy
-    ports:
-      # 8083 is user-preferences-service on the host.
-      - "18083:8083"
-    environment:
-      BOOTSTRAP_SERVERS: kafka:9092
-      GROUP_ID: emporia-outbox-connect
-      CONFIG_STORAGE_TOPIC: connect-configs
-      OFFSET_STORAGE_TOPIC: connect-offsets
-      STATUS_STORAGE_TOPIC: connect-status
-      CONFIG_STORAGE_REPLICATION_FACTOR: 1
-      OFFSET_STORAGE_REPLICATION_FACTOR: 1
-      STATUS_STORAGE_REPLICATION_FACTOR: 1
-      CONNECT_EXACTLY_ONCE_SOURCE_SUPPORT: enabled
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/connectors"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-      start_period: 10s
-
-  kafka-connect-exporter:
-    image: python:3.12-slim
-    container_name: emporia-kafka-connect-exporter
-    command: ["python3", "/exporter/kafka-connect-status-exporter.py"]
-    volumes:
-      - ./deploy/otel/kafka-connect-status-exporter.py:/exporter/kafka-connect-status-exporter.py:ro
-    ports:
-      - "9405:9405"
-    depends_on:
-      kafka-connect:
-        condition: service_healthy
 
   authentication:
     build:
@@ -261,19 +195,19 @@ services:
     ports:
       - "8086:8086"
     environment:
+      JAVA_OPTS: "-XX:+UseZGC -XX:+AlwaysPreTouch -XX:MaxDirectMemorySize=1024m --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED --add-exports=java.base/jdk.internal.ref=ALL-UNNAMED --add-exports=java.base/jdk.internal.util=ALL-UNNAMED --add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-exports=jdk.unsupported/sun.misc=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED"
       <<: *otel-env
       DB_URL: jdbc:postgresql://order-management-postgres:5432/emporia_order_management
+      EXECUTION_DB_URL: jdbc:postgresql://execution-postgres:5432/emporia_execution
       DB_USERNAME: postgres
       DB_PASSWORD: admin123
-      KAFKA_BROKERS: kafka:9092
-      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       EMPORIA_STATIC_DATA_URL: http://static-data-service:8081
       EMPORIA_AUTH_ISSUER: http://localhost:3000
       EMPORIA_AUTH_JWK_SET_URI: http://authentication:9000/oauth2/jwks
     depends_on:
       order-management-postgres:
         condition: service_healthy
-      kafka:
+      execution-postgres:
         condition: service_healthy
       authentication:
         condition: service_healthy
@@ -282,49 +216,6 @@ services:
     healthcheck:
       <<: *spring-healthcheck
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8086/actuator/health || exit 1"]
-
-  order-outbox-connector-registrar:
-    image: curlimages/curl:8.11.1
-    container_name: emporia-order-outbox-connector-registrar
-    entrypoint: ["/bin/sh", "/registrar/register-order-outbox-connector.sh"]
-    environment:
-      CONNECT_URL: http://kafka-connect:8083
-      CONNECTOR_CONFIG: /connector/order-outbox-connector.json
-    volumes:
-      - ./deploy/debezium/order-outbox-connector.json:/connector/order-outbox-connector.json:ro
-      - ./deploy/debezium/register-order-outbox-connector.sh:/registrar/register-order-outbox-connector.sh:ro
-    depends_on:
-      kafka-connect:
-        condition: service_healthy
-      order-management-service:
-        condition: service_healthy
-
-  execution-service:
-    build:
-      context: ./execution-service
-    container_name: emporia-execution
-    ports:
-      - "8087:8087"
-    environment:
-      # Chronicle module-access flags; without them exchange-core's matching
-      # engine throws IllegalAccessError and orders never fill (see execution-service/pom.xml).
-      JAVA_OPTS: "--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED --add-exports=java.base/jdk.internal.ref=ALL-UNNAMED --add-exports=java.base/jdk.internal.util=ALL-UNNAMED --add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-exports=jdk.unsupported/sun.misc=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED"
-      <<: *otel-env
-      DB_URL: jdbc:postgresql://execution-postgres:5432/emporia_execution
-      DB_USERNAME: postgres
-      DB_PASSWORD: admin123
-      KAFKA_BROKERS: kafka:9092
-      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-    depends_on:
-      execution-postgres:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-      order-outbox-connector-registrar:
-        condition: service_completed_successfully
-    healthcheck:
-      <<: *spring-healthcheck
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8087/actuator/health || exit 1"]
 
   portfolio-service:
     build:
@@ -376,8 +267,6 @@ services:
         condition: service_healthy
       order-management-service:
         condition: service_healthy
-      order-outbox-connector-registrar:
-        condition: service_completed_successfully
       portfolio-service:
         condition: service_healthy
     healthcheck:
@@ -417,22 +306,6 @@ services:
       - emporia-tempo-data:/var/tempo
     ports:
       - "3200:3200"
-
-  # Broker-side consumer group lag (REWORK_NOTE Phase 1_2). Required because
-  # application-side Kafka metrics disappear exactly when a consumer is down,
-  # which is when lag matters most. This also supplies the consumer group
-  # dimension, which the client metrics do not expose at all.
-  kafka-exporter:
-    image: danielqsj/kafka-exporter:v1.8.0
-    container_name: emporia-kafka-exporter
-    command:
-      - --kafka.server=kafka:9092
-      - --web.listen-address=:9308
-    ports:
-      - "9308:9308"
-    depends_on:
-      kafka:
-        condition: service_healthy
 
   prometheus:
     image: prom/prometheus:v3.1.0
@@ -479,7 +352,6 @@ volumes:
   emporia-order-management-postgres-data:
   emporia-execution-postgres-data:
   emporia-portfolio-postgres-data:
-  emporia-kafka-data:
   emporia-tempo-data:
   emporia-prometheus-data:
   emporia-grafana-data:

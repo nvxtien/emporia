@@ -18,16 +18,18 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
+log_dir="$repo_root/.local-run/logs"
+pid_dir="$repo_root/.local-run/pids"
+
+# shellcheck source=../lib/run-common.sh
+source "$repo_root/scripts/lib/run-common.sh"
 
 PG_CONTAINER="${PG_CONTAINER:-emporia-order-management-postgres}"
 PG_DB="${PG_DB:-emporia_order_management}"
 PG_USER="${PG_USER:-postgres}"
-KAFKA_CONTAINER="${KAFKA_CONTAINER:-emporia-kafka}"
-KAFKA_BOOTSTRAP="${KAFKA_BOOTSTRAP:-localhost:9092}"
-EXECUTION_GROUP="${EXECUTION_GROUP:-emporia-execution-service-v1}"
-ORDERS_TOPIC="${ORDERS_TOPIC:-emporia.orders.v1}"
-RESET_KAFKA_OFFSETS="${RESET_KAFKA_OFFSETS:-true}"
-STORAGE_DIR="${EXCHANGE_CORE_STORAGE_DIRECTORY:-$repo_root/execution-service/.local-run/exchange-core-simulation}"
+# Execution routing runs in-process inside order-management-service, so its
+# exchange-core storage lives under that service's own working directory.
+STORAGE_DIR="${EXCHANGE_CORE_STORAGE_DIRECTORY:-$repo_root/order-management-service/.local-run/exchange-core-simulation}"
 REASON="${RESET_REASON:-Force-cancelled by scripts/perf/reset-venue-state.sh before a capacity baseline}"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -39,10 +41,6 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
   Intended for local performance testing only."
 
 psql_q() { docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc "$1" 2>/dev/null; }
-kafka_consumer_groups() {
-    docker exec "$KAFKA_CONTAINER" /opt/kafka/bin/kafka-consumer-groups.sh \
-        --bootstrap-server "$KAFKA_BOOTSTRAP" "$@"
-}
 
 docker exec "$PG_CONTAINER" true >/dev/null 2>&1 \
     || fail "postgres container '${PG_CONTAINER}' is not running"
@@ -52,34 +50,23 @@ echo "==> Resetting venue state"
 echo "    working orders in order-management: ${working:-0}"
 echo "    engine storage: ${STORAGE_DIR} ($(du -sh "$STORAGE_DIR" 2>/dev/null | awk '{print $1}' || echo absent))"
 
-# Stop the venue first. Clearing storage under a running engine leaves it
+# Stop the service first. Clearing storage under a running engine leaves it
 # writing snapshots into a directory that no longer describes its state.
-pid_file="$repo_root/.local-run/pids/execution-service.pid"
+pid_file="$pid_dir/order-management-service.pid"
 restart_needed=false
 if [ -f "$pid_file" ]; then
     launcher="$(cat "$pid_file")"
     if kill -0 "$launcher" 2>/dev/null; then
-        echo "==> Stopping execution-service"
-        # The pid file records the mvn launcher; the application is its child.
-        child="$(pgrep -P "$launcher" 2>/dev/null | head -1)"
-        [ -n "$child" ] && kill -TERM "$child" 2>/dev/null || true
-        kill -TERM "$launcher" 2>/dev/null || true
-        while kill -0 "$launcher" 2>/dev/null; do sleep 1; done
+        echo "==> Stopping order-management-service"
+        stop_pid_tree "$launcher"
         restart_needed=true
     fi
+    rm -f "$pid_file"
 fi
 # Catch application JVMs orphaned from an earlier run: they hold the engine and
 # would keep writing to the directory being cleared.
-pkill -TERM -f "execution-service" 2>/dev/null || true
+pkill -TERM -f "com.emporia.ordermanagement.OrderManagementServiceApplication" 2>/dev/null || true
 sleep 3
-
-if [ "$RESET_KAFKA_OFFSETS" != "false" ]; then
-    docker exec "$KAFKA_CONTAINER" true >/dev/null 2>&1 \
-        || fail "kafka container '${KAFKA_CONTAINER}' is not running"
-    echo "==> Advancing execution consumer offsets to latest"
-    kafka_consumer_groups --group "$EXECUTION_GROUP" --topic "$ORDERS_TOPIC" \
-        --reset-offsets --to-latest --execute
-fi
 
 echo "==> Clearing exchange-core engine state"
 rm -rf "$STORAGE_DIR"
@@ -103,24 +90,19 @@ remaining="$(psql_q "select count(*) from emporia_order_data.trading_order where
 [ "${remaining:-0}" = "0" ] || fail "expected no working orders after reset, found ${remaining}"
 
 if [ "$restart_needed" = true ]; then
-    echo "==> Restarting execution-service on a clean engine"
-    ( cd "$repo_root/execution-service" && exec env \
-        DB_URL="${DB_URL:-jdbc:postgresql://localhost:5437/emporia_execution}" \
-        DB_PASSWORD="${DB_PASSWORD:-admin123}" \
-        EXECUTION_VENUE_MODE="${EXECUTION_VENUE_MODE:-exchange-core}" \
-        EXCHANGE_CORE_ACCOUNTING_MODE="${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk}" \
-        EXCHANGE_CORE_PORTFOLIO_URL="${EXCHANGE_CORE_PORTFOLIO_URL:-http://localhost:8088}" \
-        mvn spring-boot:run ) > "$repo_root/.local-run/logs/execution-service.log" 2>&1 &
-    echo "$!" > "$pid_file"
-    printf "    waiting for execution-service"
-    for _ in $(seq 1 60); do
-        curl -fsS http://localhost:8087/actuator/health >/dev/null 2>&1 && break
-        printf '.'; sleep 3
-    done
-    echo
-    curl -fsS http://localhost:8087/actuator/health >/dev/null 2>&1 \
-        && echo "    up on a clean engine" \
-        || fail "execution-service did not come back up; see .local-run/logs/execution-service.log"
+    echo "==> Restarting order-management-service on a clean engine"
+    DB_URL="${DB_URL:-jdbc:postgresql://localhost:5436/emporia_order_management}" \
+    DB_PASSWORD="${DB_PASSWORD:-admin123}" \
+    EXECUTION_DB_URL="${EXECUTION_DB_URL:-jdbc:postgresql://localhost:5437/emporia_execution}" \
+    EXECUTION_DB_USERNAME="${EXECUTION_DB_USERNAME:-postgres}" \
+    EXECUTION_DB_PASSWORD="${EXECUTION_DB_PASSWORD:-admin123}" \
+    EXECUTION_VENUE_MODE="${EXECUTION_VENUE_MODE:-exchange-core}" \
+    EXCHANGE_CORE_ACCOUNTING_MODE="${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk}" \
+    EXCHANGE_CORE_PORTFOLIO_URL="${EXCHANGE_CORE_PORTFOLIO_URL:-http://localhost:8088}" \
+        start_service order-management-service order-management-service mvn -DskipTests spring-boot:run
+    wait_http_health order-management-service http://localhost:8086/actuator/health \
+        || fail "order-management-service did not come back up; see $log_dir/order-management-service.log"
+    echo "    up on a clean engine"
 fi
 
 echo "==> Reset complete: 0 working orders, empty engine state"

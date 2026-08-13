@@ -117,6 +117,5 @@ jfr_write_metadata() {
         echo "grafana_from       = ${now_epoch}000"
         echo "grafana_to         = <fill in after the run>"
         echo "grafana_latency    = http://localhost:3300/d/emporia-latency-percentiles"
-        echo "grafana_kafka_lag  = http://localhost:3300/d/emporia-kafka-lag"
     } > "$out_dir/metadata.txt"
 }

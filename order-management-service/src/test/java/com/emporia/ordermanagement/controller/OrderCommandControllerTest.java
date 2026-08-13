@@ -114,8 +114,7 @@ class OrderCommandControllerTest {
         AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
         OrderStateCache cache = new OrderStateCache(orders, processed, 1000, 1000);
         OrderCommandHandler realHandler = new OrderCommandHandler(orders, events, processed, objectMapper,
-                observations, new OrderMetrics(new SimpleMeterRegistry()), cache, asyncDbWriter,
-                "emporia.orders.v1", "emporia.order.results.v1");
+                observations, new OrderMetrics(new SimpleMeterRegistry()), cache, asyncDbWriter);
         DisruptorOrderPipeline realPipeline = new DisruptorOrderPipeline(
                 realHandler, new SimpleMeterRegistry(), new MemoryMappedWalLogger(null, 1),
                 null, "yielding", 0, 0, "", "");

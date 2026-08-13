@@ -1,7 +1,7 @@
 #!/bin/bash
 # Starts bounded JFR recordings on host-JVM services (REWORK_NOTE Phase 1_4).
 #
-# Usage: scripts/perf/jfr-start.sh order-management-service execution-service
+# Usage: scripts/perf/jfr-start.sh order-management-service
 #
 # Knobs:
 #   JFR_NAME=emporia-local     recording name, used again by jfr-stop.sh

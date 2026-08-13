@@ -11,10 +11,31 @@
     <properties>
         <fray.version>0.9.0</fray.version>
         <jqwik.version>1.10.1</jqwik.version>
+        <!-- exchange-core requires low-level JDK access. Applied to both the running
+             application (spring-boot-maven-plugin) and the test JVM (argLine). -->
+        <exchange-core.jvm.args>-XX:+UseZGC -XX:+AlwaysPreTouch -XX:MaxDirectMemorySize=1024m --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED --add-exports=java.base/jdk.internal.ref=ALL-UNNAMED --add-exports=java.base/jdk.internal.util=ALL-UNNAMED --add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-exports=jdk.unsupported/sun.misc=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.locks=ALL-UNNAMED</exchange-core.jvm.args>
+        <argLine>${exchange-core.jvm.args}</argLine>
     </properties>
     <dependencies>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-opentelemetry</artifactId></dependency>
         <dependency><groupId>com.emporia</groupId><artifactId>trading-contracts</artifactId><version>${project.version}</version></dependency>
+        <!-- Execution-service dependencies pulled in by the merge -->
+        <dependency><groupId>com.emporia</groupId><artifactId>emporia-ha-core</artifactId><version>${project.version}</version></dependency>
+        <dependency><groupId>com.emporia</groupId><artifactId>emporia-reconciliation</artifactId><version>${project.version}</version></dependency>
+        <dependency><groupId>com.emporia</groupId><artifactId>emporia-algorithmic-strategies</artifactId><version>${project.version}</version></dependency>
+        <dependency><groupId>com.emporia</groupId><artifactId>emporia-journal</artifactId><version>${project.version}</version></dependency>
+        <dependency>
+            <groupId>exchange.core2</groupId>
+            <artifactId>exchange-core</artifactId>
+            <version>0.5.6-emporia</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <!-- OMS existing dependencies -->
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-data-jpa</artifactId></dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-oauth2-resource-server</artifactId></dependency>
@@ -32,11 +53,10 @@
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-validation</artifactId></dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-cache</artifactId></dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-restclient</artifactId></dependency>
-        <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-kafka</artifactId></dependency>
         <dependency>
             <groupId>com.lmax</groupId>
             <artifactId>disruptor</artifactId>
-            <version>4.0.0</version>
+            <version>3.4.4</version>
         </dependency>
         <dependency><groupId>io.aeron</groupId><artifactId>aeron-client</artifactId><version>1.44.0</version></dependency>
         <dependency><groupId>org.agrona</groupId><artifactId>agrona</artifactId><version>1.21.2</version></dependency>
@@ -62,7 +82,6 @@
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-testcontainers</artifactId><scope>test</scope></dependency>
         <dependency><groupId>org.testcontainers</groupId><artifactId>testcontainers-junit-jupiter</artifactId><scope>test</scope></dependency>
         <dependency><groupId>org.testcontainers</groupId><artifactId>testcontainers-postgresql</artifactId><scope>test</scope></dependency>
-        <dependency><groupId>org.testcontainers</groupId><artifactId>testcontainers-kafka</artifactId><scope>test</scope></dependency>
         <dependency>
             <groupId>org.pastalab.fray</groupId>
             <artifactId>fray-junit</artifactId>
@@ -75,6 +94,13 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <!-- exchange-core reaches into sun.nio.ch.DirectBuffer and jdk.internal.misc.VM.
+                         Without these flags the matching engine throws IllegalAccessError at runtime
+                         while orders still return 201 (the venue accepted them), producing fills that
+                         never happen and a silent portfolio path. -->
+                    <jvmArguments>${exchange-core.jvm.args}</jvmArguments>
+                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -102,22 +128,6 @@
                         <configuration>
                             <includes>
                                 <include>**/TradingOrderPostgresConcurrencySpec.java</include>
-                            </includes>
-                        </configuration>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-        <profile>
-            <id>cdc-it</id>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-surefire-plugin</artifactId>
-                        <configuration>
-                            <includes>
-                                <include>**/OrderOutboxCdcIntegrationSpec.java</include>
                             </includes>
                         </configuration>
                     </plugin>

@@ -3,15 +3,11 @@ package com.emporia.ordermanagement.service;
 import com.emporia.events.TradingEvents.ExecutionCommand;
 import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderStatus;
-import com.emporia.events.KafkaRoutingKeys;
-import com.emporia.events.sbe.SbeEncoderDecoder;
 import com.emporia.ordermanagement.model.Execution;
 import com.emporia.ordermanagement.model.OrderEvent;
-import com.emporia.ordermanagement.model.OrderOutboxRecord;
 import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.ExecutionRepository;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.ObjectMapper;
 
@@ -25,7 +21,7 @@ import java.util.UUID;
 import static com.emporia.events.TradingEvents.SCHEMA_VERSION;
 
 @Service
-class ExecutionCommandHandler {
+public class ExecutionCommandHandler {
     private static final List<OrderStatus> ACTIVE =
             List.of(OrderStatus.LIVE, OrderStatus.PARTIALLY_FILLED);
 
@@ -35,26 +31,33 @@ class ExecutionCommandHandler {
     private final OrderMetrics metrics;
     private final OrderStateCache cache;
     private final AsyncDbWriter asyncDbWriter;
-    private final String ordersTopic;
+    private final com.emporia.execution.ShardedOrderDispatcher shardedOrderDispatcher;
 
     ExecutionCommandHandler(TradingOrderRepository orders, ExecutionRepository executions,
                             ObjectMapper objectMapper, OrderMetrics metrics,
+                            OrderStateCache cache, AsyncDbWriter asyncDbWriter) {
+        this(orders, executions, objectMapper, metrics, cache, asyncDbWriter, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    ExecutionCommandHandler(TradingOrderRepository orders, ExecutionRepository executions,
+                            ObjectMapper objectMapper, OrderMetrics metrics,
                             OrderStateCache cache, AsyncDbWriter asyncDbWriter,
-                            @Value("${emporia.kafka.orders-topic:emporia.orders.v1}") String ordersTopic) {
+                            com.emporia.execution.ShardedOrderDispatcher shardedOrderDispatcher) {
         this.orders = orders;
         this.executions = executions;
         this.objectMapper = objectMapper;
         this.metrics = metrics;
         this.cache = cache;
         this.asyncDbWriter = asyncDbWriter;
-        this.ordersTopic = ordersTopic;
+        this.shardedOrderDispatcher = shardedOrderDispatcher;
     }
 
     /**
      * Applies a venue update and every resulting parent transition.
      * Direct Java invocation without Spring AOP / CGLIB proxy reflection.
      */
-    List<OrderDomainEvent> handle(ExecutionCommand command) {
+    public List<OrderDomainEvent> handle(ExecutionCommand command) {
         if (command.schemaVersion() != SCHEMA_VERSION) {
             throw new IllegalArgumentException("Unsupported execution command schema version");
         }
@@ -87,8 +90,9 @@ class ExecutionCommandHandler {
      */
     private void enqueueOutbox(List<OrderDomainEvent> events) {
         for (OrderDomainEvent event : events) {
-            asyncDbWriter.enqueue(new OrderOutboxRecord(ordersTopic, KafkaRoutingKeys.orderEvent(event),
-                    OrderOutboxRecord.PayloadType.ORDER_EVENT, SbeEncoderDecoder.encodeOrderDomainEvent(event)));
+            if (shardedOrderDispatcher != null) {
+                shardedOrderDispatcher.dispatch(event);
+            }
         }
     }
 

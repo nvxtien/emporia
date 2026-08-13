@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Runs the gateway -> order-management -> Kafka -> execution order-path capacity
-# probe and records latency, consumer lag, and exchange-core checkpoint health.
+# Runs the gateway -> order-management order-path capacity probe (execution
+# routing is in-process inside order-management-service) and records latency
+# and exchange-core checkpoint health.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -8,7 +9,6 @@ cd "$repo_root"
 
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8082}"
 OMS_URL="${OMS_URL:-http://localhost:8086}"
-EXECUTION_URL="${EXECUTION_URL:-http://localhost:8087}"
 PROM_URL="${PROM_URL:-http://localhost:9090}"
 ORIGIN="${EMPORIA_ORIGIN:-http://localhost:3001}"
 RATES="${ORDER_PATH_RATES:-${PROBE_RATES:-5 10 20 40 60}}"
@@ -19,10 +19,6 @@ LIMIT_PRICE="${LIMIT_PRICE:-100.00}"
 RUN_LABEL="${ORDER_PATH_RUN_LABEL:-jdk21-hardened}"
 OUT_DIR="${ORDER_PATH_OUT_DIR:-$repo_root/.local-run/order-path-capacity/$(date +%Y%m%d-%H%M%S)-${RUN_LABEL}}"
 FINAL_DRAIN_SECONDS="${FINAL_DRAIN_SECONDS:-30}"
-INITIAL_DRAIN_TIMEOUT_SECONDS="${INITIAL_DRAIN_TIMEOUT_SECONDS:-300}"
-INITIAL_LAG_MAX="${INITIAL_LAG_MAX:-0}"
-EXECUTION_GROUP="${EXECUTION_GROUP:-emporia-execution-service-v1}"
-OMS_EXECUTION_GROUP="${OMS_EXECUTION_GROUP:-order-management-executions-v1}"
 
 usage() {
     cat <<EOF
@@ -33,11 +29,9 @@ Environment:
   PROBE_STEP             Duration per rate. Default: 60s
   ORDER_PATH_OUT_DIR     Output directory. Default: .local-run/order-path-capacity/<timestamp>
   GATEWAY_URL            Gateway base URL. Default: http://localhost:8082
-  EXECUTION_URL          Execution service base URL. Default: http://localhost:8087
+  OMS_URL                order-management-service base URL (execution routing
+                         runs in-process inside it). Default: http://localhost:8086
   PROM_URL               Prometheus base URL. Default: http://localhost:9090
-  INITIAL_LAG_MAX        Max starting consumer lag before load. Default: 0
-  INITIAL_DRAIN_TIMEOUT_SECONDS
-                         Seconds to wait for starting lag to drain. Default: 300
   EXCHANGE_CORE_JOURNALING
                          Recorded in metadata. Use true with run-infra-docker.sh
                          to measure journalled catch-up capacity.
@@ -88,56 +82,6 @@ mint_multi_tokens() {
         fail "could not mint any multi-user access tokens"
     fi
     (IFS=,; echo "${tokens[*]}")
-}
-
-promq() {
-    local query="$1"
-    curl -fsS --get "${PROM_URL}/api/v1/query" --data-urlencode "query=$query" 2>/dev/null \
-        | python3 -c '
-import json
-import sys
-try:
-    result = json.load(sys.stdin)["data"]["result"]
-    print(result[0]["value"][1] if result else "0")
-except Exception:
-    print("0")
-' 2>/dev/null || echo 0
-}
-
-consumer_lag() {
-    local group="$1"
-    promq "sum(clamp_min(kafka_consumergroup_lag{consumergroup=\"$group\"}, 0))"
-}
-
-number_lte() {
-    python3 - "$1" "$2" <<'PY' >/dev/null 2>&1
-import sys
-
-sys.exit(0 if float(sys.argv[1]) <= float(sys.argv[2]) else 1)
-PY
-}
-
-wait_for_initial_lag() {
-    local waited=0
-    local execution_lag
-    local oms_execution_lag
-    printf '    waiting for initial Kafka lag <= %s' "$INITIAL_LAG_MAX"
-    while true; do
-        execution_lag="$(consumer_lag "$EXECUTION_GROUP")"
-        oms_execution_lag="$(consumer_lag "$OMS_EXECUTION_GROUP")"
-        if number_lte "$execution_lag" "$INITIAL_LAG_MAX" \
-                && number_lte "$oms_execution_lag" "$INITIAL_LAG_MAX"; then
-            echo " up (execution=${execution_lag}, oms=${oms_execution_lag})"
-            return 0
-        fi
-        if [ "$waited" -ge "$INITIAL_DRAIN_TIMEOUT_SECONDS" ]; then
-            echo
-            fail "initial Kafka lag did not drain within ${INITIAL_DRAIN_TIMEOUT_SECONDS}s (execution=${execution_lag}, oms=${oms_execution_lag})"
-        fi
-        printf '.'
-        sleep 5
-        waited=$((waited + 5))
-    done
 }
 
 k6_field() {
@@ -218,10 +162,10 @@ PY
 
 capture_execution_health() {
     local label="$1"
-    curl -sS --max-time 10 "${EXECUTION_URL}/actuator/health" \
+    curl -sS --max-time 10 "${OMS_URL}/actuator/health" \
         >"${OUT_DIR}/${label}.execution-health.json" 2>/dev/null || echo '{}' \
         >"${OUT_DIR}/${label}.execution-health.json"
-    curl -sS --max-time 10 "${EXECUTION_URL}/actuator/prometheus" 2>/dev/null \
+    curl -sS --max-time 10 "${OMS_URL}/actuator/prometheus" 2>/dev/null \
         | grep 'emporia_execution_venue_checkpoint' \
         >"${OUT_DIR}/${label}.checkpoint.prom" || true
 }
@@ -272,7 +216,6 @@ headers = [
     ("p50_ms", "p50"),
     ("p95_ms", "p95"),
     ("p99_ms", "p99"),
-    ("execution_lag", "Execution lag"),
     ("checkpoint_age_seconds", "Checkpoint age"),
     ("checkpoint_files", "Checkpoint files"),
     ("partial_checkpoint_files", "Partial files"),
@@ -286,7 +229,7 @@ def fmt(row, key):
         return f"{float(value) * 100:.0f}%"
     if key in {"p50_ms", "p95_ms", "p99_ms"}:
         return f"{float(value):.2f} ms"
-    if key in {"accepted", "execution_lag", "checkpoint_age_seconds", "checkpoint_files", "partial_checkpoint_files"}:
+    if key in {"accepted", "checkpoint_age_seconds", "checkpoint_files", "partial_checkpoint_files"}:
         return f"{float(value):,.0f}"
     return value
 
@@ -321,7 +264,6 @@ require_command k6
 
 health_check gateway "${GATEWAY_URL}/actuator/health"
 health_check order-management "${OMS_URL}/actuator/health"
-health_check execution-service "${EXECUTION_URL}/actuator/health"
 health_check prometheus "${PROM_URL}/-/healthy"
 
 if [ "$dry_run" = true ]; then
@@ -335,15 +277,13 @@ cat >"${OUT_DIR}/metadata.txt" <<EOF
 output_dir=${OUT_DIR}
 started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gateway_url=${GATEWAY_URL}
-execution_url=${EXECUTION_URL}
+oms_url=${OMS_URL}
 prometheus_url=${PROM_URL}
 quantity=${QUANTITY}
 limit_price=${LIMIT_PRICE}
 listing_ids=${LISTING_IDS}
 rates=${RATES}
 probe_step=${PROBE_STEP}
-initial_lag_max=${INITIAL_LAG_MAX}
-initial_drain_timeout_seconds=${INITIAL_DRAIN_TIMEOUT_SECONDS}
 exchange_core_journaling=${EXCHANGE_CORE_JOURNALING:-false}
 exchange_core_snapshot_interval=${EXCHANGE_CORE_SNAPSHOT_INTERVAL:-60s}
 exchange_core_retained_checkpoints=${EXCHANGE_CORE_RETAINED_CHECKPOINTS:-2}
@@ -361,10 +301,9 @@ echo "    rates: ${RATES}"
 echo "    duration per rate: ${PROBE_STEP}"
 
 capture_execution_health "before"
-wait_for_initial_lag
 
 cat >"${OUT_DIR}/summary.csv" <<'EOF'
-rate,status,accepted,business_rejection_rate,infra_failure_rate,p50_ms,p95_ms,p99_ms,execution_lag,oms_execution_lag,checkpoint_age_seconds,checkpoint_files,partial_checkpoint_files,checkpoint_storage_bytes,checkpoint_usable_storage_bytes,checkpoint_failures_since_last_success,checkpoint_status_available
+rate,status,accepted,business_rejection_rate,infra_failure_rate,p50_ms,p95_ms,p99_ms,checkpoint_age_seconds,checkpoint_files,partial_checkpoint_files,checkpoint_storage_bytes,checkpoint_usable_storage_bytes,checkpoint_failures_since_last_success,checkpoint_status_available
 EOF
 
 overall_status=0
@@ -382,11 +321,9 @@ for rate in $RATES; do
     tail -20 "$log" | sed 's/^/     /'
 
     capture_execution_health "rate-${rate}"
-    execution_lag="$(consumer_lag "$EXECUTION_GROUP")"
-    oms_execution_lag="$(consumer_lag "$OMS_EXECUTION_GROUP")"
     checkpoint_fields="$(capture_checkpoint_csv_fields "rate-${rate}")"
 
-    printf '%s,%s,%s,%s,%s,%.2f,%.2f,%.2f,%s,%s,%s\n' \
+    printf '%s,%s,%s,%s,%s,%.2f,%.2f,%.2f,%s\n' \
         "$rate" \
         "$status" \
         "$(k6_field "$summary" orders_accepted)" \
@@ -395,11 +332,9 @@ for rate in $RATES; do
         "$(k6_field "$summary" submit_latency_p50)" \
         "$(k6_field "$summary" submit_latency_p95)" \
         "$(k6_field "$summary" submit_latency_p99)" \
-        "$execution_lag" \
-        "$oms_execution_lag" \
         "$checkpoint_fields" >>"${OUT_DIR}/summary.csv"
 
-    echo "     execution lag ${execution_lag}; checkpoint fields ${checkpoint_fields}"
+    echo "     checkpoint fields ${checkpoint_fields}"
     if [ "$status" -ne 0 ]; then
         overall_status="$status"
         echo "     stopping after k6 exit status ${status}"
@@ -407,12 +342,10 @@ for rate in $RATES; do
     fi
 done
 
-echo "==> Quiet drain window (${FINAL_DRAIN_SECONDS}s)"
+echo "==> Quiet window (${FINAL_DRAIN_SECONDS}s)"
 sleep "$FINAL_DRAIN_SECONDS"
 capture_execution_health "after"
 {
-    echo "final_execution_lag_after_${FINAL_DRAIN_SECONDS}s=$(consumer_lag "$EXECUTION_GROUP")"
-    echo "final_oms_execution_lag_after_${FINAL_DRAIN_SECONDS}s=$(consumer_lag "$OMS_EXECUTION_GROUP")"
     echo "active_orders_end=$(active_orders)"
     echo "portfolio_usd_balance_end=$(portfolio_balance)"
     echo "finished_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -441,7 +374,7 @@ capture_execution_health "after"
     echo "Notes:"
     echo "- This script does not reset Docker volumes or delete exchange-core storage."
     echo "- For a clean-book local run, stop the stack and run scripts/perf/reset-venue-state.sh --yes deliberately before this benchmark."
-    echo "- Checkpoint age/file/storage fields are captured from execution-service Prometheus metrics after each rate."
+    echo "- Checkpoint age/file/storage fields are captured from order-management-service Prometheus metrics after each rate."
 } >"${OUT_DIR}/run-notes.txt"
 
 cat "${OUT_DIR}/run-notes.txt"

@@ -27,7 +27,6 @@ scripts/
     ├── order-submit-smoke.sh     # High-concurrency HTTP REST order submission test
     ├── exchange-core-benchmark.sh# LMAX Disruptor single-writer matching engine benchmark
     ├── market-data-fanout-smoke.sh# Aeron IPC / UDP Multicast quote fan-out load test
-    ├── kafka-lag-check.sh        # Broker-side Kafka consumer group lag inspector
     ├── crash-recovery-check.sh   # Journaling checkpoint crash recovery test
     ├── first-request-check.sh    # Cold-start first request latency check
     ├── trace-smoke.sh            # OpenTelemetry trace propagation validator
@@ -92,7 +91,7 @@ All shell scripts in this repository adhere to the following strict operational 
 ### A. Stack Lifecycle & Control Commands
 
 #### `scripts/run-local.sh`
-- **Purpose**: Starts the full Emporia microservice stack locally (Kafka + Postgres in Docker; Spring Boot & React services in host JVM).
+- **Purpose**: Starts the full Emporia microservice stack locally (Postgres in Docker; Spring Boot & React services in host JVM).
 - **Usage**:
   ```bash
   ./scripts/run-local.sh
@@ -111,7 +110,7 @@ All shell scripts in this repository adhere to the following strict operational 
   ```
 
 #### `scripts/run-infra-docker.sh`
-- **Purpose**: Starts only infrastructure containers (Kafka, PostgreSQL, Grafana, OpenTelemetry Collector) without launching Spring Boot services.
+- **Purpose**: Starts only infrastructure containers (PostgreSQL, Grafana, OpenTelemetry Collector) without launching Spring Boot services.
 - **Usage**:
   ```bash
   ./scripts/run-infra-docker.sh
@@ -126,7 +125,7 @@ All shell scripts in this repository adhere to the following strict operational 
 - **Features Applied**:
   - CPU Pinning: Pinned to isolated CPU core 3 (`taskset -c 3`) on Linux.
   - NUMA Binding: Bound to local memory node 0 (`numactl --membind=0`) on Linux.
-  - Low-Latency JVM Flags: `-XX:+UseCompressedOops`, `-XX:+AlwaysPreTouch`, `-XX:-UseBiasedLocking`, `-XX:+UseG1GC`, `-XX:MaxGCPauseMillis=1`, `-Djava.lang.Integer.IntegerCache.high=65536`.
+  - Low-Latency JVM Flags: `-XX:+UseZGC`, `-XX:+AlwaysPreTouch`, `-XX:MaxDirectMemorySize=1024m`, `-Djava.lang.Integer.IntegerCache.high=65536`.
 - **Usage**:
   ```bash
   # Test JVM flag assembly
@@ -153,7 +152,7 @@ All shell scripts in this repository adhere to the following strict operational 
   ```
 
 #### `scripts/perf/order-path-capacity.sh`
-- **Purpose**: Capacity benchmark for the gateway -> order-management -> Kafka -> execution path, including k6 latency, Kafka execution lag, and exchange-core checkpoint health metrics.
+- **Purpose**: Capacity benchmark for the gateway -> order-management path (execution routing runs in-process), including k6 latency and exchange-core checkpoint health metrics.
 - **Usage**:
   ```bash
   ORDER_PATH_RATES="5 10 20 40 60" PROBE_STEP=60s ./scripts/perf/order-path-capacity.sh
@@ -164,11 +163,11 @@ All shell scripts in this repository adhere to the following strict operational 
   EXCHANGE_CORE_JOURNALING=true ./scripts/perf/order-path-capacity.sh
   ```
 - **Artifacts**: Writes `summary.csv`, `run-notes.txt`, k6 logs, execution health JSON, and checkpoint Prometheus snapshots under `.local-run/order-path-capacity/<timestamp>`.
-- **Pass criteria**: waits for starting execution lag to drain, then exits non-zero if any k6 rate step crosses its failure/rejection thresholds.
+- **Pass criteria**: exits non-zero if any k6 rate step crosses its failure/rejection thresholds.
 
 #### `scripts/perf/reset-venue-state.sh`
 - **Purpose**: Destructive local-only reset for clean exchange-core capacity baselines.
-- **Behavior**: Stops `execution-service`, advances the execution consumer group to the latest order-event offset, deletes local exchange-core storage, and force-cancels working orders in order-management.
+- **Behavior**: Stops `order-management-service`, deletes local exchange-core storage, and force-cancels working orders in order-management.
 - **Usage**:
   ```bash
   ./scripts/perf/reset-venue-state.sh --yes
@@ -197,13 +196,6 @@ All shell scripts in this repository adhere to the following strict operational 
   ./scripts/perf/market-data-fanout-smoke.sh
   ```
 
-#### `scripts/perf/kafka-lag-check.sh`
-- **Purpose**: Broker-side Kafka consumer group offset lag inspector.
-- **Usage**:
-  ```bash
-  ./scripts/perf/kafka-lag-check.sh
-  ```
-
 ---
 
 ## ⚡ Quick Reference Execution Summary
@@ -215,12 +207,9 @@ All shell scripts in this repository adhere to the following strict operational 
 # 2. Run order submission load test (5,000 requests)
 ./scripts/perf/run-order-load-test.sh
 
-# 3. Check Kafka consumer group lag
-./scripts/perf/kafka-lag-check.sh
-
-# 4. Run exchange core in-process matching benchmark
+# 3. Run exchange core in-process matching benchmark
 ./scripts/perf/exchange-core-benchmark.sh
 
-# 5. Stop all services and containers
+# 4. Stop all services and containers
 ./scripts/stop-services.sh
 ```

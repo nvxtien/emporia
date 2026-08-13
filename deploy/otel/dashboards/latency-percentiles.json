@@ -1,5 +1,6 @@
-wrote deploy/otel/dashboards/latency-percentiles.json: 28 panels, 7 rows
-centiles",
+{
+  "uid": "emporia-latency-percentiles",
+  "title": "Emporia Latency Percentiles",
   "tags": [
     "emporia",
     "latency",
@@ -273,70 +274,6 @@ centiles",
     },
     {
       "id": 4,
-      "type": "stat",
-      "title": "Kafka lag (stable groups)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 18,
-        "y": 1
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(clamp_min(kafka_consumergroup_lag{consumergroup=~\"order-data-service-v1|emporia-execution-service-v1|order-management-executions-v1\"}, 0))",
-          "legendFormat": "",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "exemplar": false,
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "background",
-        "graphMode": "area",
-        "textMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 50
-              },
-              {
-                "color": "red",
-                "value": 200
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "description": "Broker-side exporter lag, clamped: the exporter reports -1 for partitions with no committed offset. Full detail on the Kafka Consumer Lag dashboard."
-    },
-    {
-      "id": 5,
       "type": "timeseries",
       "title": "Order submit latency",
       "datasource": {
@@ -421,7 +358,7 @@ centiles",
       "description": "Click an exemplar dot to open the matching trace in Tempo."
     },
     {
-      "id": 6,
+      "id": 5,
       "type": "timeseries",
       "title": "Order submit rate by outcome",
       "datasource": {
@@ -498,7 +435,7 @@ centiles",
       "panels": []
     },
     {
-      "id": 7,
+      "id": 6,
       "type": "timeseries",
       "title": "Submit latency by operation and destination",
       "datasource": {
@@ -583,7 +520,7 @@ centiles",
       "description": "Phase 1_2 traced ~1.2s of a 1.24s submit to waiting on the Kafka request/reply round trip, not to downstream processing."
     },
     {
-      "id": 8,
+      "id": 7,
       "type": "timeseries",
       "title": "Risk check latency by service",
       "datasource": {
@@ -665,10 +602,10 @@ centiles",
           "sort": "desc"
         }
       },
-      "description": "Grouped by service deliberately: emporia.risk.check is emitted by BOTH order-command-service (reason=permission) and order-management-service (reason=quantity|symbol). Without the service label two unrelated checks average into one line."
+      "description": "Grouped by service deliberately: emporia.risk.check carries different reason values (reason=permission vs. reason=quantity|symbol) depending on which check fired. Without the service label two unrelated checks average into one line."
     },
     {
-      "id": 9,
+      "id": 8,
       "type": "timeseries",
       "title": "Submit rate by operation, destination, outcome",
       "datasource": {
@@ -732,7 +669,7 @@ centiles",
       }
     },
     {
-      "id": 10,
+      "id": 9,
       "type": "timeseries",
       "title": "Submit failures by outcome and error",
       "datasource": {
@@ -809,7 +746,7 @@ centiles",
       "panels": []
     },
     {
-      "id": 11,
+      "id": 10,
       "type": "timeseries",
       "title": "Command handle latency by type",
       "datasource": {
@@ -893,7 +830,7 @@ centiles",
       }
     },
     {
-      "id": 12,
+      "id": 11,
       "type": "timeseries",
       "title": "Command handle rate by outcome",
       "datasource": {
@@ -958,7 +895,7 @@ centiles",
       "description": "outcome=duplicate means the idempotency cache answered, which is the retry path working as intended."
     },
     {
-      "id": 13,
+      "id": 12,
       "type": "timeseries",
       "title": "JDBC query latency by service",
       "datasource": {
@@ -1043,91 +980,6 @@ centiles",
       "description": "jdbc_query_seconds_bucket, not jdbc_query_active_seconds_bucket. The _active_ family is a long-task timer measuring work still in flight, and produces plausible-looking but wrong percentiles."
     },
     {
-      "id": 14,
-      "type": "timeseries",
-      "title": "Kafka listener processing latency by consumer group",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 40
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "histogram_quantile(0.5, sum by (le, service, messaging_kafka_consumer_group) (rate(spring_kafka_listener_seconds_bucket{deployment=~\"$deployment\", service=~\"$service\"}[$__rate_interval])))",
-          "legendFormat": "p50 {{service}} {{messaging_kafka_consumer_group}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "exemplar": true
-        },
-        {
-          "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le, service, messaging_kafka_consumer_group) (rate(spring_kafka_listener_seconds_bucket{deployment=~\"$deployment\", service=~\"$service\"}[$__rate_interval])))",
-          "legendFormat": "p95 {{service}} {{messaging_kafka_consumer_group}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "exemplar": true
-        },
-        {
-          "refId": "C",
-          "expr": "histogram_quantile(0.99, sum by (le, service, messaging_kafka_consumer_group) (rate(spring_kafka_listener_seconds_bucket{deployment=~\"$deployment\", service=~\"$service\"}[$__rate_interval])))",
-          "legendFormat": "p99 {{service}} {{messaging_kafka_consumer_group}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "exemplar": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "decimals": null,
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "axisSoftMin": 0
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "description": "spring_kafka_* metrics carry messaging_kafka_consumer_group and report each topic once. The dotted/underscored duplication and the topic=~\"emporia\\\\..+\" filter apply to kafka_consumer_* client metrics only; the label here is messaging_source_name, so that filter would match nothing."
-    },
-    {
       "type": "row",
       "title": "Execution path",
       "collapsed": false,
@@ -1140,7 +992,7 @@ centiles",
       "panels": []
     },
     {
-      "id": 15,
+      "id": 13,
       "type": "timeseries",
       "title": "Strategy decision latency",
       "datasource": {
@@ -1225,7 +1077,7 @@ centiles",
       "description": "Absent until a SMART or VWAP order runs: Micrometer creates a meter on first observation, so an unexercised path shows No data rather than zero."
     },
     {
-      "id": 16,
+      "id": 14,
       "type": "timeseries",
       "title": "Venue operation latency",
       "datasource": {
@@ -1310,7 +1162,7 @@ centiles",
       "description": "exchange-core checkpoints synchronously to disk on every submit/replace/cancel, so this includes that durability cost."
     },
     {
-      "id": 17,
+      "id": 15,
       "type": "timeseries",
       "title": "Execution publish latency",
       "datasource": {
@@ -1394,7 +1246,7 @@ centiles",
       }
     },
     {
-      "id": 18,
+      "id": 16,
       "type": "timeseries",
       "title": "Strategy decision rate by outcome",
       "datasource": {
@@ -1459,7 +1311,7 @@ centiles",
       "description": "outcome=waiting dominates in normal operation (a tick that decided to do nothing yet). A success rate computed against the four declared outcomes would read wrong."
     },
     {
-      "id": 19,
+      "id": 17,
       "type": "timeseries",
       "title": "Execution publish rate by outcome",
       "datasource": {
@@ -1535,7 +1387,7 @@ centiles",
       "panels": []
     },
     {
-      "id": 20,
+      "id": 18,
       "type": "timeseries",
       "title": "Snapshot apply latency",
       "datasource": {
@@ -1620,7 +1472,7 @@ centiles",
       "description": "Requires an actual fill to appear. Every order in the local load scripts is a BUY, so with no resting SELL liquidity nothing fills and this panel stays empty. No data here does not imply a broken query."
     },
     {
-      "id": 21,
+      "id": 19,
       "type": "timeseries",
       "title": "Snapshot apply rate by outcome",
       "datasource": {
@@ -1697,7 +1549,7 @@ centiles",
       "panels": []
     },
     {
-      "id": 22,
+      "id": 20,
       "type": "timeseries",
       "title": "HTTP server latency by route",
       "datasource": {
@@ -1782,7 +1634,7 @@ centiles",
       "description": "uri is the templated route (/instruments/{id}), never a raw URL, so cardinality stays bounded."
     },
     {
-      "id": 23,
+      "id": 21,
       "type": "timeseries",
       "title": "HTTP client latency by target",
       "datasource": {
@@ -1867,7 +1719,7 @@ centiles",
       "description": "Requires spring-boot-starter-restclient; without it there is no auto-configured RestClient.Builder, no observation, and this panel is silently empty. The uri tag comes from the URI *template*, so a pre-built URL string would unbound cardinality here."
     },
     {
-      "id": 24,
+      "id": 22,
       "type": "timeseries",
       "title": "JDBC connection and result-set latency",
       "datasource": {
@@ -1961,90 +1813,6 @@ centiles",
       }
     },
     {
-      "id": 25,
-      "type": "timeseries",
-      "title": "Kafka producer send latency by topic",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 83
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "histogram_quantile(0.5, sum by (le, service, messaging_destination_name) (rate(spring_kafka_template_seconds_bucket{deployment=~\"$deployment\", service=~\"$service\"}[$__rate_interval])))",
-          "legendFormat": "p50 {{service}} {{messaging_destination_name}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "exemplar": true
-        },
-        {
-          "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le, service, messaging_destination_name) (rate(spring_kafka_template_seconds_bucket{deployment=~\"$deployment\", service=~\"$service\"}[$__rate_interval])))",
-          "legendFormat": "p95 {{service}} {{messaging_destination_name}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "exemplar": true
-        },
-        {
-          "refId": "C",
-          "expr": "histogram_quantile(0.99, sum by (le, service, messaging_destination_name) (rate(spring_kafka_template_seconds_bucket{deployment=~\"$deployment\", service=~\"$service\"}[$__rate_interval])))",
-          "legendFormat": "p99 {{service}} {{messaging_destination_name}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "exemplar": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "decimals": null,
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "axisSoftMin": 0
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
       "type": "row",
       "title": "Baseline comparison (Phase 1_2, laptop-derived)",
       "collapsed": false,
@@ -2057,7 +1825,7 @@ centiles",
       "panels": []
     },
     {
-      "id": 26,
+      "id": 23,
       "type": "timeseries",
       "title": "Order submit p99 against the measured knee",
       "datasource": {
@@ -2066,7 +1834,7 @@ centiles",
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 24,
         "x": 0,
         "y": 92
       },
@@ -2130,72 +1898,7 @@ centiles",
       "description": "Phase 1_2 measured: <=40 orders/sec p99 under ~100ms with lag ~0; 48/sec p50 3137ms with sustained lag 123-199; 80/sec 7.7% infra failures. These are one laptop's numbers and warning-only context."
     },
     {
-      "id": 27,
-      "type": "timeseries",
-      "title": "Stable-group lag beside submit p99",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 92
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (consumergroup) (clamp_min(kafka_consumergroup_lag{consumergroup=~\"order-data-service-v1|emporia-execution-service-v1|order-management-executions-v1\"}, 0))",
-          "legendFormat": "{{consumergroup}}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "exemplar": false
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": null,
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "axisSoftMin": 0
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "description": "Lag climbing while p99 climbs indicates consumers falling behind rather than a slow single request."
-    },
-    {
-      "id": 28,
+      "id": 24,
       "type": "timeseries",
       "title": "Accepted rate vs failure rate",
       "datasource": {

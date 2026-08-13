@@ -27,12 +27,13 @@ class OrderDatabaseConstraintTest {
                     .dataSource(dataSource)
                     .defaultSchema(SCHEMA)
                     .schemas(SCHEMA)
+                    .locations("classpath:db/migration/order_data")
                     .createSchemas(true)
                     .load();
 
             flyway.migrate();
 
-            assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("8");
+            assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("9");
             UUID orderId = insertValidOrder(connection);
 
             assertRejected(connection, orderId, """

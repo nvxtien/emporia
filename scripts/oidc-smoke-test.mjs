@@ -179,7 +179,7 @@ try {
   }
 
   const createResponse = await placeOrder()
-  if (createResponse.status !== 201) throw new Error(`Kafka order create returned HTTP ${createResponse.status}`)
+  if (createResponse.status !== 201) throw new Error(`Order create returned HTTP ${createResponse.status}`)
   const createdOrder = await createResponse.json()
   if (createdOrder.status !== 'LIVE' || !createdOrder.id) throw new Error('Created order was not live')
 
@@ -187,7 +187,7 @@ try {
     method: 'POST',
     headers: { ...apiHeaders, 'Idempotency-Key': randomUUID() },
   })
-  if (!cancelResponse.ok) throw new Error(`Kafka order cancel returned HTTP ${cancelResponse.status}`)
+  if (!cancelResponse.ok) throw new Error(`Order cancel returned HTTP ${cancelResponse.status}`)
   const pendingCancel = await cancelResponse.json()
   if (pendingCancel.targetStatus !== 'CANCELLED') {
     throw new Error('Cancel command did not persist a pending cancellation target')
@@ -201,7 +201,7 @@ try {
   const historyResponse = await fetch(`${origin}/api/orders/${createdOrder.id}/history`, { headers: apiHeaders })
   if (!historyResponse.ok) throw new Error(`Order history returned HTTP ${historyResponse.status}`)
   const history = await historyResponse.json()
-  if (!Array.isArray(history) || history.length < 2) throw new Error('Kafka order history was not materialized')
+  if (!Array.isArray(history) || history.length < 2) throw new Error('Order history was not materialized')
 
   const smartResponse = await placeOrder({
     type: 'LIMIT',
@@ -232,7 +232,7 @@ try {
     'Legacy-parameter VWAP parent did not fill through scheduled children')
 
   const secondCreateResponse = await placeOrder()
-  if (secondCreateResponse.status !== 201) throw new Error(`Second Kafka order create returned HTTP ${secondCreateResponse.status}`)
+  if (secondCreateResponse.status !== 201) throw new Error(`Second order create returned HTTP ${secondCreateResponse.status}`)
   const cancelAllResponse = await fetch(`${origin}/api/orders/cancel-all`, { method: 'POST', headers: apiHeaders })
   if (!cancelAllResponse.ok) throw new Error(`Order command service cancel-all returned HTTP ${cancelAllResponse.status}`)
   const cancelAll = await cancelAllResponse.json()

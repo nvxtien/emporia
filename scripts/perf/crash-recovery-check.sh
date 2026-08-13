@@ -24,12 +24,12 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8082}"
-EXECUTION_URL="${EXECUTION_URL:-http://localhost:8087}"
+EXECUTION_URL="${EXECUTION_URL:-http://localhost:8086}"
 ORIGIN="${EMPORIA_ORIGIN:-http://localhost:3001}"
 PG_CONTAINER="${PG_CONTAINER:-emporia-order-management-postgres}"
 PG_DB="${PG_DB:-emporia_order_management}"
 PG_USER="${PG_USER:-postgres}"
-pid_file="$repo_root/.local-run/pids/execution-service.pid"
+pid_file="$repo_root/.local-run/pids/order-management-service.pid"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 psql_q() { docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc "$1" 2>/dev/null; }
@@ -56,8 +56,8 @@ submit_order() {
 order_status() { psql_q "select order_status from emporia_order_data.trading_order where id = '$1';"; }
 
 echo "==> Checking journaling is enabled"
-grep -q "journaling=true" "$repo_root/.local-run/logs/execution-service.log" \
-    || fail "execution-service is not running with journaling=true.
+grep -q "journaling=true" "$repo_root/.local-run/logs/order-management-service.log" \
+    || fail "order-management-service is not running with journaling=true.
   Start it with EXCHANGE_CORE_JOURNALING=true, or this proves nothing: without
   the journal the engine snapshots per command and cannot lose the window this
   test exists to check."
@@ -81,8 +81,8 @@ sleep 3
 [ "$(order_status "$order_a")" = "LIVE" ] || fail "order A is not LIVE before the kill"
 [ "$(order_status "$order_b")" = "LIVE" ] || fail "order B is not LIVE before the kill"
 
-echo "==> kill -9 execution-service"
-launcher="$(cat "$pid_file" 2>/dev/null)" || fail "no execution-service pid file"
+echo "==> kill -9 order-management-service"
+launcher="$(cat "$pid_file" 2>/dev/null)" || fail "no order-management-service pid file"
 child="$(pgrep -P "$launcher" 2>/dev/null | head -1)"
 [ -n "$child" ] || fail "could not find the application JVM under launcher ${launcher}"
 kill -9 "$child" "$launcher" 2>/dev/null || true
@@ -90,14 +90,14 @@ while kill -0 "$child" 2>/dev/null; do sleep 1; done
 echo "    killed jvm ${child}"
 
 echo "==> Restarting"
-( cd "$repo_root/execution-service" && exec env \
-    DB_URL="${DB_URL:-jdbc:postgresql://localhost:5437/emporia_execution}" \
+( cd "$repo_root/order-management-service" && exec env \
+    DB_URL="${DB_URL:-jdbc:postgresql://localhost:5432/emporia}" \
     DB_PASSWORD="${DB_PASSWORD:-admin123}" \
     EXECUTION_VENUE_MODE="${EXECUTION_VENUE_MODE:-exchange-core}" \
     EXCHANGE_CORE_ACCOUNTING_MODE="${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk}" \
     EXCHANGE_CORE_PORTFOLIO_URL="${EXCHANGE_CORE_PORTFOLIO_URL:-http://localhost:8088}" \
     EXCHANGE_CORE_JOURNALING=true \
-    mvn spring-boot:run ) > "$repo_root/.local-run/logs/execution-service.log" 2>&1 &
+    mvn spring-boot:run ) > "$repo_root/.local-run/logs/order-management-service.log" 2>&1 &
 echo "$!" > "$pid_file"
 
 printf "    waiting"
@@ -107,11 +107,11 @@ for _ in $(seq 1 80); do
 done
 echo
 curl -fsS "${EXECUTION_URL}/actuator/health/liveness" >/dev/null 2>&1 \
-    || fail "execution-service did not come back up; see .local-run/logs/execution-service.log"
+    || fail "order-management-service did not come back up; see .local-run/logs/order-management-service.log"
 
 echo "==> Verifying recovery"
 restored="$(grep -c "Rebuilt venue lifecycle from order-management" \
-        "$repo_root/.local-run/logs/execution-service.log" || true)"
+        "$repo_root/.local-run/logs/order-management-service.log" || true)"
 [ "$restored" -gt 0 ] \
     || fail "the lifecycle was never rebuilt from order-management, so the venue
   opened with whatever the snapshot held. Order B cannot be resolvable."
@@ -127,9 +127,9 @@ curl -fsS -X POST "${GATEWAY_URL}/api/orders/${order_b}/cancel" \
     || fail "cancel of order B was rejected outright"
 
 # Venue-confirmed cancellation, not an immediate DB write - and right after a
-# cold restart it competes with Kafka consumer-group rebalancing, so a fixed
-# short sleep here was producing false FAILs on a system that had actually
-# recovered correctly. Poll instead of guessing a single wait.
+# cold restart it competes with recovery still rebuilding runtime state, so a
+# fixed short sleep here was producing false FAILs on a system that had
+# actually recovered correctly. Poll instead of guessing a single wait.
 status_b="$(order_status "$order_b")"
 for _ in $(seq 1 15); do
     [ "$status_b" = "CANCELLED" ] && break
@@ -139,9 +139,9 @@ done
 [ "$status_b" = "CANCELLED" ] \
     || fail "order B is ${status_b}, not CANCELLED after 30s. The venue could not act on an
   order accepted after the last snapshot, which is the failure this checks for.
-  Look for 'unknown lifecycle order' in .local-run/logs/execution-service.log."
+  Look for 'unknown lifecycle order' in .local-run/logs/order-management-service.log."
 
-if grep -q "unknown lifecycle order" "$repo_root/.local-run/logs/execution-service.log"; then
+if grep -q "unknown lifecycle order" "$repo_root/.local-run/logs/order-management-service.log"; then
     fail "recovery logged 'unknown lifecycle order' - the engine and the lifecycle disagree"
 fi
 
