@@ -41,6 +41,10 @@ emporia.disruptor:
   # shards and exchange-core threads are also competing for. See CONFIGURATION.md.
   wait-strategy: ${EMPORIA_DISRUPTOR_WAIT_STRATEGY:blocking}
   min-remaining-capacity: ${EMPORIA_DISRUPTOR_MIN_REMAINING_CAPACITY:1024}
+  # Diagnostic, off at 0: above this ring queue wait, one line records whether
+  # the writer thread was busy or simply not running. Off by default because it
+  # only earns its place while chasing a tail.
+  stall-threshold-ms: ${EMPORIA_DISRUPTOR_STALL_THRESHOLD_MS:0}
   warmup-iterations: ${EMPORIA_DISRUPTOR_WARMUP_ITERATIONS:2048}
   cpu-set: ${EMPORIA_DISRUPTOR_CPU_SET:}
   numa-node: ${EMPORIA_DISRUPTOR_NUMA_NODE:}

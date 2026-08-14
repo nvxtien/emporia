@@ -18,6 +18,9 @@ import com.lmax.disruptor.dsl.Disruptor;
 import com.lmax.disruptor.dsl.ProducerType;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadMXBean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -48,6 +51,12 @@ public class DisruptorOrderPipeline {
     private final long minRemainingCapacity;
     private final int warmupIterations;
     private final String cpuSetHint;
+    /**
+     * Above this queue wait, one line is written describing what the writer
+     * thread was doing. {@code Long.MAX_VALUE} when disabled, so the check is a
+     * single comparison on the hot path.
+     */
+    private final long stallThresholdNanos;
     private final String numaNodeHint;
     private final MeterRegistry meters;
     private final Counter warmupCounter;
@@ -66,6 +75,7 @@ public class DisruptorOrderPipeline {
                                  @Value("${emporia.disruptor.wait-strategy:yielding}") String waitStrategyName,
                                  @Value("${emporia.disruptor.min-remaining-capacity:1024}") long minRemainingCapacity,
                                  @Value("${emporia.disruptor.warmup-iterations:2048}") int warmupIterations,
+                                 @Value("${emporia.disruptor.stall-threshold-ms:0}") long stallThresholdMs,
                                  @Value("${emporia.disruptor.cpu-set:}") String cpuSetHint,
                                  @Value("${emporia.disruptor.numa-node:}") String numaNodeHint) {
         this.orderCommandHandler = orderCommandHandler;
@@ -74,6 +84,9 @@ public class DisruptorOrderPipeline {
         this.waitStrategyName = waitStrategyName;
         this.minRemainingCapacity = Math.max(0L, minRemainingCapacity);
         this.warmupIterations = Math.max(0, warmupIterations);
+        this.stallThresholdNanos = stallThresholdMs <= 0
+                ? Long.MAX_VALUE
+                : TimeUnit.MILLISECONDS.toNanos(stallThresholdMs);
         this.cpuSetHint = cpuSetHint;
         this.numaNodeHint = numaNodeHint;
         this.meters = meters;
@@ -124,6 +137,17 @@ public class DisruptorOrderPipeline {
                 waitStrategy
         );
 
+        // Distinguishes the two things a long queue wait can mean. If the
+        // writer was busy clearing a backlog, idleNanos is near zero and its CPU
+        // time advanced across the gap. If it was simply not run - descheduled,
+        // or stopped at a safepoint - idleNanos is the size of the stall and the
+        // CPU time barely moved. Inferring this from p99 alone was not possible.
+        log.info("Ring stall diagnostic threshold: {} (Long.MAX_VALUE means disabled)",
+                stallThresholdNanos);
+        final ThreadMXBean threads = ManagementFactory.getThreadMXBean();
+        final long[] lastFinishedNanos = {System.nanoTime()};
+        final long[] lastCpuNanos = {0L};
+
         EventHandler<OrderRingEvent> matchingHandler = (event, sequence, endOfBatch) -> {
             event.setStartedAtNanos(System.nanoTime());
             queueDepth.updateAndGet(current -> current > 0 ? current - 1 : 0);
@@ -137,7 +161,21 @@ public class DisruptorOrderPipeline {
                     }
                     return;
                 }
-                queueLatency.record(event.getStartedAtNanos() - event.getSubmittedAtNanos(), TimeUnit.NANOSECONDS);
+                long queueWaitNanos = event.getStartedAtNanos() - event.getSubmittedAtNanos();
+                queueLatency.record(queueWaitNanos, TimeUnit.NANOSECONDS);
+                if (queueWaitNanos > stallThresholdNanos) {
+                    long cpuNanos = threads.getCurrentThreadCpuTime();
+                    long idleNanos = event.getStartedAtNanos() - lastFinishedNanos[0];
+                    long cpuUsedNanos = cpuNanos - lastCpuNanos[0];
+                    log.warn("Ring queue wait {} ms: writer idle {} ms before this event, "
+                                    + "using {} ms CPU across that gap, ring depth {}, batch end {}. "
+                                    + "Idle time it did not spend on CPU is time it was not run.",
+                            TimeUnit.NANOSECONDS.toMillis(queueWaitNanos),
+                            TimeUnit.NANOSECONDS.toMillis(idleNanos),
+                            TimeUnit.NANOSECONDS.toMillis(cpuUsedNanos),
+                            queueDepth.get(),
+                            endOfBatch);
+                }
                 logAhead(event.getCommand());
                 ProcessingOutcome outcome = orderCommandHandler.handle(event.getCommand());
                 // Handled, so its rows are queued for the writer; the log space
@@ -155,6 +193,10 @@ public class DisruptorOrderPipeline {
             } finally {
                 if (!event.isWarmup()) {
                     handleLatency.record(System.nanoTime() - event.getStartedAtNanos(), TimeUnit.NANOSECONDS);
+                }
+                if (stallThresholdNanos != Long.MAX_VALUE) {
+                    lastFinishedNanos[0] = System.nanoTime();
+                    lastCpuNanos[0] = threads.getCurrentThreadCpuTime();
                 }
             }
         };

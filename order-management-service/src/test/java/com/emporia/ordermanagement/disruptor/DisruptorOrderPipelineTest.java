@@ -38,7 +38,7 @@ class DisruptorOrderPipelineTest {
     @BeforeEach
     void setUp() {
         handler = mock(OrderCommandHandler.class);
-        pipeline = new DisruptorOrderPipeline(handler, new SimpleMeterRegistry(), disabledWal(), null, "yielding", 0, 0, "", "");
+        pipeline = new DisruptorOrderPipeline(handler, new SimpleMeterRegistry(), disabledWal(), null, "yielding", 0, 0, 0, "", "");
         pipeline.start();
     }
 
@@ -125,6 +125,7 @@ class DisruptorOrderPipelineTest {
                 "yielding",
                 65_535,
                 0,
+                0,
                 "",
                 ""
         );
@@ -172,7 +173,7 @@ class DisruptorOrderPipelineTest {
             });
             DisruptorOrderPipeline logging = new DisruptorOrderPipeline(
                     recordingHandler, new SimpleMeterRegistry(), wal, null,
-                    "yielding", 0, 0, "", "");
+                    "yielding", 0, 0, 0, "", "");
             logging.start();
 
             logging.submit(sampleCommand(UUID.randomUUID())).join();
@@ -195,7 +196,7 @@ class DisruptorOrderPipelineTest {
             OrderCommandHandler neverCalled = mock(OrderCommandHandler.class);
             DisruptorOrderPipeline logging = new DisruptorOrderPipeline(
                     neverCalled, new SimpleMeterRegistry(), wal, null,
-                    "yielding", 0, 0, "", "");
+                    "yielding", 0, 0, 0, "", "");
             logging.start();
 
             // Accepting an order the system has no durable trace of, while
