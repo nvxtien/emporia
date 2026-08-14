@@ -167,6 +167,11 @@ public class OrderStateCache {
      * {@code orders.save()} so the next read hits the cache.
      */
     public void put(TradingOrder order) {
+        // The one funnel every committed state change passes through, which is
+        // why the revision is stamped here rather than in the mutators - see
+        // TradingOrder.recordRevision. Read-through population uses the cache
+        // field directly and so does not reach this method.
+        order.recordRevision();
         orders.put(order.getId(), order);
         if (dedup != null) dedup.remember(order.getId());
     }

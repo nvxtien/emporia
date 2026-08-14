@@ -116,6 +116,12 @@ class OrderShadowComparisonServiceTest {
             TradingOrder order = new TradingOrder(command.orderId(), command.userSubject(), command.deskId(),
                     command.listing(), command.side(), command.orderType(), command.quantity(), command.limitPrice(),
                     command.destination(), command.originatorReference(), null, null, "{}");
+            // The handler stamps a revision through cache.put before it
+            // serialises the view, so a recorded result carries version 1 rather
+            // than the 0 a bare constructor leaves. Building the fixture any
+            // other way compares the replay against something production never
+            // produced.
+            order.recordRevision();
             String payload = objectMapper.writeValueAsString(order.view());
             OrderEvent created = new OrderEvent(command.commandId(), order, "CREATED",
                     "Order accepted by Emporia", payload);

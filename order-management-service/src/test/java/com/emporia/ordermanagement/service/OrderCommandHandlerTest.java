@@ -590,6 +590,50 @@ class OrderCommandHandlerTest {
         assertThat(reused.result().status()).isEqualTo(409);
     }
 
+    /**
+     * The optimistic-lock guard the API advertises, which had silently stopped
+     * firing. Order writes moved to raw JDBC in AsyncDbWriter, which bypasses
+     * Hibernate, so nothing incremented entity_version any more: every order sat
+     * at version 0 for its whole life and the check compared 0 against 0.
+     */
+    @Test
+    void aModifyCarryingAVersionOlderThanTheOrderIsRefused() {
+        TradingOrder order = liveOrder();
+        when(orders.findByIdAndDeskId(order.getId(), DESK)).thenReturn(Optional.of(order));
+        long asTheClientReadIt = order.getVersion();
+
+        // A fill lands between the client's read and its modify. Every committed
+        // state change goes through cache.put, which is what stamps the revision.
+        order.applyFill(new BigDecimal("1"), new BigDecimal("100"));
+        cache.put(order);
+
+        ProcessingOutcome outcome = handler.handle(modifyCommand(order, asTheClientReadIt));
+
+        assertThat(outcome.result().status()).isEqualTo(409);
+        assertThat(outcome.result().detail()).contains("changed since it was loaded");
+    }
+
+    @Test
+    void aModifyCarryingTheCurrentVersionIsAccepted() {
+        TradingOrder order = liveOrder();
+        when(orders.findByIdAndDeskId(order.getId(), DESK)).thenReturn(Optional.of(order));
+
+        order.applyFill(new BigDecimal("1"), new BigDecimal("100"));
+        cache.put(order);
+
+        ProcessingOutcome outcome = handler.handle(modifyCommand(order, order.getVersion()));
+
+        assertThat(outcome.result().status()).isEqualTo(200);
+    }
+
+    private static OrderCommand modifyCommand(TradingOrder order, long expectedVersion) {
+        return new OrderCommand(
+                SCHEMA_VERSION, UUID.randomUUID(), CommandType.MODIFY,
+                USER, Instant.EPOCH, order.getId(), expectedVersion, null,
+                null, null, new BigDecimal("20"), new BigDecimal("105"), null, null, null, Map.of()
+        );
+    }
+
     private static OrderCommand createCommand(UUID orderId) {
         return new OrderCommand(
                 SCHEMA_VERSION, UUID.randomUUID(), CommandType.CREATE,

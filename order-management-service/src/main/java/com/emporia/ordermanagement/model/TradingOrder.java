@@ -199,6 +199,34 @@ public class TradingOrder {
         confirmCancel();
     }
 
+    /**
+     * Advances the revision this order publishes to callers.
+     *
+     * <p>Called by {@link com.emporia.ordermanagement.service.OrderStateCache}
+     * once per committed state change, and nowhere else.
+     *
+     * <h2>Why this is not inside the mutators</h2>
+     * <p>It belongs there - every mutator already ends with the same
+     * {@code updatedAt}/{@code validateInvariants} tail - but {@code version}
+     * carries {@code @Version}, and assigning a {@code @Version} field on an
+     * entity Hibernate is managing is undefined behaviour. The repository path
+     * still relies on Hibernate owning the column, and
+     * {@code TradingOrderPostgresConcurrencySpec} asserts exactly one of two
+     * competing transactions commits. Keeping the increment on the hot path's
+     * own commit funnel leaves that mechanism alone.
+     *
+     * <h2>Why it is needed at all</h2>
+     * <p>Order writes moved to raw JDBC in {@code AsyncDbWriter}, which bypasses
+     * Hibernate, so nothing incremented the column any more. Every order sat at
+     * version 0 for its whole life, which made the {@code expectedVersion} check
+     * in {@code OrderCommandHandler.modify} compare 0 against 0 and pass every
+     * time - an optimistic-lock guard the API advertises and that had silently
+     * stopped firing.
+     */
+    public synchronized void recordRevision() {
+        this.version = (this.version == null ? 0L : this.version) + 1L;
+    }
+
     public synchronized void reject(String message) {
         require(status == OrderStatus.LIVE && tradedQuantity.signum() == 0,
                 "Only unfilled live orders can be rejected");

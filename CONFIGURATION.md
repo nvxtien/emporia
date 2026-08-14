@@ -219,6 +219,42 @@ same `order_id`, plus how long the writer was idle and how much CPU it used
 across the gap - near-zero idle with a deep ring is a backlog, idle time not
 spent on CPU is time it was not scheduled.
 
+## entity_version froze at 0 when order writes moved to raw JDBC
+
+- **Where**: `TradingOrder.recordRevision`, `OrderStateCache.put`,
+  `AsyncDbWriter.flushOrdersJdbc`, `OrderCommandHandler.modify`
+
+`entity_version` carries JPA's `@Version`, so Hibernate used to increment it on
+every save. Order writes then moved to raw JDBC in `AsyncDbWriter`, which
+bypasses Hibernate entirely, and nothing incremented it any more. Every order
+sat at version 0 for its whole life.
+
+The visible consequence was in `modify`:
+
+```java
+require(command.expectedVersion() != null && order.getVersion().equals(command.expectedVersion()),
+        409, "Order changed since it was loaded; refresh before modifying it");
+```
+
+The API returned version 0, callers echoed 0, and the comparison passed every
+time. **An optimistic-lock guard the API advertises had silently stopped
+firing**, and no test caught it because the tests that touch versions mock
+`orders.save`, which is the path production no longer uses.
+
+The revision is now stamped in `OrderStateCache.put`, the single funnel every
+committed state change passes through. **Not** in `TradingOrder`'s mutators,
+where it belongs on every other ground: assigning a `@Version` field on an
+entity Hibernate manages is undefined behaviour, and the repository path still
+relies on Hibernate owning the column - `TradingOrderPostgresConcurrencySpec`
+asserts exactly one of two competing transactions commits.
+
+**Expect more 409s on `PUT /orders/{id}`.** Every state change advances the
+revision, fills included, so a caller that reads an order and modifies it while
+it is filling now gets "Order changed since it was loaded" where it previously
+succeeded. That is the guard working. The modify itself was never unsafe - it
+re-validates the new quantity against live traded quantity - so what the caller
+lost was a decision made on a stale read, and the fix is to re-read and retry.
+
 ## The dedup index answers from memory, and its horizon is a correctness bound
 
 - **Where**: `RotatingDedupIndex`, `OrderStateCache`, `emporia.dedup-index.*`
