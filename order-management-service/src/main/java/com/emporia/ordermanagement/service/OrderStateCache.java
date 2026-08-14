@@ -33,12 +33,14 @@ import java.util.concurrent.TimeUnit;
  *       the repository in the same transaction scope. The DB remains the
  *       system-of-record for durability and cross-instance reads.</li>
  *   <li><b>read-through on miss</b>: a cache miss delegates to the
- *       repository. This is what {@link CommandDedupIndex} exists to avoid: a
+ *       repository. This is what {@link RotatingDedupIndex} exists to avoid: a
  *       {@code CREATE} carries freshly generated ids, so it misses every time -
  *       measured at zero hits across 14,402 orders, costing 2.312 of the
  *       handler's 2.405 ms on the single writer thread. When the index is
  *       present and ready it answers "never seen" from memory and the
- *       repository is not consulted.</li>
+ *       repository is not consulted - including for identifiers older than the
+ *       index's horizon, which is why that horizon is a correctness parameter
+ *       rather than a performance one.</li>
  *   <li><b>single-instance authority</b>: deduplication is correct if and only
  *       if exactly one instance accepts orders. This is enforced on the order
  *       path by the {@code isPrimary()} check in {@code DisruptorOrderPipeline},
@@ -79,26 +81,20 @@ public class OrderStateCache {
     private final Timer existsFromDb;
     private final Timer existsFromIndex;
     // Null disables the index and restores the pure read-through behaviour.
-    // Written only by the Disruptor writer thread.
-    private final @Nullable CommandDedupIndex index;
-    // The session's history, filled by the startup loader on its own thread and
-    // published here once. Two filters rather than one because a background load
-    // and the writer thread sharing a long[] would race on a read-modify-write,
-    // and a lost bit is a false negative - a duplicate order. Each filter has a
-    // single writer, and this volatile write publishes everything the loader put
-    // in its filter to whichever thread reads the reference.
-    private volatile @Nullable CommandDedupIndex session;
+    // It owns every filter, including the rotation that stops them growing for
+    // as long as the process runs, and every filter it holds has a single writer.
+    private final @Nullable RotatingDedupIndex dedup;
 
     public OrderStateCache(
             TradingOrderRepository orderRepository,
             ProcessedCommandRepository processedRepository,
             OrderMetrics metrics,
-            @Nullable CommandDedupIndex index,
+            @Nullable RotatingDedupIndex dedup,
             @Value("${emporia.cache.order-max-size:100000}") long orderMaxSize,
             @Value("${emporia.cache.processed-max-size:50000}") long processedMaxSize) {
         this.orderRepository = orderRepository;
         this.processedRepository = processedRepository;
-        this.index = index;
+        this.dedup = dedup;
         this.processedFromIndex = metrics.registry().timer("emporia.oms.cache.lookup", "check", "processed", "source", "index");
         this.existsFromIndex = metrics.registry().timer("emporia.oms.cache.lookup", "check", "exists", "source", "index");
         this.processedFromCache = metrics.registry().timer("emporia.oms.cache.lookup", "check", "processed", "source", "cache");
@@ -143,7 +139,7 @@ public class OrderStateCache {
             existsFromCache.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
             return true;
         }
-        if (indexAnswers() && definitelyNew(id)) {
+        if (indexAnswers() && dedup.definitelyNew(id)) {
             existsFromIndex.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
             return false;
         }
@@ -153,42 +149,17 @@ public class OrderStateCache {
     }
 
     /**
-     * Whether the index may be trusted to answer "never seen".
-     *
-     * <p>False while loading, because a partially filled Bloom filter reports
-     * "never seen" for things it has seen - a false negative, the one direction
-     * that lets a duplicate order through. Until the load completes, the
-     * database answers, which is exactly today's behaviour: warm-up degrades
-     * latency, not correctness.
+     * Whether the index may be trusted to answer "never seen". False while the
+     * startup load is still running, because a partially filled filter reports
+     * "never seen" for things it has seen - see
+     * {@link RotatingDedupIndex#isReady()}.
      */
     private boolean indexAnswers() {
-        return index != null && session != null;
-    }
-
-    /**
-     * An identifier is new only when neither filter has it: the live one holds
-     * what this process has handled, the session one what the load recovered.
-     */
-    private boolean definitelyNew(UUID id) {
-        CommandDedupIndex history = session;
-        return index.definitelyNew(id) && history != null && history.definitelyNew(id);
-    }
-
-    /**
-     * Publishes the loaded session history, after which the index answers
-     * instead of the database.
-     *
-     * <p>Must not be called until both the load and WAL replay have finished.
-     * Publishing early means the filters are missing entries they should have,
-     * and a missing entry reads as "never seen" - which is how a duplicate order
-     * gets accepted.
-     */
-    public void publishSessionHistory(CommandDedupIndex loaded) {
-        this.session = loaded;
+        return dedup != null && dedup.isReady();
     }
 
     public boolean isReady() {
-        return session != null;
+        return indexAnswers();
     }
 
     /**
@@ -197,7 +168,7 @@ public class OrderStateCache {
      */
     public void put(TradingOrder order) {
         orders.put(order.getId(), order);
-        if (index != null) index.remember(order.getId());
+        if (dedup != null) dedup.remember(order.getId());
     }
 
     // ── ProcessedCommand ──────────────────────────────────────────────────────
@@ -215,7 +186,7 @@ public class OrderStateCache {
             processedFromCache.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
             return Optional.of(cached);
         }
-        if (indexAnswers() && definitelyNew(commandId)) {
+        if (indexAnswers() && dedup.definitelyNew(commandId)) {
             processedFromIndex.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
             return Optional.empty();
         }
@@ -231,6 +202,6 @@ public class OrderStateCache {
         // Remembered even while warming: a command processed during the load
         // must be in the index by the time the load finishes, or the flip to
         // ready would leave a hole exactly the size of the warm-up window.
-        if (index != null) index.remember(command.result().commandId());
+        if (dedup != null) dedup.remember(command.result().commandId());
     }
 }

@@ -5,8 +5,10 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import java.time.Duration;
+
 /**
- * Creates the live deduplication filter when the index is switched on.
+ * Creates the deduplication filters when the index is switched on.
  *
  * <p>No bean means {@link OrderStateCache} receives null and reads through to
  * Postgres exactly as before, so the feature rolls out and rolls back by one
@@ -16,15 +18,21 @@ import org.springframework.context.annotation.Configuration;
 public class DedupIndexConfig {
 
     /**
-     * The filter the writer thread fills as it handles commands. Sized like the
-     * session filter because between them they hold one session's identifiers,
-     * and both key spaces - commandId and orderId - go into them.
+     * The filters the writer thread reads and fills.
+     *
+     * <p>{@code expected-entries} counts the whole horizon and both key spaces -
+     * {@code commandId} for idempotency and {@code orderId} for the duplicate
+     * guard - because they share the filters. Under-sizing is safe: it raises
+     * the false-positive rate, and a false positive costs one Postgres lookup
+     * that then gives the right answer.
      */
     @Bean
     @ConditionalOnProperty(name = "emporia.dedup-index.enabled", havingValue = "true")
-    public CommandDedupIndex commandDedupIndex(
-            @Value("${emporia.dedup-index.expected-entries:3500000}") long expectedEntries,
+    public RotatingDedupIndex rotatingDedupIndex(
+            @Value("${emporia.dedup-index.horizon:PT24H}") Duration horizon,
+            @Value("${emporia.dedup-index.generations:4}") int generations,
+            @Value("${emporia.dedup-index.expected-entries:20000000}") long expectedEntries,
             @Value("${emporia.dedup-index.false-positive-rate:0.001}") double falsePositiveRate) {
-        return new CommandDedupIndex(expectedEntries, falsePositiveRate);
+        return new RotatingDedupIndex(horizon, generations, expectedEntries, falsePositiveRate);
     }
 }

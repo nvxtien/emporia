@@ -1,8 +1,8 @@
 package com.emporia.ordermanagement.service;
 
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -10,20 +10,20 @@ import org.springframework.stereotype.Component;
 
 import jakarta.annotation.PreDestroy;
 
-import java.time.Duration;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Loads the session's processed commands in the background and hands the result
- * to {@link OrderStateCache}, after which the hot path stops asking Postgres
+ * Loads the horizon's identifiers in the background and hands the result to
+ * {@link RotatingDedupIndex}, after which the hot path stops asking Postgres
  * whether it has seen a command before.
  *
  * <h2>Why the load runs after startup rather than during it</h2>
  * <p>Blocking startup would be simpler, but the service would refuse orders for
  * the duration. Running afterwards means orders are accepted from the first
  * moment, answered by the database until the load finishes - which is exactly
- * today's behaviour and today's latency. Warm-up costs speed, not correctness.
+ * the behaviour that predates the index, and its latency. Warm-up costs speed,
+ * not correctness.
  *
  * <h2>Ordering</h2>
  * <p>{@link ApplicationReadyEvent} fires after {@code DisruptorOrderPipeline}'s
@@ -36,19 +36,22 @@ import java.util.concurrent.Executors;
  * <h2>Concurrency</h2>
  * <p>The load fills its own filter rather than the live one. Two threads writing
  * one {@code long[]} would race on a read-modify-write, and a lost bit is a
- * false negative. The handoff is a single volatile write of the reference.
+ * false negative. The handoff is a single reference publication.
+ *
+ * <h2>Why this only runs once</h2>
+ * <p>The filters are kept bounded by rotation rather than by reloading, so there
+ * is no periodic version of this class. A live filter that has been rotated out
+ * already <i>is</i> the history for the period it covered; re-reading it from
+ * Postgres would buy nothing and cost a multi-million row scan on a schedule.
+ * This load exists only to recover what happened before the process started.
  */
 @Component
 public class DedupIndexWarmup {
 
     private static final Logger log = LoggerFactory.getLogger(DedupIndexWarmup.class);
 
-    private final OrderStateCache cache;
+    private final @Nullable RotatingDedupIndex dedup;
     private final JdbcTemplate jdbcTemplate;
-    private final boolean enabled;
-    private final Duration window;
-    private final long expectedEntries;
-    private final double falsePositiveRate;
     // Owned for the bean's life and shut down in @PreDestroy, rather than
     // created inside the listener where it would outlive its only reference.
     private final ExecutorService loader = Executors.newSingleThreadExecutor(runnable -> {
@@ -57,24 +60,14 @@ public class DedupIndexWarmup {
         return thread;
     });
 
-    public DedupIndexWarmup(
-            OrderStateCache cache,
-            JdbcTemplate jdbcTemplate,
-            @Value("${emporia.dedup-index.enabled:false}") boolean enabled,
-            @Value("${emporia.dedup-index.session-window:PT8H}") Duration window,
-            @Value("${emporia.dedup-index.expected-entries:3500000}") long expectedEntries,
-            @Value("${emporia.dedup-index.false-positive-rate:0.001}") double falsePositiveRate) {
-        this.cache = cache;
+    public DedupIndexWarmup(@Nullable RotatingDedupIndex dedup, JdbcTemplate jdbcTemplate) {
+        this.dedup = dedup;
         this.jdbcTemplate = jdbcTemplate;
-        this.enabled = enabled;
-        this.window = window;
-        this.expectedEntries = expectedEntries;
-        this.falsePositiveRate = falsePositiveRate;
     }
 
     @EventListener(ApplicationReadyEvent.class)
     public void warmUp() {
-        if (!enabled || jdbcTemplate == null) {
+        if (dedup == null || jdbcTemplate == null) {
             log.info("Deduplication index disabled; hot-path lookups continue to read through to Postgres");
             return;
         }
@@ -96,12 +89,12 @@ public class DedupIndexWarmup {
 
     private void loadAndPublish() {
         try {
-            CommandDedupIndex history = new CommandDedupIndex(expectedEntries, falsePositiveRate);
-            long loaded = new DedupIndexLoader(jdbcTemplate).load(history, window);
-            cache.publishSessionHistory(history);
-            log.info("Deduplication index ready: {} commands over {}, {} KB of filter. "
+            CommandDedupIndex history = dedup.newHistoryFilter();
+            long loaded = new DedupIndexLoader(jdbcTemplate).load(history, dedup.horizon());
+            dedup.publishHistory(history);
+            log.info("Deduplication index ready: {} identifiers over {}, {} KB of filters. "
                             + "Hot-path lookups now answer from memory.",
-                    loaded, window, history.bitCount() / 8 / 1024);
+                    loaded, dedup.horizon(), dedup.bytes() / 1024);
         } catch (RuntimeException loadFailure) {
             // Never fatal, and deliberately never published on failure: a
             // partially filled filter reports "never seen" for things it has

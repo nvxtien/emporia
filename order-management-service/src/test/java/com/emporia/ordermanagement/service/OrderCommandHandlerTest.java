@@ -26,6 +26,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -550,9 +551,9 @@ class OrderCommandHandlerTest {
      */
     @Test
     void aDuplicateCommandIsStillRefusedWhileTheIndexIsAnswering() {
-        CommandDedupIndex live = new CommandDedupIndex(1_000, 0.001);
-        OrderStateCache indexed = new OrderStateCache(orders, processed, metrics, live, 1000, 1000);
-        indexed.publishSessionHistory(new CommandDedupIndex(1_000, 0.001));
+        RotatingDedupIndex dedup = new RotatingDedupIndex(Duration.ofHours(24), 4, 1_000, 0.001);
+        OrderStateCache indexed = new OrderStateCache(orders, processed, metrics, dedup, 1000, 1000);
+        dedup.publishHistory(new CommandDedupIndex(1_000, 0.001));
         OrderCommandHandler indexedHandler = new OrderCommandHandler(
                 orders, events, processed, new ObjectMapper(), observations, metrics, indexed, asyncDbWriter, dispatcher);
         assertThat(indexed.isReady()).isTrue();
@@ -574,9 +575,9 @@ class OrderCommandHandlerTest {
      */
     @Test
     void aReusedOrderIdIsRefusedWhileTheIndexIsAnswering() {
-        CommandDedupIndex live = new CommandDedupIndex(1_000, 0.001);
-        OrderStateCache indexed = new OrderStateCache(orders, processed, metrics, live, 1000, 1000);
-        indexed.publishSessionHistory(new CommandDedupIndex(1_000, 0.001));
+        RotatingDedupIndex dedup = new RotatingDedupIndex(Duration.ofHours(24), 4, 1_000, 0.001);
+        OrderStateCache indexed = new OrderStateCache(orders, processed, metrics, dedup, 1000, 1000);
+        dedup.publishHistory(new CommandDedupIndex(1_000, 0.001));
         OrderCommandHandler indexedHandler = new OrderCommandHandler(
                 orders, events, processed, new ObjectMapper(), observations, metrics, indexed, asyncDbWriter, dispatcher);
 

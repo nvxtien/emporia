@@ -219,6 +219,66 @@ same `order_id`, plus how long the writer was idle and how much CPU it used
 across the gap - near-zero idle with a deep ring is a backlog, idle time not
 spent on CPU is time it was not scheduled.
 
+## The dedup index answers from memory, and its horizon is a correctness bound
+
+- **Where**: `RotatingDedupIndex`, `OrderStateCache`, `emporia.dedup-index.*`
+  (env `EMPORIA_DEDUP_INDEX_*`), on by default
+
+`OrderStateCache`'s two hot-path lookups - `existsById` for the duplicate-order
+guard and `findProcessedById` for idempotency - used to read through to Postgres
+on every order. Not "mostly misses": **zero cache hits in 14,402 orders**, because
+a `CREATE` carries freshly generated ids so the read-through fires every time.
+They cost 2.312 of the handler's 2.405 ms, on the single writer thread, where
+that multiplies by the queue behind it.
+
+A Bloom filter answers "never seen" from memory instead. Six alternating runs at
+120 orders/sec, both orders of arm:
+
+| | ring queue wait, mean | max | k6 submit p99 |
+|---|---:|---:|---:|
+| index on | 0.035 - 0.230 ms | 17 - 52 ms | 27 - 73 ms |
+| index off | 1.872 - 5.712 ms | 248 - 479 ms | 106 - 361 ms |
+
+**The horizon is not a performance knob.** Past `emporia.dedup-index.horizon`
+the filters report "never seen" and `OrderStateCache` returns that answer
+*without consulting Postgres*, so a command older than the horizon reads as new
+even though the database still holds it. That is a false negative, and on this
+system a false negative is a duplicate position. The default of 24 hours matches
+the Idempotency-Key TTL the processed-command cache already promises callers:
+past that TTL a repeated key is contractually a new request rather than a retry.
+Shortening the horizon shortens that promise.
+
+The order-id key space carries a guard on top of the horizon that does not
+expire, because strategy child ids are derived from the parent - `deterministic(
+parent + strategy + index)` - so a parent outliving the window regenerates ids
+the window no longer holds. `DedupIndexLoader` therefore loads **every working
+order regardless of age**, alongside the window. Without it the duplicate would
+not even fail on the primary key: the writer upserts, so it would silently
+overwrite a live order.
+
+**Rotation is what bounds memory**, and it is the reason there is no periodic
+reload. A Bloom filter cannot delete, so a single filter on a process that never
+restarts fills until every answer is a false positive - roughly 0.1% at eight
+hours, 15% at three days, 50% at a week. Nothing breaks and no short benchmark
+can see it; the hot path just drifts back to Postgres. A live filter that has
+been rotated out *is* the history for the period it covered, so rotation needs
+no database read at all. `generations` filters are retained behind the live one
+and rotation runs every `horizon / generations`.
+
+**Two things must hold, or deduplication is wrong rather than slow:**
+
+- *Exactly one instance accepts orders.* Enforced on the order path by the
+  `isPrimary()` check in `DisruptorOrderPipeline`, not assumed. Note the limit:
+  the `local-filelock` provider excludes a second process on one machine and
+  does **not** exclude a second machine.
+- *Every processed identifier reaches the filter.* The risk lives in the write
+  path, not in the filter, which has no false negatives of its own.
+
+**The oracle for both**: `emporia.oms.dedup.duplicate_reached_db` counts
+commands that got past the index and were absorbed by `ON CONFLICT` in the
+writer. It must stay at zero, and it is the only signal that says rotation,
+sizing, or the single-writer assumption has gone wrong.
+
 ## The portfolio outbox distinguishes settled changes from margin reservations
 
 - **Where**: `exchange-core` 0.5.8's `EmporiaPortfolioChange`, and

@@ -66,33 +66,46 @@ emporia.disruptor:
 # counts duplicates that got through and must stay at zero.
 emporia.dedup-index:
   enabled: ${EMPORIA_DEDUP_INDEX_ENABLED:true}
-  # How far back the startup load reaches. Commands older than this fall back to
-  # Postgres, which is correct but slower - and by then a client retry is a new
-  # request, not a retry.
-  session-window: ${EMPORIA_DEDUP_INDEX_SESSION_WINDOW:PT8H}
-  # ~1.8 bytes per entry at 0.001, so 3.5M is ~6 MB - eight hours at 120
-  # orders/sec. Size it by rate times uptime between restarts, not by rate alone.
+  # How far back an identifier stays known from memory.
   #
-  # KNOWN GAP, stated rather than left implicit. A Bloom filter cannot delete
-  # entries, and nothing rotates this one yet, so the live filter grows for as
-  # long as the process runs. This venue runs 24/7, so it does grow:
+  # This is a correctness parameter, not a performance one. Past the horizon the
+  # filters report "never seen" and OrderStateCache returns that answer WITHOUT
+  # consulting Postgres, so a command older than this reads as new even though
+  # the database still holds it. 24 hours matches the Idempotency-Key TTL the
+  # processed-command cache already promises callers: beyond that TTL a repeated
+  # key is contractually a new request rather than a retry.
   #
-  #     8 hours   3.5M entries    0.1% false positives   <- what this is sized for
-  #     3 days    ~10M            ~15%
-  #     1 week    ~24M            ~50%
+  # The order-id key space carries a guard on top of this that does not expire,
+  # because strategy parents derive child ids deterministically and can outlive
+  # any window: DedupIndexLoader loads every working order regardless of age.
+  horizon: ${EMPORIA_DEDUP_INDEX_HORIZON:PT24H}
+  # Filters retained behind the live one. Rotation runs every horizon/generations
+  # - six hours by default - and drops the oldest, which is what bounds memory on
+  # a venue that runs 24/7 and never restarts. Without it a Bloom filter, which
+  # cannot delete, fills until every answer is a false positive: ~0.1% at eight
+  # hours, ~15% at three days, ~50% at a week. Nothing breaks, the hot path just
+  # drifts back to Postgres, and no short benchmark can see it happen.
   #
-  # It stays correct - a false positive costs one Postgres lookup that returns
-  # the right answer - but the benefit erodes until the hot path is back where
-  # it started. There is no cliff and no error, so a 120-second benchmark cannot
-  # see it; only uptime does.
+  # More generations forget in finer steps and cost slightly more memory; fewer
+  # cost less and forget in coarser ones.
+  generations: ${EMPORIA_DEDUP_INDEX_GENERATIONS:4}
+  # Identifiers expected across the whole horizon, both key spaces counted:
+  # commandId for idempotency, orderId for the duplicate guard. 20M is 24 hours
+  # at the 120 orders/sec this was benchmarked at, at roughly two identifiers per
+  # order.
   #
-  # The fix is rotation plus a periodic reload of the loaded history, so that
-  # what rotation drops is still covered. Rotating alone would let an old
-  # identifier read as never-seen, which is a false negative - a duplicate
-  # order - and that trade is the wrong way round for this system.
-  expected-entries: ${EMPORIA_DEDUP_INDEX_EXPECTED_ENTRIES:3500000}
-  # Only ever wrong in the safe direction: a false positive costs one Postgres
-  # lookup that then gives the right answer. False negatives cannot occur.
+  # ~1.8 bytes per entry at 0.001. Each generation is sized for
+  # expected-entries/generations, so steady state holds (generations + 1) of
+  # those - about 45 MB here - plus the startup history filter for the first
+  # horizon, released once the retained generations cover the horizon alone.
+  #
+  # Under-sizing is safe and costs latency, not correctness: it raises the
+  # false-positive rate, and a false positive is one Postgres lookup that then
+  # gives the right answer.
+  expected-entries: ${EMPORIA_DEDUP_INDEX_EXPECTED_ENTRIES:20000000}
+  # Only ever wrong in the safe direction. The filter itself cannot produce a
+  # false negative; those can only come from an identifier never being inserted,
+  # or from one aging past the horizon above.
   false-positive-rate: ${EMPORIA_DEDUP_INDEX_FALSE_POSITIVE_RATE:0.001}
 
 emporia.aeron.intake:

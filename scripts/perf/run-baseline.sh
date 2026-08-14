@@ -25,6 +25,7 @@ STAGE="${1:-all}"
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8082}"
 PROM_URL="${PROM_URL:-http://localhost:9090}"
 ORIGIN="${EMPORIA_ORIGIN:-http://localhost:3001}"
+REQUIRE_PROMETHEUS="${REQUIRE_PROMETHEUS:-true}"
 MIN_FREE_GIB="${MIN_FREE_GIB:-10}"
 PROBE_RATES="${PROBE_RATES:-5,10,20,40}"
 PROBE_STEP="${PROBE_STEP:-60s}"
@@ -91,7 +92,9 @@ check_disk() {
 }
 
 require_stack() {
-    curl -fsS "${PROM_URL}/-/healthy" >/dev/null 2>&1 || fail "Prometheus is not reachable at ${PROM_URL}"
+    if [ "$REQUIRE_PROMETHEUS" != "false" ]; then
+        curl -fsS "${PROM_URL}/-/healthy" >/dev/null 2>&1 || fail "Prometheus is not reachable at ${PROM_URL}"
+    fi
     command -v k6 >/dev/null 2>&1 || fail "k6 is not on PATH"
 }
 

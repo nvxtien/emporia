@@ -378,11 +378,41 @@ ordering test.
 
 **Phase 4 — flip the default, measure repeatedly.** Not one run.
 
-**Phase 5 — session rotation of the Bloom filter**, with tests.
+**Phase 5 — rotation of the Bloom filter**, with tests. ✅ Done, and the design
+changed twice on the way.
+
+*"Session" rotation was the wrong frame.* The venue runs 24/7, so there is no
+session boundary to rotate on. The parameter is a deduplication **horizon**, set
+to 24 hours to match the Idempotency-Key TTL the processed-command cache already
+promises callers.
+
+*The periodic reload turned out to be unnecessary.* The sketch was "rotate, and
+reload the history from Postgres periodically so what rotation drops is still
+covered". But a live filter that has been rotated out **is** the history for the
+period it covered. Rotation is a reference shuffle; it needs no database read,
+which removes a multi-million-row scan on a schedule, a race between the query
+and the swap, and a failure path when the reload fails.
+
+*Rotation turns the window from a performance knob into a correctness bound.*
+Without rotation the live filter never forgets, so a long-running process covers
+everything since startup. With it, coverage is exactly the horizon, and past the
+horizon `OrderStateCache` returns "never seen" **without consulting Postgres**.
+That is stated in `RotatingDedupIndex`'s javadoc, in `application.yml` next to
+the parameter, and in `CONFIGURATION.md`.
+
+*A pre-existing hole surfaced while re-reading the code.* The loader only ever
+read `command_id`, but `existsById(orderId)` asks the same filters — so after a
+restart every pre-existing orderId read as "never seen" and the 409 guard was
+silently off. It was being covered by the commandId tier rather than by design,
+and rotation would have widened it from "after a restart" to "every horizon".
+The loader now reads both key spaces, plus **every working order regardless of
+age**, because strategy child ids are derived from the parent and a parent can
+outlive any window. `V11` adds the two indexes that load needs.
 
 **Phase 6 — documentation.** Delete the six stale comments, rewrite
 `OrderStateCache`'s javadoc to state the real invariant, record the constraint in
-`CONFIGURATION.md`.
+`CONFIGURATION.md`. ✅ `CONFIGURATION.md` records the horizon, the rotation
+argument, the two standing assumptions and the `duplicate_reached_db` oracle.
 
 ## Risks
 
