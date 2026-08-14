@@ -16,8 +16,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -37,7 +38,7 @@ public class AeronOrderCommandSubscriber implements AutoCloseable {
     private final DisruptorOrderPipeline disruptorPipeline;
     private final Aeron aeron;
     private final Subscription subscription;
-    private final ScheduledExecutorService executor;
+    private final ExecutorService executor;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final FragmentHandler fragmentHandler;
 
@@ -74,9 +75,12 @@ public class AeronOrderCommandSubscriber implements AutoCloseable {
         }
         this.aeron = Aeron.connect(ctx);
         this.subscription = aeron.addSubscription(channel, streamId);
-        this.executor = Executors.newSingleThreadScheduledExecutor(r -> {
+        this.executor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "aeron-order-intake");
             t.setDaemon(true);
+            // Busy-spin intake: the priority belongs to the thread this factory
+            // builds, so the loop keeps it however it is submitted.
+            t.setPriority(Thread.MAX_PRIORITY);
             return t;
         });
 
@@ -121,11 +125,11 @@ public class AeronOrderCommandSubscriber implements AutoCloseable {
     public void start() {
         if (running.compareAndSet(false, true)) {
             if (subscription != null) {
-                Thread worker = new Thread(this::busySpinLoop, "aeron-order-intake-spin");
-                worker.setDaemon(true);
-                worker.setPriority(Thread.MAX_PRIORITY);
-                worker.start();
-                log.info("Aeron OrderCommand subscriber dedicated busy-spin thread started (MAX_PRIORITY)");
+                // On the executor this class already owns rather than a bare
+                // Thread. The bare one was unreachable once started: nothing
+                // held it, so shutdown could not wait for it.
+                executor.execute(this::busySpinLoop);
+                log.info("Aeron OrderCommand subscriber busy-spin loop started (MAX_PRIORITY)");
             }
         }
     }
@@ -147,10 +151,27 @@ public class AeronOrderCommandSubscriber implements AutoCloseable {
     @PreDestroy
     public void close() {
         if (running.compareAndSet(true, false)) {
-            if (executor != null) executor.shutdown();
+            // Clearing running above is what ends the loop; waiting for it to
+            // actually leave is what makes closing the subscription safe.
+            // subscription.close() frees Aeron's off-heap buffers, and the
+            // guard at the top of poll() cannot prevent a thread already past
+            // it from polling them afterwards.
+            awaitIntakeStopped();
             if (subscription != null) subscription.close();
             if (aeron != null) aeron.close();
             log.info("Aeron OrderCommand subscriber closed");
+        }
+    }
+
+    private void awaitIntakeStopped() {
+        if (executor == null) return;
+        executor.shutdown();
+        try {
+            if (!executor.awaitTermination(2, TimeUnit.SECONDS)) {
+                log.warn("Aeron intake did not stop within 2 s; closing its subscription anyway");
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
         }
     }
 }
