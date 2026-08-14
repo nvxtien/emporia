@@ -89,7 +89,11 @@ public class OrderCommandHandler {
                     case CANCEL -> cancel(command);
                     case CANCEL_ALL -> cancelAll(command);
                 };
+                long dispatchStartNanos = System.nanoTime();
                 enqueueOutbox(command, result);
+                metrics.registry().timer("emporia.oms.command.dispatch")
+                        .record(System.nanoTime() - dispatchStartNanos,
+                                java.util.concurrent.TimeUnit.NANOSECONDS);
                 return result;
             } catch (DomainProblem problem) {
                 outcome = "rejected";
@@ -244,6 +248,8 @@ public class OrderCommandHandler {
     }
 
     private ProcessingOutcome success(OrderCommand command, TradingOrder order, String type, String message, int status) {
+        long startNanos = System.nanoTime();
+        try {
         String payload = json(order.view());
         OrderEvent event = new OrderEvent(command.commandId(), order, type, message, payload);
         asyncDbWriter.enqueue(event);
@@ -252,6 +258,11 @@ public class OrderCommandHandler {
         cache.putProcessed(processedCommand);
         asyncDbWriter.enqueue(processedCommand);
         return new ProcessingOutcome(result, List.of(event.domainEvent()), order.view());
+        } finally {
+            metrics.registry().timer("emporia.oms.command.persist")
+                    .record(System.nanoTime() - startNanos,
+                            java.util.concurrent.TimeUnit.NANOSECONDS);
+        }
     }
 
     private String desk(OrderCommand command) {

@@ -2,6 +2,7 @@ package com.emporia.ordermanagement.service;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import io.micrometer.core.instrument.Timer;
 import com.emporia.ordermanagement.model.ProcessedCommand;
 import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.ProcessedCommandRepository;
@@ -12,6 +13,7 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 /**
  * In-process write-through cache for {@link TradingOrder} and
@@ -54,14 +56,27 @@ public class OrderStateCache {
     private final Cache<UUID, ProcessedCommand> processed;
     private final TradingOrderRepository orderRepository;
     private final ProcessedCommandRepository processedRepository;
+    // Both lookups run on the Disruptor writer thread, where cost multiplies by
+    // the whole queue depth rather than being absorbed in parallel. Tagged by
+    // source so a run says how often the read-through fallback actually fires:
+    // for a CREATE both ids are freshly generated, so it fires every time.
+    private final Timer processedFromCache;
+    private final Timer processedFromDb;
+    private final Timer existsFromCache;
+    private final Timer existsFromDb;
 
     public OrderStateCache(
             TradingOrderRepository orderRepository,
             ProcessedCommandRepository processedRepository,
+            OrderMetrics metrics,
             @Value("${emporia.cache.order-max-size:100000}") long orderMaxSize,
             @Value("${emporia.cache.processed-max-size:50000}") long processedMaxSize) {
         this.orderRepository = orderRepository;
         this.processedRepository = processedRepository;
+        this.processedFromCache = metrics.registry().timer("emporia.oms.cache.lookup", "check", "processed", "source", "cache");
+        this.processedFromDb = metrics.registry().timer("emporia.oms.cache.lookup", "check", "processed", "source", "db");
+        this.existsFromCache = metrics.registry().timer("emporia.oms.cache.lookup", "check", "exists", "source", "cache");
+        this.existsFromDb = metrics.registry().timer("emporia.oms.cache.lookup", "check", "exists", "source", "db");
         this.orders = Caffeine.newBuilder()
                 .maximumSize(orderMaxSize)
                 .expireAfterWrite(Duration.ofHours(1))
@@ -95,8 +110,14 @@ public class OrderStateCache {
 
     /** Returns {@code true} when an order with this id exists (any desk). */
     public boolean existsById(UUID id) {
-        if (orders.getIfPresent(id) != null) return true;
-        return orderRepository.existsById(id);
+        long started = System.nanoTime();
+        if (orders.getIfPresent(id) != null) {
+            existsFromCache.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
+            return true;
+        }
+        boolean exists = orderRepository.existsById(id);
+        existsFromDb.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
+        return exists;
     }
 
     /**
@@ -116,10 +137,15 @@ public class OrderStateCache {
      * normal case on a warm instance.
      */
     public Optional<ProcessedCommand> findProcessedById(UUID commandId) {
+        long started = System.nanoTime();
         ProcessedCommand cached = processed.getIfPresent(commandId);
-        if (cached != null) return Optional.of(cached);
+        if (cached != null) {
+            processedFromCache.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
+            return Optional.of(cached);
+        }
         Optional<ProcessedCommand> fromDb = processedRepository.findById(commandId);
         fromDb.ifPresent(p -> processed.put(commandId, p));
+        processedFromDb.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
         return fromDb;
     }
 

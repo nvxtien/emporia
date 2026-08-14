@@ -68,6 +68,14 @@ public class DisruptorOrderPipeline {
     private final Timer walLatency;
     private final Timer commandLatency;
     private final Timer safePointLatency;
+    /**
+     * Gap between consecutive publishes. Queue wait is (events ahead) x handler
+     * time, so whether arrivals are smooth or bursty decides how deep the ring
+     * gets - and that cannot be inferred from the wait itself.
+     */
+    private final Timer arrivalGap;
+    private final java.util.concurrent.atomic.AtomicLong lastSubmitNanos =
+            new java.util.concurrent.atomic.AtomicLong();
     private final Timer handleLatency;
     private final AtomicLong queueDepth = new AtomicLong();
     private final AtomicBoolean accepting = new AtomicBoolean(true);
@@ -102,6 +110,7 @@ public class DisruptorOrderPipeline {
         this.walLatency = meters.timer("emporia.oms.pipeline.wal.latency");
         this.commandLatency = meters.timer("emporia.oms.pipeline.command.latency");
         this.safePointLatency = meters.timer("emporia.oms.pipeline.safepoint.latency");
+        this.arrivalGap = meters.timer("emporia.oms.pipeline.arrival.gap");
         this.handleLatency = meters.timer("emporia.oms.pipeline.handle.latency");
         this.walFailures = meters.counter("emporia.oms.pipeline.wal.failures");
         meters.gauge("emporia.oms.pipeline.queue.depth", queueDepth);
@@ -244,6 +253,11 @@ public class DisruptorOrderPipeline {
      * @return CompletableFuture completing with the processing outcome
      */
     public CompletableFuture<ProcessingOutcome> submit(OrderCommand command) {
+        long nowNanos = System.nanoTime();
+        long previousNanos = lastSubmitNanos.getAndSet(nowNanos);
+        if (previousNanos != 0L && nowNanos > previousNanos) {
+            arrivalGap.record(nowNanos - previousNanos, TimeUnit.NANOSECONDS);
+        }
         if (!accepting.get()) {
             return rejected(503, "kill_switch",
                     "OMS hot path is disabled by kill switch: " + killSwitchReason);
