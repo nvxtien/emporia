@@ -64,6 +64,9 @@ Three tiers:
 | Bloom filter | *definitely never seen* | one trading session | ~6 MB at 120/s |
 | database | the remainder | 0.1% false positives + very old retries | ~0.12 queries/sec |
 
+Both keys go through this: `commandId` for idempotency, `orderId` for the
+duplicate-order guard. Two keys in one structure rather than two structures.
+
 A Bloom filter has **no false negatives**: "not present" is exact. That is the
 answer the hot path needs, and it is the answer the current cache cannot give.
 A false positive costs one database lookup which then returns the correct
@@ -113,14 +116,39 @@ leaves exactly that window open, and the WAL exists for exactly that window.
 Degradation during warm-up is in performance, not correctness — the first
 seconds run at today's latency.
 
-### Drop `existsById` entirely
+### `existsById` moves into the index rather than being deleted
 
-For `CREATE`, `orderId` is generated server-side by `UUID.randomUUID()`, so it is
-never a duplicate in practice. Its one narrow role — replay after a crash that
-persisted `trading_order` but not `processed_order_command` — is already covered
-by the `commandId` check, with the `trading_order` primary key as the backstop.
+An earlier draft made dropping `existsById` its own early phase: `orderId` is
+generated server-side, so it is never a duplicate in practice, and the
+`trading_order` primary key would act as a backstop. That was the wrong trade.
 
-Removes 0.999 ms/order, 43% of the cost.
+`trading_order` is written on every state change — `enqueue(order)` at
+`OrderCommandHandler` lines 161 (create), 181, 194, 233 (updates) — so the same
+`orderId` legitimately reaches that insert many times. `ON CONFLICT (id) DO
+UPDATE` is load-bearing, a conflict is the *normal* case, and the affected-row
+count that works for `processed_order_command` carries no information here. A
+duplicate `CREATE` would upsert silently, with nothing able to report it: the
+flush layer cannot tell a create from an update, and the only layer that can is
+the handler, which is the layer being relieved of database work.
+
+So the same lookup is served from the index instead:
+
+| | latency | guard | observable |
+|---|---|---|---|
+| leave as is | −0 ms | yes | yes |
+| delete it | −0.999 ms | **lost** | **blind** |
+| **serve from the index** | −0.999 ms | yes | yes |
+
+The third row takes the whole benefit of the second at no cost, so there is no
+reason to choose the second. `orderId` joins `commandId` in the same Bloom filter
+and exact map — the machinery already exists for one, and carrying two keys is
+close to free.
+
+The cost of this decision: there is no longer a small independent phase that
+banks 43% early. The first latency improvement now waits for the index. That is
+the deliberate trade — losing the guard and the ability to observe its failure is
+not worth a few weeks of earlier measurement in a system whose failure mode is a
+duplicate order.
 
 ### Protecting the index write path
 
@@ -155,7 +183,8 @@ than the one that writes it.
    to gain by moving it. The single-writer property becomes an asset rather than
    a constraint.
 
-**Detection: the schema already provides a free, always-on oracle**
+**Detection: the schema already provides a free, always-on oracle** — built in
+`0e8371b`
 
 ```sql
 CREATE TABLE processed_order_command (
@@ -163,21 +192,51 @@ CREATE TABLE processed_order_command (
 ```
 
 If the index ever returns a false negative, the duplicate is processed and
-`AsyncDbWriter` then attempts to insert a `command_id` that already exists — a
-primary key violation. Postgres is already checking this invariant continuously,
-for every order, at no cost. The system simply is not listening.
+`AsyncDbWriter` then inserts a `command_id` that already exists. Postgres is
+already checking this invariant continuously, for every order, at no cost. The
+system simply was not listening.
 
-So: count primary key violations on `processed_order_command`, expose the count
-as a metric, and alert on anything above zero. That count *is* the number of
-false negatives that have occurred.
+**Correction to an earlier draft of this plan, which had this wrong twice.**
+
+It claimed the collision surfaces as a primary key violation to be caught. It
+does not. All four insert statements in `AsyncDbWriter` are conflict-tolerant:
+
+```
+trading_order            ON CONFLICT (id)         DO UPDATE
+order_event              ON CONFLICT (id)         DO NOTHING
+processed_order_command  ON CONFLICT (command_id) DO NOTHING
+```
+
+`DO NOTHING` absorbs the collision silently — it swallows precisely the signal
+the plan wanted. And because nothing throws, the related worry that a duplicate
+would poison the flush queue (`catch → restoreToQueues → throw`, retried every
+10 ms forever) cannot happen either. Both readings came from the Java without
+reading the SQL.
+
+The real signal is cheaper. `jdbcTemplate.batchUpdate` returns the affected-row
+count per record, and that return value was being discarded. Under `DO NOTHING`,
+**0 means the row was already there**:
+
+```java
+int[][] affected = jdbcTemplate.batchUpdate(...);
+reportAbsorbedDuplicates(affected, batch);
+```
+
+No SQL change, no new table, no exception handling. `emporia.oms.dedup
+.duplicate_reached_db` plus an ERROR log carrying the `command_id`. The counter
+should read zero forever; a non-zero value is the number of duplicates that got
+through, not a warning about one.
 
 For a system whose failure mode is a duplicate order, prevention alone is not
 enough — something has to report when prevention fails. This makes the invariant
 continuously verified in production rather than only argued in a design
 document.
 
-Requires checking how `AsyncDbWriter` currently handles that failure; most likely
-it logs and moves on.
+**What this oracle does not cover.** `trading_order` uses `DO UPDATE`, which
+always reports 1 row affected, so it yields no signal. Dropping `existsById`
+(Phase 1) is therefore safer than an earlier draft warned — a duplicate upserts
+rather than failing — but also completely silent. Covering that path needs a
+separate mechanism, which this plan does not currently specify.
 
 ### The rare slow path
 
@@ -285,19 +344,26 @@ history; reword only if it reads as present tense.
 
 Each phase is its own commit, independently buildable and verifiable.
 
-**Phase 0 — enforce single-instance authority.** `isPrimary()` check on the order
+Phases 0 and 1b are done. The order below is the corrected one: the oracle moved
+ahead of dropping `existsById`, so that a failure has something watching it
+before the guard is removed.
+
+**Phase 0 — enforce single-instance authority.** ✅ `ac94444` `isPrimary()` check on the order
 path returning 503; test that a non-primary refuses orders. Ships *before* the
 index change, so the invariant the index depends on exists first.
 
-**Phase 1 — delete `existsById` from the CREATE path.** Smallest independent win,
-0.999 ms/order, no new machinery. Measure before continuing; if 43% is enough,
-the rest may not be worth its complexity.
+**Phase 1 — folded into Phase 2.** It was "delete `existsById` from the CREATE
+path": the smallest independent win, 0.999 ms/order with no new machinery. It is
+gone because deleting the guard leaves a duplicate `CREATE` undetectable, while
+serving the same lookup from the index costs the same and keeps it. See
+"`existsById` moves into the index" above.
 
-**Phase 1b — the false-negative oracle, before anything depends on it.** Turn the
-primary key violation on `processed_order_command` into a metric with an alert.
-This ships before the index exists, so that when the index does arrive there is
-already something watching it — and so the metric's baseline of zero is
-established against today's known-correct behaviour.
+**Phase 1b — the false-negative oracle, before anything depends on it.**
+✅ `0e8371b`, and it ships *before* Phase 1 rather than after. Counts the
+absorbed duplicates on `processed_order_command` via the affected-row count. The
+metric's baseline of zero is established against today's known-correct
+behaviour, so a later non-zero reading points at the index rather than at
+something that was always broken and never observed.
 
 **Phase 1c — collapse the four `putProcessed()` call sites into one.** Pure
 refactor, no behaviour change, verifiable on its own. Doing it before the index
@@ -352,9 +418,11 @@ Plus the per-`orderId` ordering test for the slow branch (Phase 3).
 
 - `OrderCommandReplayHarness` calls `handler.handle()` directly; confirm what it
   needs from the index and whether it must load before replaying.
-- How `AsyncDbWriter` currently handles a primary key violation on
-  `processed_order_command` — this is the false-negative oracle and it needs to
-  become a metric with an alert, not a swallowed log line.
+- ~~How `AsyncDbWriter` handles a primary key violation~~ — resolved, and the
+  answer was not what this plan assumed. See the correction above: every insert
+  is conflict-tolerant, so nothing throws; the affected-row count is the signal.
+- ~~Whether a duplicate reaching `trading_order` needs its own detection~~ —
+  moot: `existsById` is no longer being removed, so nothing goes unobserved.
 - `processed_order_command` (V1__create_order_store.sql:69) has
   `processed_at TIMESTAMP WITH TIME ZONE NOT NULL` but **no index on it**.
   Loading the session by `processed_at` would scan the table, and clock skew
