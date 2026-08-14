@@ -42,12 +42,13 @@ import java.util.concurrent.TimeUnit;
  *       index's horizon, which is why that horizon is a correctness parameter
  *       rather than a performance one.</li>
  *   <li><b>single-instance authority</b>: deduplication is correct if and only
- *       if exactly one instance accepts orders. This is enforced on the order
- *       path by the {@code isPrimary()} check in {@code DisruptorOrderPipeline},
- *       not assumed. Note the limit: the {@code local-filelock} provider
- *       excludes a second process on one machine and does <b>not</b> exclude a
- *       second machine. HTTP read queries ({@code GET /orders}) bypass the cache
- *       entirely and go straight to the DB.</li>
+ *       if exactly one instance accepts orders. The order path asks
+ *       {@code isPrimary()} in {@code DisruptorOrderPipeline} rather than
+ *       assuming it, but that answer is only worth what the elector behind it is
+ *       worth, and <b>neither provider in this repository excludes a second
+ *       machine</b>. See {@code CONFIGURATION.md}. HTTP read queries
+ *       ({@code GET /orders}) bypass the cache entirely and go straight to the
+ *       DB.</li>
  * </ul>
  *
  * <p>An earlier version of this javadoc attributed single-instance authority to

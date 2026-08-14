@@ -219,6 +219,48 @@ same `order_id`, plus how long the writer was idle and how much CPU it used
 across the gap - near-zero idle with a deep ring is a backlog, idle time not
 spent on CPU is time it was not scheduled.
 
+## Neither leader-election provider excludes a second machine
+
+- **Where**: `HaProviderAutoConfiguration`, `LocalFileLeaderProvider`,
+  `RedisRedlockLeaderProvider`, `emporia.ha.provider`
+
+Order deduplication is correct if and only if exactly one instance accepts
+orders. `DisruptorOrderPipeline` asks `LeaderElectionService.isPrimary()` and
+refuses with 503 when the answer is no, so the assumption is checked rather than
+assumed. What it is checked against is the problem.
+
+| `emporia.ha.provider` | what it does |
+|---|---|
+| `local-file` (default) | takes a real `FileLock` via `tryLock()`. Excludes a second process on one filesystem. Its own javadoc scopes it to development. |
+| `redis` | **touches no Redis.** An in-process `AtomicBoolean` that returns true unconditionally. |
+
+`RedisRedlockLeaderProvider` names Redlock and logs a lock key, but there is no
+Redis client anywhere in the build - no `redisson`, `lettuce`, `jedis` or
+`spring-boot-starter-data-redis` in any pom. `tryAcquireOrRenewLease` reads:
+
+```java
+boolean acquired = isLeaderHeld.compareAndSet(false, true) || isLeaderHeld.get();
+```
+
+The first call sets it, every later call reads it back, and both answer true. Its
+unit test asserts exactly that, so the behaviour is pinned as correct.
+
+This is a known placeholder rather than an oversight - the provider was never
+finished - so treat it as unimplemented, not as something to debug.
+
+So switching to the production-sounding provider does not extend the guarantee
+across machines - it **removes** the one-machine guarantee the file lock gives,
+and every node believes it is primary. The order-management service sets no
+`emporia.ha` block at all and no script or compose file overrides it, so it runs
+on `local-file` today by falling through `matchIfMissing = true`.
+
+**What this costs.** Two instances accepting orders means two independent
+deduplication indexes, each certain that ids the other has handled are new.
+`emporia.oms.dedup.duplicate_reached_db` and
+`duplicate_order_reached_db` would catch it - both are database-side, so they see
+writes from every instance - which makes them the detector for this too, not just
+for a filter bug.
+
 ## entity_version froze at 0 when order writes moved to raw JDBC
 
 - **Where**: `TradingOrder.recordRevision`, `OrderStateCache.put`,
@@ -303,10 +345,9 @@ and rotation runs every `horizon / generations`.
 
 **Two things must hold, or deduplication is wrong rather than slow:**
 
-- *Exactly one instance accepts orders.* Enforced on the order path by the
-  `isPrimary()` check in `DisruptorOrderPipeline`, not assumed. Note the limit:
-  the `local-filelock` provider excludes a second process on one machine and
-  does **not** exclude a second machine.
+- *Exactly one instance accepts orders.* The order path asks `isPrimary()` in
+  `DisruptorOrderPipeline` rather than assuming it - but nothing in this
+  repository can answer that question across machines. See the next section.
 - *Every processed identifier reaches the filter.* The risk lives in the write
   path, not in the filter, which has no false negatives of its own.
 
