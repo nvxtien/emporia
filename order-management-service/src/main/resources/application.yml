@@ -66,12 +66,30 @@ emporia.disruptor:
 # counts duplicates that got through and must stay at zero.
 emporia.dedup-index:
   enabled: ${EMPORIA_DEDUP_INDEX_ENABLED:true}
-  # One trading session. Commands older than this fall back to Postgres, which
-  # is correct but slower - and by then a client retry is a new request, not a
-  # retry.
+  # How far back the startup load reaches. Commands older than this fall back to
+  # Postgres, which is correct but slower - and by then a client retry is a new
+  # request, not a retry.
   session-window: ${EMPORIA_DEDUP_INDEX_SESSION_WINDOW:PT8H}
-  # ~1.8 bytes per entry at 0.001, so 3.5M is ~6 MB - an 8-hour session at 120
-  # orders/sec. Raise it with the rate, not with the uptime.
+  # ~1.8 bytes per entry at 0.001, so 3.5M is ~6 MB - eight hours at 120
+  # orders/sec. Size it by rate times uptime between restarts, not by rate alone.
+  #
+  # KNOWN GAP, stated rather than left implicit. A Bloom filter cannot delete
+  # entries, and nothing rotates this one yet, so the live filter grows for as
+  # long as the process runs. This venue runs 24/7, so it does grow:
+  #
+  #     8 hours   3.5M entries    0.1% false positives   <- what this is sized for
+  #     3 days    ~10M            ~15%
+  #     1 week    ~24M            ~50%
+  #
+  # It stays correct - a false positive costs one Postgres lookup that returns
+  # the right answer - but the benefit erodes until the hot path is back where
+  # it started. There is no cliff and no error, so a 120-second benchmark cannot
+  # see it; only uptime does.
+  #
+  # The fix is rotation plus a periodic reload of the loaded history, so that
+  # what rotation drops is still covered. Rotating alone would let an old
+  # identifier read as never-seen, which is a false negative - a duplicate
+  # order - and that trade is the wrong way round for this system.
   expected-entries: ${EMPORIA_DEDUP_INDEX_EXPECTED_ENTRIES:3500000}
   # Only ever wrong in the safe direction: a false positive costs one Postgres
   # lookup that then gives the right answer. False negatives cannot occur.
