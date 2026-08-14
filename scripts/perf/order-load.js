@@ -6,8 +6,13 @@
 //
 // Direct use:
 //   EMPORIA_TOKEN=... k6 run -e RATE=20 -e DURATION=60s scripts/perf/order-load.js
+//
+// Runs longer than the token lifetime are refused in setup(); see the note
+// there. For a soak, raise OAUTH_ACCESS_TOKEN_TTL on the authentication service
+// and mint afterwards.
 import http from 'k6/http';
 import { check } from 'k6';
+import encoding from 'k6/encoding';
 import { Counter, Rate, Trend } from 'k6/metrics';
 
 const GATEWAY_URL = __ENV.GATEWAY_URL || 'http://localhost:8082';
@@ -103,9 +108,54 @@ function submitOrder() {
     );
 }
 
+// Seconds in a k6 duration string ('90s', '13m', '1h30m'). Returns 0 when the
+// string is not one of those, which disables the expiry check rather than
+// guessing at it.
+function durationSeconds(text) {
+    const parts = String(text).match(/\d+(\.\d+)?[hms]/g);
+    if (!parts) return 0;
+    return parts.reduce((total, part) => {
+        const value = parseFloat(part);
+        const unit = part[part.length - 1];
+        return total + (unit === 'h' ? value * 3600 : unit === 'm' ? value * 60 : value);
+    }, 0);
+}
+
+// The `exp` claim, or 0 if the token cannot be read. Never throws: a token this
+// cannot parse is not a reason to refuse to run.
+function tokenExpiry(jwt) {
+    const parts = String(jwt).split('.');
+    if (parts.length !== 3) return 0;
+    try {
+        return JSON.parse(encoding.b64decode(parts[1], 'rawurl', 's')).exp || 0;
+    } catch (error) {
+        return 0;
+    }
+}
+
 export function setup() {
     if (!TOKEN) {
         throw new Error('EMPORIA_TOKEN is required; run via scripts/perf/run-baseline.sh');
+    }
+
+    // A token is minted once, before the run, and never refreshed - the
+    // authorization server offers only authorization-code + PKCE for this
+    // client, so there is no one-request renewal to do from here. Past expiry
+    // the gateway answers 4xx, which the loop below counts as business
+    // rejections, so an expired token aborts the run reported as refused
+    // orders. That is the wrong diagnosis for the wrong cause, and it only
+    // shows up on runs long enough to matter - soak tests. Refuse up front.
+    const runSeconds = durationSeconds(DURATION);
+    const expiresAt = tokenExpiry(TOKEN);
+    const remaining = expiresAt - Math.floor(Date.now() / 1000);
+    if (expiresAt && runSeconds && remaining < runSeconds) {
+        throw new Error(
+            `EMPORIA_TOKEN expires in ${remaining}s but this run is ${runSeconds}s. ` +
+            'Everything after expiry would be counted as a business rejection and abort ' +
+            'the run. Raise the lifetime for the benchmark identity - ' +
+            'OAUTH_ACCESS_TOKEN_TTL on the authentication service - rather than switching ' +
+            'to a client_credentials token, which would change what the run measures.',
+        );
     }
     // Absorbs the known first-request 504: the ephemeral
     // order-command-service-{uuid} results consumer races its own group join,

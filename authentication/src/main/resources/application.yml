@@ -61,7 +61,14 @@ spring:
             require-authorization-consent: false
             require-proof-key: true
             token:
-              access-token-time-to-live: 10m
+              # Ten minutes is right for a browser session and wrong for a soak
+              # test: k6 mints once at startup, so any run longer than this
+              # starts collecting 4xx from the gateway - which order-load.js
+              # counts as business rejections and aborts on, mislabelling an
+              # expired token as refused orders. Raise it for a long benchmark
+              # rather than switching the load test to a client_credentials
+              # identity, which would change what the run measures.
+              access-token-time-to-live: ${OAUTH_ACCESS_TOKEN_TTL:10m}
           emporia-market-data:
             registration:
               client-id: ${MARKET_DATA_OAUTH_CLIENT_ID:emporia-market-data}
