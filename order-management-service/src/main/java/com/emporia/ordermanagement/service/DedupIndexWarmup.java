@@ -8,7 +8,11 @@ import org.springframework.context.event.EventListener;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
+import jakarta.annotation.PreDestroy;
+
 import java.time.Duration;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Loads the session's processed commands in the background and hands the result
@@ -45,6 +49,13 @@ public class DedupIndexWarmup {
     private final Duration window;
     private final long expectedEntries;
     private final double falsePositiveRate;
+    // Owned for the bean's life and shut down in @PreDestroy, rather than
+    // created inside the listener where it would outlive its only reference.
+    private final ExecutorService loader = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "dedup-index-warmup");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     public DedupIndexWarmup(
             OrderStateCache cache,
@@ -67,11 +78,20 @@ public class DedupIndexWarmup {
             log.info("Deduplication index disabled; hot-path lookups continue to read through to Postgres");
             return;
         }
-        // A plain thread rather than an executor: this runs exactly once and
-        // there is no pool to size, shut down, or leak.
-        Thread loader = new Thread(this::loadAndPublish, "dedup-index-warmup");
-        loader.setDaemon(true);
-        loader.start();
+        loader.execute(this::loadAndPublish);
+    }
+
+    /**
+     * Stops a load still running when the service shuts down.
+     *
+     * <p>{@code shutdownNow} rather than {@code shutdown}: the load is a long
+     * streaming read and waiting for it would hold up shutdown for no gain. An
+     * abandoned load is never published, so stopping midway loses nothing but
+     * the work already done - the hot path simply stays on Postgres.
+     */
+    @PreDestroy
+    public void stop() {
+        loader.shutdownNow();
     }
 
     private void loadAndPublish() {
