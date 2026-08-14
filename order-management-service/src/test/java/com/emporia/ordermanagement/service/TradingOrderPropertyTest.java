@@ -745,12 +745,18 @@ class TradingOrderPropertyTest {
             OrderMetrics metrics = new OrderMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
             OrderStateCache cache = new OrderStateCache(orders, processed, metrics, null, 1000, 1000);
             AsyncDbWriter asyncDbWriter = org.mockito.Mockito.mock(AsyncDbWriter.class);
-            org.mockito.Mockito.doAnswer(invocation -> {
+            org.mockito.stubbing.Answer<Void> recordOrder = invocation -> {
                 TradingOrder o = invocation.getArgument(0);
                 storedOrders.put(o.getId(), o);
                 orderWrites++;
                 return null;
-            }).when(asyncDbWriter).enqueue(org.mockito.Mockito.any(TradingOrder.class));
+            };
+            org.mockito.Mockito.doAnswer(recordOrder)
+                    .when(asyncDbWriter).enqueue(org.mockito.Mockito.any(TradingOrder.class));
+            // A create goes in as a first write so a collision on its id can be
+            // reported; the projection records it exactly as any other write.
+            org.mockito.Mockito.doAnswer(recordOrder)
+                    .when(asyncDbWriter).enqueueNew(org.mockito.Mockito.any(TradingOrder.class));
 
             org.mockito.Mockito.doAnswer(invocation -> {
                 OrderEvent e = invocation.getArgument(0);

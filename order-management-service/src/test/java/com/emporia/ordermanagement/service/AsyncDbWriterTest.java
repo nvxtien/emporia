@@ -15,7 +15,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import org.mockito.ArgumentCaptor;
+
 import java.math.BigDecimal;
+import java.util.Arrays;
+import java.util.List;
 import java.util.UUID;
 
 import static com.emporia.events.TradingEvents.SCHEMA_VERSION;
@@ -25,6 +29,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -159,6 +164,98 @@ class AsyncDbWriterTest {
 
         writerWithWal.flush();
         verify(wal, times(1)).compactToSafePoint();
+    }
+
+    /**
+     * order_id collisions have no signal on the normal write path: trading_order
+     * is upserted on every state change, so a conflict there is the expected
+     * case. Only an order's first write can prove that an id the deduplication
+     * layer called new already existed.
+     */
+    @Test
+    void countsOrdersWhoseFirstWriteFoundTheIdAlreadyThere() {
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        AsyncDbWriter instrumented = new AsyncDbWriter(
+                orders, events, processed, null, jdbcWhereFirstWritesReturn(new int[][]{{1, 0}}), null, null, meters);
+
+        instrumented.enqueueNew(testOrder());
+        instrumented.enqueueNew(testOrder());
+        instrumented.flush();
+
+        assertThat(meters.counter("emporia.oms.dedup.duplicate_order_reached_db").count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void anOrdinaryStateChangeIsUpsertedAndCanNeverReportADuplicate() {
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        // Counts that would fire the report if this path ever took the insert.
+        JdbcTemplate jdbc = jdbcWhereFirstWritesReturn(new int[][]{{0, 0}});
+        AsyncDbWriter instrumented = new AsyncDbWriter(orders, events, processed, null, jdbc, null, null, meters);
+
+        instrumented.enqueue(testOrder());
+        instrumented.flush();
+
+        assertThat(meters.counter("emporia.oms.dedup.duplicate_order_reached_db").count()).isZero();
+        verify(jdbc).batchUpdate(contains("DO UPDATE"), anyList(), anyInt(), any());
+    }
+
+    /**
+     * A create and the state change that follows it inside one flush window are
+     * two queue entries pointing at one object. Calling both first writes would
+     * report the second as a duplicate of the first - an alarm for something
+     * that never happened, which is worse than no alarm.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void aCreateAndAStateChangeInOneBatchAreOneInsertAndOneUpsert() {
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        JdbcTemplate jdbc = jdbcWhereFirstWritesReturn(new int[][]{{1}});
+        AsyncDbWriter instrumented = new AsyncDbWriter(orders, events, processed, null, jdbc, null, null, meters);
+        TradingOrder order = testOrder();
+
+        instrumented.enqueueNew(order);
+        instrumented.enqueue(order);
+        instrumented.flush();
+
+        ArgumentCaptor<List<TradingOrder>> written = ArgumentCaptor.forClass(List.class);
+        verify(jdbc, times(2)).batchUpdate(contains("trading_order"), written.capture(), anyInt(), any());
+        assertThat(written.getAllValues()).allSatisfy(batch -> assertThat(batch).hasSize(1));
+        assertThat(meters.counter("emporia.oms.dedup.duplicate_order_reached_db").count()).isZero();
+    }
+
+    @Test
+    void anOrderCountsAsAFirstWriteOnlyOnce() {
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        JdbcTemplate jdbc = jdbcWhereFirstWritesReturn(new int[][]{{1}});
+        AsyncDbWriter instrumented = new AsyncDbWriter(orders, events, processed, null, jdbc, null, null, meters);
+        TradingOrder order = testOrder();
+
+        instrumented.enqueueNew(order);
+        instrumented.flush();
+        instrumented.enqueue(order);
+        instrumented.flush();
+
+        // The marker is cleared by the first flush, so the second write upserts.
+        // Left in place it would insert again and report a duplicate of itself.
+        verify(jdbc, times(1)).batchUpdate(contains("DO NOTHING"), anyList(), anyInt(), any());
+        assertThat(meters.counter("emporia.oms.dedup.duplicate_order_reached_db").count()).isZero();
+    }
+
+    /**
+     * Answers first-write batches with the supplied counts and every other batch
+     * with one applied row per entry, so a test can say what Postgres absorbed
+     * without also having to describe the upsert.
+     */
+    private static JdbcTemplate jdbcWhereFirstWritesReturn(int[][] absorbed) {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        when(jdbc.batchUpdate(anyString(), anyList(), anyInt(), any())).thenAnswer(invocation -> {
+            String sql = invocation.getArgument(0);
+            if (sql.contains("trading_order") && sql.contains("DO NOTHING")) return absorbed;
+            int[] applied = new int[((List<?>) invocation.getArgument(1)).size()];
+            Arrays.fill(applied, 1);
+            return new int[][]{applied};
+        });
+        return jdbc;
     }
 
     private static TradingOrder testOrder() {

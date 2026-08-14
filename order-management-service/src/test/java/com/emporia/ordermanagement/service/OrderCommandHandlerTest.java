@@ -143,7 +143,7 @@ class OrderCommandHandlerTest {
 
         assertThat(outcome.result().success()).isTrue();
         // The order should have been saved; desk = userSubject
-        verify(asyncDbWriter).enqueue(any(TradingOrder.class));
+        verify(asyncDbWriter).enqueueNew(any(TradingOrder.class));
     }
 
     // -------------------------------------------------------------------------
@@ -565,7 +565,7 @@ class OrderCommandHandlerTest {
         assertThat(first.result().status()).isEqualTo(201);
         assertThat(duplicate.result()).isEqualTo(first.result());
         // One order, not two: the duplicate was answered, not executed.
-        verify(asyncDbWriter, times(1)).enqueue(any(TradingOrder.class));
+        verify(asyncDbWriter, times(1)).enqueueNew(any(TradingOrder.class));
     }
 
     /**
@@ -624,6 +624,20 @@ class OrderCommandHandlerTest {
         ProcessingOutcome outcome = handler.handle(modifyCommand(order, order.getVersion()));
 
         assertThat(outcome.result().status()).isEqualTo(200);
+    }
+
+    /**
+     * Pins the wiring the order-id oracle depends on. Enqueued as an ordinary
+     * write, a CREATE would upsert over any row already carrying that id -
+     * resetting a live order's status and traded quantity while keeping the
+     * original's identity columns, with nothing downstream to notice.
+     */
+    @Test
+    void aCreateIsEnqueuedAsAFirstWriteSoACollisionCanBeSeen() {
+        handler.handle(createCommand(UUID.randomUUID()));
+
+        verify(asyncDbWriter).enqueueNew(any(TradingOrder.class));
+        verify(asyncDbWriter, never()).enqueue(any(TradingOrder.class));
     }
 
     private static OrderCommand modifyCommand(TradingOrder order, long expectedVersion) {

@@ -128,6 +128,7 @@
                         <configuration>
                             <includes>
                                 <include>**/TradingOrderPostgresConcurrencySpec.java</include>
+                                <include>**/AbsorbedConflictReportingSpec.java</include>
                             </includes>
                         </configuration>
                     </plugin>

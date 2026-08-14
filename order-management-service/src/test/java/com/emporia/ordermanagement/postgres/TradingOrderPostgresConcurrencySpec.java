@@ -17,6 +17,8 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -43,6 +45,23 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * <p>The important behavior under test is the {@code @Version} column on
  * {@link TradingOrder}: two transactions may read the same order version, but only
  * one is allowed to update it. The other must fail with an optimistic-lock exception.
+ * This is also why {@code TradingOrder.recordRevision} stamps the hot path's
+ * revision from {@code OrderStateCache} rather than from the mutators: assigning
+ * a {@code @Version} field on an entity Hibernate manages is undefined, and this
+ * mechanism has to keep working.
+ *
+ * <h2>This specification does not currently load, for a second reason</h2>
+ * <p>The datasource binding below fixed the first: {@code @ServiceConnection}
+ * feeds Boot's auto-configured DataSource, and stopped reaching this application
+ * when {@code OmsDataSourceConfig} began declaring an explicit one.
+ *
+ * <p>What remains is the slice itself. The explicit {@code @ComponentScan} added
+ * to {@code OrderManagementServiceApplication} when execution-service was merged
+ * in overrides {@code @DataJpaTest}'s type-exclude filters, so a persistence-only
+ * context tries to build the whole application and fails on the first bean whose
+ * auto-configuration the slice does not include - {@code RestClient.Builder},
+ * then {@code ObjectMapper}, and onward. Importing them one at a time only moves
+ * the failure; the fix is to stop the scan from widening the slice.
  */
 @Testcontainers
 @DataJpaTest(
@@ -63,6 +82,25 @@ public class TradingOrderPostgresConcurrencySpec {
     @Container
     @ServiceConnection
     static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:16-alpine");
+
+    /**
+     * {@code @ServiceConnection} alone stopped reaching this application the
+     * moment {@code OmsDataSourceConfig} began declaring an explicit
+     * {@code DataSource} bean: service connections feed Boot's auto-configured
+     * DataSource, while an explicit one binds {@code spring.datasource.*}
+     * properties that nothing was setting. Flyway then dialled the compose-file
+     * default and failed with {@code role "postgres" does not exist}, taking the
+     * whole context with it.
+     */
+    @DynamicPropertySource
+    static void useTheContainer(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", postgres::getJdbcUrl);
+        registry.add("spring.datasource.username", postgres::getUsername);
+        registry.add("spring.datasource.password", postgres::getPassword);
+        registry.add("emporia.execution.datasource.url", postgres::getJdbcUrl);
+        registry.add("emporia.execution.datasource.username", postgres::getUsername);
+        registry.add("emporia.execution.datasource.password", postgres::getPassword);
+    }
 
     private final TradingOrderRepository orders;
     private final PlatformTransactionManager transactionManager;

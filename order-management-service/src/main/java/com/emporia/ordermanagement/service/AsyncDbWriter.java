@@ -19,9 +19,15 @@ import org.springframework.stereotype.Service;
 import java.sql.PreparedStatement;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.function.IntConsumer;
 
 /**
  * High-performance Write-Behind asynchronous database batch writer.
@@ -42,9 +48,16 @@ public class AsyncDbWriter {
     /** Rewound once its records are persisted; null when running without a log. */
     private static final Logger log = LoggerFactory.getLogger(AsyncDbWriter.class);
     private final Counter duplicateCommands;
+    private final Counter duplicateOrders;
     private final MemoryMappedWalLogger wal;
 
     private final ConcurrentLinkedDeque<TradingOrder> orderQueue = new ConcurrentLinkedDeque<>();
+    // Ids whose next write is an order's first, so that write can use DO NOTHING
+    // and report a collision instead of upserting over a row that already
+    // exists. Same queue as every other order write, deliberately: a separate
+    // queue could drain out of step and let an update create the row before its
+    // own insert ran, which would report a duplicate that never happened.
+    private final Set<UUID> firstWriteIds = ConcurrentHashMap.newKeySet();
     private final ConcurrentLinkedDeque<OrderEvent> eventQueue = new ConcurrentLinkedDeque<>();
     private final ConcurrentLinkedDeque<ProcessedCommand> processedQueue = new ConcurrentLinkedDeque<>();
     private final ConcurrentLinkedDeque<com.emporia.ordermanagement.model.OrderInputEvent> inputEventQueue = new ConcurrentLinkedDeque<>();
@@ -82,12 +95,29 @@ public class AsyncDbWriter {
         this.jdbcTemplate = jdbcTemplate;
         this.wal = wal;
         this.transactionTemplate = transactionTemplate;
-        this.duplicateCommands = (meters == null ? new SimpleMeterRegistry() : meters)
-                .counter("emporia.oms.dedup.duplicate_reached_db");
+        io.micrometer.core.instrument.MeterRegistry registry = meters == null ? new SimpleMeterRegistry() : meters;
+        this.duplicateCommands = registry.counter("emporia.oms.dedup.duplicate_reached_db");
+        this.duplicateOrders = registry.counter("emporia.oms.dedup.duplicate_order_reached_db");
     }
 
     public void enqueue(TradingOrder order) {
         if (order != null) orderQueue.addLast(order);
+    }
+
+    /**
+     * Enqueues an order's first write, which is the only one that can prove a
+     * duplicate.
+     *
+     * <p>Every later write is an upsert over a row that is expected to be there,
+     * so a conflict says nothing. A first write conflicting says an order id the
+     * deduplication layer reported as new already exists - and because the
+     * upsert would have overwritten it rather than failing on the primary key,
+     * nothing else in the system would have noticed.
+     */
+    public void enqueueNew(TradingOrder order) {
+        if (order == null) return;
+        firstWriteIds.add(order.getId());
+        orderQueue.addLast(order);
     }
 
     public void enqueue(OrderEvent event) {
@@ -218,8 +248,7 @@ public class AsyncDbWriter {
         }
     }
 
-    private void flushOrdersJdbc(List<TradingOrder> batch) {
-        String sql = """
+    private static final String INSERT_ORDER = """
             INSERT INTO emporia_order_data.trading_order (
                 id, entity_version, user_subject, desk_id, listing_id, listing_symbol, exchange_mic, currency, tick_size, size_increment,
                 listing_version, listing_name, market_symbol, exchange_name, country_code, reference_price, previous_close,
@@ -227,6 +256,13 @@ public class AsyncDbWriter {
                 order_status, target_status, destination, originator_reference, parent_order_id, root_order_id,
                 execution_parameters, error_message, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+""";
+
+    /**
+     * Every write after an order's first is an upsert over a row expected to be
+     * there, so a conflict carries no information.
+     */
+    private static final String ON_CONFLICT_UPDATE = """
             ON CONFLICT (id) DO UPDATE SET
                 entity_version = EXCLUDED.entity_version,
                 order_status = EXCLUDED.order_status,
@@ -236,8 +272,55 @@ public class AsyncDbWriter {
                 average_trade_price = EXCLUDED.average_trade_price,
                 error_message = EXCLUDED.error_message,
                 updated_at = EXCLUDED.updated_at
-            """;
-        jdbcTemplate.batchUpdate(sql, batch, batch.size(), (PreparedStatement ps, TradingOrder o) -> {
+""";
+
+    /**
+     * An order's first write refuses to touch a row that already exists, which
+     * both protects that row and turns the collision into a countable event.
+     */
+    private static final String ON_CONFLICT_NOTHING = "ON CONFLICT (id) DO NOTHING";
+
+    private void flushOrdersJdbc(List<TradingOrder> batch) {
+        if (firstWriteIds.isEmpty()) {
+            upsertOrders(batch);
+            return;
+        }
+        List<TradingOrder> firstWrites = new ArrayList<>();
+        List<TradingOrder> updates = new ArrayList<>();
+        Set<UUID> claimed = new HashSet<>();
+        for (TradingOrder order : batch) {
+            // Only an order's first appearance in this batch is its first write.
+            // A create and a modify inside one flush window are two entries
+            // pointing at the same object, and calling both inserts would report
+            // the second as a duplicate of the first.
+            if (firstWriteIds.contains(order.getId()) && claimed.add(order.getId())) {
+                firstWrites.add(order);
+            } else {
+                updates.add(order);
+            }
+        }
+        // Inserts before upserts: an upsert running ahead of its own insert
+        // would create the row and make that insert look like a collision.
+        if (!firstWrites.isEmpty()) insertNewOrders(firstWrites);
+        if (!updates.isEmpty()) upsertOrders(updates);
+        // Only on success. A throw above leaves the markers in place, so the
+        // restored batch is still treated as first writes on the retry. The
+        // reverse - clearing them and then rolling back - would silently drop
+        // the check for those orders.
+        firstWriteIds.removeAll(claimed);
+    }
+
+    private void upsertOrders(List<TradingOrder> batch) {
+        jdbcTemplate.batchUpdate(INSERT_ORDER + ON_CONFLICT_UPDATE, batch, batch.size(), this::bindOrder);
+    }
+
+    private void insertNewOrders(List<TradingOrder> batch) {
+        int[][] affected = jdbcTemplate.batchUpdate(
+                INSERT_ORDER + ON_CONFLICT_NOTHING, batch, batch.size(), this::bindOrder);
+        reportAbsorbedOrders(affected, batch);
+    }
+
+    private void bindOrder(PreparedStatement ps, TradingOrder o) throws java.sql.SQLException {
             ps.setObject(1, o.getId());
             ps.setLong(2, o.getVersion() == null ? 0L : o.getVersion());
             ps.setString(3, o.getUserSubject());
@@ -275,7 +358,6 @@ public class AsyncDbWriter {
             ps.setString(32, o.getErrorMessage());
             ps.setTimestamp(33, o.getCreatedAt() == null ? null : Timestamp.from(o.getCreatedAt()));
             ps.setTimestamp(34, o.getUpdatedAt() == null ? null : Timestamp.from(o.getUpdatedAt()));
-        });
     }
 
     private void flushEventsJdbc(List<OrderEvent> batch) {
@@ -333,16 +415,52 @@ public class AsyncDbWriter {
      * number of duplicates that got through, not a warning about one.
      */
     private void reportAbsorbedDuplicates(int[][] affected, List<ProcessedCommand> batch) {
+        forEachAbsorbed(affected, batch.size(), index -> {
+            ProcessedCommand duplicate = batch.get(index);
+            duplicateCommands.increment();
+            log.error("Duplicate command reached the database: command_id={} status={}. "
+                            + "The deduplication layer did not recognise it as already processed.",
+                    duplicate.result().commandId(), duplicate.result().status());
+        });
+    }
+
+    /**
+     * Reports orders the deduplication layer let through.
+     *
+     * <p>The order-id counterpart of {@link #reportAbsorbedDuplicates}, and the
+     * only signal there is for it. {@code trading_order} is upserted on every
+     * state change, so a conflict on the normal write path is the expected case
+     * and carries nothing; only an order's first write can prove that an id
+     * reported as never seen already existed. Left as an upsert, the duplicate
+     * would not even fail on the primary key - it would reset a live or filled
+     * order's status, traded quantity and average price while keeping the
+     * original's identity columns, which nothing downstream would flag.
+     *
+     * <p>This counter should read zero forever. Anything above zero is the
+     * number of orders that got through, not a warning about one.
+     */
+    private void reportAbsorbedOrders(int[][] affected, List<TradingOrder> batch) {
+        forEachAbsorbed(affected, batch.size(), index -> {
+            TradingOrder duplicate = batch.get(index);
+            duplicateOrders.increment();
+            log.error("Duplicate order reached the database: order_id={} status={}. "
+                            + "The deduplication layer reported an id as new that already exists; "
+                            + "the existing row was left untouched.",
+                    duplicate.getId(), duplicate.getStatus());
+        });
+    }
+
+    /**
+     * Walks the per-row affected counts a batch returned and reports the rows
+     * the conflict clause absorbed. Postgres groups them, and a driver may
+     * return fewer counts than rows, so the index is carried across groups and
+     * bounded by the batch rather than trusted from the shape of the result.
+     */
+    private static void forEachAbsorbed(int[][] affected, int size, IntConsumer onAbsorbed) {
         int index = 0;
         for (int[] group : affected) {
             for (int rows : group) {
-                if (rows == 0 && index < batch.size()) {
-                    ProcessedCommand duplicate = batch.get(index);
-                    duplicateCommands.increment();
-                    log.error("Duplicate command reached the database: command_id={} status={}. "
-                                    + "The deduplication layer did not recognise it as already processed.",
-                            duplicate.result().commandId(), duplicate.result().status());
-                }
+                if (rows == 0 && index < size) onAbsorbed.accept(index);
                 index++;
             }
         }

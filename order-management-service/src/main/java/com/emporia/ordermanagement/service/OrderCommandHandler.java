@@ -158,7 +158,10 @@ public class OrderCommandHandler {
                 command.orderType(), command.quantityScaled(), priceScaled, command.destination(), command.originatorReference(),
                 parent == null ? null : parent.getId(), parent == null ? null : parent.getRootOrderId(), json(command.executionParameters()));
         cache.put(order);
-        asyncDbWriter.enqueue(order);
+        // enqueueNew, not enqueue: an order's first write is the only one whose
+        // conflict proves anything, since every later write upserts over a row
+        // that is meant to be there.
+        asyncDbWriter.enqueueNew(order);
         metrics.orderCreated();
         return success(command, order, "CREATED", "Order accepted by Emporia", 201);
     }

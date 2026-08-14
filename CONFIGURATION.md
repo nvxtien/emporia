@@ -310,10 +310,28 @@ and rotation runs every `horizon / generations`.
 - *Every processed identifier reaches the filter.* The risk lives in the write
   path, not in the filter, which has no false negatives of its own.
 
-**The oracle for both**: `emporia.oms.dedup.duplicate_reached_db` counts
-commands that got past the index and were absorbed by `ON CONFLICT` in the
-writer. It must stay at zero, and it is the only signal that says rotation,
-sizing, or the single-writer assumption has gone wrong.
+**Two oracles, one per key space**, and both must stay at zero:
+
+| counter | table | what it proves |
+|---|---|---|
+| `emporia.oms.dedup.duplicate_reached_db` | `processed_order_command` | a command was processed twice |
+| `emporia.oms.dedup.duplicate_order_reached_db` | `trading_order` | an id reported as new already existed |
+
+The second one needed a change to earn its keep. `trading_order` is upserted on
+every state change, so a conflict there is the expected case and carries no
+information - which is why an order id slipping through was invisible. It would
+not even fail on the primary key: the upsert would reset the existing row's
+status, traded quantity and average price while leaving its identity columns
+alone. Only an order's **first** write can prove anything, so `create` enqueues
+through `AsyncDbWriter.enqueueNew`, which uses `ON CONFLICT DO NOTHING` and
+reports the absorbed row. That also protects the existing row instead of
+overwriting it.
+
+Both rest on one behaviour that had never been checked: that a row absorbed by
+`ON CONFLICT DO NOTHING` comes back as zero affected rows through a JDBC batch.
+A counter reading zero proves only that it does not fire wrongly - the branch
+that fires had never run. `AbsorbedConflictReportingSpec` now checks it against
+a real PostgreSQL under the `postgres-it` profile.
 
 ## The portfolio outbox distinguishes settled changes from margin reservations
 
