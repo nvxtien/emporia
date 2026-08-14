@@ -49,6 +49,27 @@ emporia.disruptor:
   cpu-set: ${EMPORIA_DISRUPTOR_CPU_SET:}
   numa-node: ${EMPORIA_DISRUPTOR_NUMA_NODE:}
 
+# Answers "has this command been seen" from memory instead of Postgres. The two
+# lookups it replaces cost 2.312 of the handler's 2.405 ms/order on the single
+# writer thread, with zero cache hits across 14,402 orders - a CREATE carries
+# freshly generated ids, so the read-through fallback fires every time.
+#
+# Off by default: this changes how order deduplication is answered, and
+# deduplication failing means a duplicate order. Watch
+# emporia.oms.dedup.duplicate_reached_db, which must stay at zero.
+emporia.dedup-index:
+  enabled: ${EMPORIA_DEDUP_INDEX_ENABLED:false}
+  # One trading session. Commands older than this fall back to Postgres, which
+  # is correct but slower - and by then a client retry is a new request, not a
+  # retry.
+  session-window: ${EMPORIA_DEDUP_INDEX_SESSION_WINDOW:PT8H}
+  # ~1.8 bytes per entry at 0.001, so 3.5M is ~6 MB - an 8-hour session at 120
+  # orders/sec. Raise it with the rate, not with the uptime.
+  expected-entries: ${EMPORIA_DEDUP_INDEX_EXPECTED_ENTRIES:3500000}
+  # Only ever wrong in the safe direction: a false positive costs one Postgres
+  # lookup that then gives the right answer. False negatives cannot occur.
+  false-positive-rate: ${EMPORIA_DEDUP_INDEX_FALSE_POSITIVE_RATE:0.001}
+
 emporia.aeron.intake:
   enabled: ${EMPORIA_AERON_INTAKE_ENABLED:false}
   channel: ${EMPORIA_AERON_INTAKE_CHANNEL:aeron:ipc}

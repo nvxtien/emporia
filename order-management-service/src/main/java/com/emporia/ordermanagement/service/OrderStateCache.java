@@ -79,9 +79,15 @@ public class OrderStateCache {
     private final Timer existsFromDb;
     private final Timer existsFromIndex;
     // Null disables the index and restores the pure read-through behaviour.
+    // Written only by the Disruptor writer thread.
     private final @Nullable CommandDedupIndex index;
-    // Written once by the startup loader, read by the writer thread.
-    private volatile boolean ready;
+    // The session's history, filled by the startup loader on its own thread and
+    // published here once. Two filters rather than one because a background load
+    // and the writer thread sharing a long[] would race on a read-modify-write,
+    // and a lost bit is a false negative - a duplicate order. Each filter has a
+    // single writer, and this volatile write publishes everything the loader put
+    // in its filter to whichever thread reads the reference.
+    private volatile @Nullable CommandDedupIndex session;
 
     public OrderStateCache(
             TradingOrderRepository orderRepository,
@@ -137,7 +143,7 @@ public class OrderStateCache {
             existsFromCache.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
             return true;
         }
-        if (indexAnswers() && index.definitelyNew(id)) {
+        if (indexAnswers() && definitelyNew(id)) {
             existsFromIndex.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
             return false;
         }
@@ -156,16 +162,33 @@ public class OrderStateCache {
      * latency, not correctness.
      */
     private boolean indexAnswers() {
-        return index != null && ready;
+        return index != null && session != null;
     }
 
-    /** Called once the session load and WAL replay have both finished. */
-    public void markReady() {
-        this.ready = true;
+    /**
+     * An identifier is new only when neither filter has it: the live one holds
+     * what this process has handled, the session one what the load recovered.
+     */
+    private boolean definitelyNew(UUID id) {
+        CommandDedupIndex history = session;
+        return index.definitelyNew(id) && history != null && history.definitelyNew(id);
+    }
+
+    /**
+     * Publishes the loaded session history, after which the index answers
+     * instead of the database.
+     *
+     * <p>Must not be called until both the load and WAL replay have finished.
+     * Publishing early means the filters are missing entries they should have,
+     * and a missing entry reads as "never seen" - which is how a duplicate order
+     * gets accepted.
+     */
+    public void publishSessionHistory(CommandDedupIndex loaded) {
+        this.session = loaded;
     }
 
     public boolean isReady() {
-        return ready;
+        return session != null;
     }
 
     /**
@@ -192,7 +215,7 @@ public class OrderStateCache {
             processedFromCache.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
             return Optional.of(cached);
         }
-        if (indexAnswers() && index.definitelyNew(commandId)) {
+        if (indexAnswers() && definitelyNew(commandId)) {
             processedFromIndex.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
             return Optional.empty();
         }
