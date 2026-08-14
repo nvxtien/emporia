@@ -189,16 +189,19 @@ public class OrderCommandHandler {
         cache.put(order);
         asyncDbWriter.enqueue(order);
         metrics.cancelRequested();
+        // One serialisation, used twice: the order has not changed between the
+        // event and the result, and this runs on the single writer thread.
+        String payload = json(order.view());
         OrderEvent parentEvent = new OrderEvent(command.commandId(), order, "CANCEL_REQUESTED",
-                "Cancellation requested by user", json(order.view()));
+                "Cancellation requested by user", payload);
         asyncDbWriter.enqueue(parentEvent);
         domainEvents.add(parentEvent.domainEvent());
         OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), true, 200,
-                null, json(order.view()));
+                null, payload);
         ProcessedCommand processedCmd = new ProcessedCommand(result);
         cache.putProcessed(processedCmd);
         asyncDbWriter.enqueue(processedCmd);
-        return new ProcessingOutcome(result, domainEvents);
+        return new ProcessingOutcome(result, domainEvents, order.view());
     }
 
     private void requestChildCancellations(OrderCommand command, java.util.UUID parentId,
@@ -231,12 +234,13 @@ public class OrderCommandHandler {
             asyncDbWriter.enqueue(event);
             domainEvents.add(event.domainEvent());
         }
-        String payload = json(new CancelAllView(domainEvents.size()));
+        CancelAllView cancelAllView = new CancelAllView(domainEvents.size());
+        String payload = json(cancelAllView);
         OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), true, 200, null, payload);
         ProcessedCommand processedCmd = new ProcessedCommand(result);
         cache.putProcessed(processedCmd);
         asyncDbWriter.enqueue(processedCmd);
-        return new ProcessingOutcome(result, domainEvents);
+        return new ProcessingOutcome(result, domainEvents, cancelAllView);
     }
 
     private ProcessingOutcome success(OrderCommand command, TradingOrder order, String type, String message, int status) {
@@ -247,7 +251,7 @@ public class OrderCommandHandler {
         ProcessedCommand processedCommand = new ProcessedCommand(result);
         cache.putProcessed(processedCommand);
         asyncDbWriter.enqueue(processedCommand);
-        return new ProcessingOutcome(result, List.of(event.domainEvent()));
+        return new ProcessingOutcome(result, List.of(event.domainEvent()), order.view());
     }
 
     private String desk(OrderCommand command) {
@@ -297,11 +301,19 @@ public class OrderCommandHandler {
         if (!condition) throw new DomainProblem(status, message);
     }
 
+    /**
+     * Timed because it is the largest unaccounted piece of the writer thread's
+     * work, and it runs more than once per command on the cancel paths.
+     */
     private String json(Object value) {
+        long startNanos = System.nanoTime();
         try {
             return objectMapper.writeValueAsString(value == null ? Map.of() : value);
         } catch (Exception exception) {
             throw new IllegalStateException("Could not serialize an order event", exception);
+        } finally {
+            metrics.registry().timer("emporia.oms.command.json")
+                    .record(System.nanoTime() - startNanos, java.util.concurrent.TimeUnit.NANOSECONDS);
         }
     }
 

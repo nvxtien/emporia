@@ -336,7 +336,14 @@ class TradingOrderPropertyTest {
         ProcessingOutcome first = fixture.handler.handle(command);
         ProcessingOutcome duplicate = fixture.handler.handle(command);
 
-        assertThat(duplicate).isEqualTo(first);
+        // Idempotency is about what the caller is told: the same result and the
+        // same events. ProcessingOutcome.view is a carried reference to the
+        // object the payload was serialised from, so the caller need not parse
+        // it back; a duplicate is answered from the processed-command cache,
+        // which holds the payload and not the object, so it is legitimately
+        // absent there and the caller falls back to parsing.
+        assertThat(duplicate.result()).isEqualTo(first.result());
+        assertThat(duplicate.events()).isEqualTo(first.events());
         assertThat(fixture.orderWriteCount()).isEqualTo(1);
         assertThat(fixture.eventCount()).isEqualTo(1);
         assertNumericInvariants(fixture.order(orderId).view());

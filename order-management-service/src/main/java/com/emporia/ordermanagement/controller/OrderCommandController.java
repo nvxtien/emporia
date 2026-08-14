@@ -104,7 +104,7 @@ public class OrderCommandController {
                     request.parentOrderId(), request.executionParameters() == null ? Map.of() : request.executionParameters());
 
             ProcessingOutcome outcome = submit(command);
-            return read(outcome.result().payload(), OrderView.class);
+            return viewOf(outcome, OrderView.class);
         } catch (RuntimeException exception) {
             error = exception;
             throw exception;
@@ -127,7 +127,7 @@ public class OrderCommandController {
                     request.quantity(), request.limitPrice(), null, null, null, Map.of());
 
             ProcessingOutcome outcome = submit(command);
-            return read(outcome.result().payload(), OrderView.class);
+            return viewOf(outcome, OrderView.class);
         } catch (RuntimeException exception) {
             error = exception;
             throw exception;
@@ -149,7 +149,7 @@ public class OrderCommandController {
                     null, null, null, null, null, Map.of());
 
             ProcessingOutcome outcome = submit(command);
-            return read(outcome.result().payload(), OrderView.class);
+            return viewOf(outcome, OrderView.class);
         } catch (RuntimeException exception) {
             error = exception;
             throw exception;
@@ -171,7 +171,7 @@ public class OrderCommandController {
                     null, null, null, null, null, Map.of());
 
             ProcessingOutcome outcome = submit(command);
-            return read(outcome.result().payload(), CancelAllView.class);
+            return viewOf(outcome, CancelAllView.class);
         } catch (RuntimeException exception) {
             error = exception;
             throw exception;
@@ -271,6 +271,22 @@ public class OrderCommandController {
         String destination = value == null || value.isBlank() ? "DMA" : value.strip().toUpperCase(Locale.ROOT);
         if (!DESTINATIONS.contains(destination)) throw new IllegalArgumentException("Destination must be DMA, SMART, or VWAP");
         return destination;
+    }
+
+    /**
+     * Prefers the object the handler already had over parsing its own JSON back.
+     * The handler serialises the view a moment earlier on the same request, so
+     * reading it again was a round trip through the string and back.
+     *
+     * <p>Falls back to parsing when nothing was carried - a command replayed
+     * from the processed-command cache has only the stored payload.
+     */
+    private <T> T viewOf(ProcessingOutcome outcome, Class<T> type) {
+        Object carried = outcome.view();
+        if (type.isInstance(carried)) {
+            return type.cast(carried);
+        }
+        return read(outcome.result().payload(), type);
     }
 
     private <T> T read(String json, Class<T> type) {
