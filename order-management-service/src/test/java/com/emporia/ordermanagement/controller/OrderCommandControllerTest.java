@@ -113,7 +113,7 @@ class OrderCommandControllerTest {
         ProcessedCommandRepository processed = mock(ProcessedCommandRepository.class);
         AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
         OrderMetrics metrics = new OrderMetrics(new SimpleMeterRegistry());
-        OrderStateCache cache = new OrderStateCache(orders, processed, metrics, 1000, 1000);
+        OrderStateCache cache = new OrderStateCache(orders, processed, metrics, null, 1000, 1000);
         OrderCommandHandler realHandler = new OrderCommandHandler(orders, events, processed, objectMapper,
                 observations, metrics, cache, asyncDbWriter);
         DisruptorOrderPipeline realPipeline = new DisruptorOrderPipeline(

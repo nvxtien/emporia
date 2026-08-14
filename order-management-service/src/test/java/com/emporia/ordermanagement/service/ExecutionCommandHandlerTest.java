@@ -42,7 +42,7 @@ class ExecutionCommandHandlerTest {
     private final OrderEventRepository events = mock(OrderEventRepository.class);
     private final ProcessedCommandRepository processed = mock(ProcessedCommandRepository.class);
     private final OrderMetrics metrics = new OrderMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
-    private final OrderStateCache cache = new OrderStateCache(orders, processed, metrics, 1000, 1000);
+    private final OrderStateCache cache = new OrderStateCache(orders, processed, metrics, null, 1000, 1000);
     private final AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
     private final ShardedOrderDispatcher dispatcher = mock(ShardedOrderDispatcher.class);
     private final ExecutionCommandHandler handler =

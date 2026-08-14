@@ -281,7 +281,7 @@ public class OrderShadowComparisonService {
                     }
             );
             OrderMetrics metrics = new OrderMetrics(new SimpleMeterRegistry());
-            OrderStateCache cache = new OrderStateCache(orders, processed, metrics, 1000, 1000);
+            OrderStateCache cache = new OrderStateCache(orders, processed, metrics, null, 1000, 1000);
             AsyncDbWriter asyncDbWriter = new InMemoryAsyncDbWriter(
                     orders, events, processed, storedOrders, eventsByCommand, processedCommands);
             handler = new OrderCommandHandler(orders, events, processed, new ObjectMapper(), ObservationRegistry.NOOP,

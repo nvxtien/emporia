@@ -55,7 +55,7 @@ class OrderCommandHandlerObservationTest {
     void setUp() {
         observations.observationConfig().observationHandler(new DefaultMeterObservationHandler(meters));
         OrderMetrics metrics = new OrderMetrics(meters);
-        OrderStateCache cache = new OrderStateCache(orders, processed, metrics, 1000, 1000);
+        OrderStateCache cache = new OrderStateCache(orders, processed, metrics, null, 1000, 1000);
         AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
         handler = new OrderCommandHandler(orders, events, processed, new ObjectMapper(), observations, metrics, cache, asyncDbWriter);
         when(processed.findById(any())).thenReturn(Optional.empty());

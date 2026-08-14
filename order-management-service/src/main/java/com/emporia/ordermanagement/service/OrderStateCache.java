@@ -3,6 +3,7 @@ package com.emporia.ordermanagement.service;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.micrometer.core.instrument.Timer;
+import org.jspecify.annotations.Nullable;
 import com.emporia.ordermanagement.model.ProcessedCommand;
 import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.ProcessedCommandRepository;
@@ -32,14 +33,25 @@ import java.util.concurrent.TimeUnit;
  *       the repository in the same transaction scope. The DB remains the
  *       system-of-record for durability and cross-instance reads.</li>
  *   <li><b>read-through on miss</b>: a cache miss delegates to the
- *       repository, so cold starts and post-restart recovery work without any
- *       special warm-up logic.</li>
- *   <li><b>single-instance authority</b>: the Kafka consumer group assigns
- *       each partition to exactly one OMS instance. Command handlers for a
- *       given order always run on the same instance, so the cache is
- *       authoritative for write-path reads. HTTP read queries ({@code GET
- *       /orders}) bypass the cache entirely and go straight to the DB.</li>
+ *       repository. This is what {@link CommandDedupIndex} exists to avoid: a
+ *       {@code CREATE} carries freshly generated ids, so it misses every time -
+ *       measured at zero hits across 14,402 orders, costing 2.312 of the
+ *       handler's 2.405 ms on the single writer thread. When the index is
+ *       present and ready it answers "never seen" from memory and the
+ *       repository is not consulted.</li>
+ *   <li><b>single-instance authority</b>: deduplication is correct if and only
+ *       if exactly one instance accepts orders. This is enforced on the order
+ *       path by the {@code isPrimary()} check in {@code DisruptorOrderPipeline},
+ *       not assumed. Note the limit: the {@code local-filelock} provider
+ *       excludes a second process on one machine and does <b>not</b> exclude a
+ *       second machine. HTTP read queries ({@code GET /orders}) bypass the cache
+ *       entirely and go straight to the DB.</li>
  * </ul>
+ *
+ * <p>An earlier version of this javadoc attributed single-instance authority to
+ * Kafka consumer-group partition assignment. Order intake moved in-process at
+ * {@code 67eaecf} and no Kafka listener remains in this service, so that basis
+ * had not existed for some time.
  *
  * <h2>Eviction</h2>
  * <ul>
@@ -62,17 +74,27 @@ public class OrderStateCache {
     // for a CREATE both ids are freshly generated, so it fires every time.
     private final Timer processedFromCache;
     private final Timer processedFromDb;
+    private final Timer processedFromIndex;
     private final Timer existsFromCache;
     private final Timer existsFromDb;
+    private final Timer existsFromIndex;
+    // Null disables the index and restores the pure read-through behaviour.
+    private final @Nullable CommandDedupIndex index;
+    // Written once by the startup loader, read by the writer thread.
+    private volatile boolean ready;
 
     public OrderStateCache(
             TradingOrderRepository orderRepository,
             ProcessedCommandRepository processedRepository,
             OrderMetrics metrics,
+            @Nullable CommandDedupIndex index,
             @Value("${emporia.cache.order-max-size:100000}") long orderMaxSize,
             @Value("${emporia.cache.processed-max-size:50000}") long processedMaxSize) {
         this.orderRepository = orderRepository;
         this.processedRepository = processedRepository;
+        this.index = index;
+        this.processedFromIndex = metrics.registry().timer("emporia.oms.cache.lookup", "check", "processed", "source", "index");
+        this.existsFromIndex = metrics.registry().timer("emporia.oms.cache.lookup", "check", "exists", "source", "index");
         this.processedFromCache = metrics.registry().timer("emporia.oms.cache.lookup", "check", "processed", "source", "cache");
         this.processedFromDb = metrics.registry().timer("emporia.oms.cache.lookup", "check", "processed", "source", "db");
         this.existsFromCache = metrics.registry().timer("emporia.oms.cache.lookup", "check", "exists", "source", "cache");
@@ -115,9 +137,35 @@ public class OrderStateCache {
             existsFromCache.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
             return true;
         }
+        if (indexAnswers() && index.definitelyNew(id)) {
+            existsFromIndex.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
+            return false;
+        }
         boolean exists = orderRepository.existsById(id);
         existsFromDb.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
         return exists;
+    }
+
+    /**
+     * Whether the index may be trusted to answer "never seen".
+     *
+     * <p>False while loading, because a partially filled Bloom filter reports
+     * "never seen" for things it has seen - a false negative, the one direction
+     * that lets a duplicate order through. Until the load completes, the
+     * database answers, which is exactly today's behaviour: warm-up degrades
+     * latency, not correctness.
+     */
+    private boolean indexAnswers() {
+        return index != null && ready;
+    }
+
+    /** Called once the session load and WAL replay have both finished. */
+    public void markReady() {
+        this.ready = true;
+    }
+
+    public boolean isReady() {
+        return ready;
     }
 
     /**
@@ -126,6 +174,7 @@ public class OrderStateCache {
      */
     public void put(TradingOrder order) {
         orders.put(order.getId(), order);
+        if (index != null) index.remember(order.getId());
     }
 
     // ── ProcessedCommand ──────────────────────────────────────────────────────
@@ -143,6 +192,10 @@ public class OrderStateCache {
             processedFromCache.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
             return Optional.of(cached);
         }
+        if (indexAnswers() && index.definitelyNew(commandId)) {
+            processedFromIndex.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
+            return Optional.empty();
+        }
         Optional<ProcessedCommand> fromDb = processedRepository.findById(commandId);
         fromDb.ifPresent(p -> processed.put(commandId, p));
         processedFromDb.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
@@ -152,5 +205,9 @@ public class OrderStateCache {
     /** Stores the dedup result in the cache after persisting it to the DB. */
     public void putProcessed(ProcessedCommand command) {
         processed.put(command.result().commandId(), command);
+        // Remembered even while warming: a command processed during the load
+        // must be in the index by the time the load finishes, or the flip to
+        // ready would leave a hole exactly the size of the warm-up window.
+        if (index != null) index.remember(command);
     }
 }

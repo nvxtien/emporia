@@ -52,7 +52,7 @@ class OrderCommandHandlerTest {
     private final MeterRegistry meters = new SimpleMeterRegistry();
     private final ObservationRegistry observations = observationRegistry(meters);
     private final OrderMetrics metrics = new OrderMetrics(new SimpleMeterRegistry());
-    private final OrderStateCache cache = new OrderStateCache(orders, processed, metrics, 1000, 1000);
+    private final OrderStateCache cache = new OrderStateCache(orders, processed, metrics, null, 1000, 1000);
     private final AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
     private final ShardedOrderDispatcher dispatcher = mock(ShardedOrderDispatcher.class);
     private final OrderCommandHandler handler =
