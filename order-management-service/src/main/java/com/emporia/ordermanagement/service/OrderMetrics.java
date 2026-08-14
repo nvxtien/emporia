@@ -27,7 +27,15 @@ public class OrderMetrics {
     private final Counter cancelledCounter;
     private final Counter rejectedCounter;
 
+    /** Exposed so the hot path can time itself without an Observation. */
+    public MeterRegistry registry() {
+        return registry;
+    }
+
+    private final MeterRegistry registry;
+
     public OrderMetrics(MeterRegistry meters) {
+        this.registry = meters;
         // Micrometer Counters incremented on each state transition instead of querying DB
         createdCounter = Counter.builder("emporia.orders.created.total")
                 .description("The total number of created orders")

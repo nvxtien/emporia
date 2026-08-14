@@ -65,9 +65,12 @@ public class OrderCommandHandler {
      * Direct Java invocation without Spring AOP / CGLIB proxy reflection.
      */
     public ProcessingOutcome handle(OrderCommand command) {
-        Observation observation = Observation.createNotStarted("emporia.oms.command.handle", observations)
-                .lowCardinalityKeyValue("command_type", commandTypeTag(command))
-                .start();
+        // Timer, not Observation: measured on the single writer thread, the
+        // Observation machinery cost ~0.3 ms per command whether or not the span
+        // was sampled, and on a single-writer path a fixed per-event cost is
+        // multiplied by the queue it builds behind it. Same metric name and tags,
+        // so dashboards are unchanged; what is lost is the span.
+        long handleStartNanos = System.nanoTime();
         String outcome = "success";
         try {
             // Cache-backed idempotency check: avoids a DB SELECT on every command.
@@ -99,10 +102,12 @@ public class OrderCommandHandler {
             }
         } catch (RuntimeException exception) {
             outcome = "error";
-            observation.error(exception);
             throw exception;
         } finally {
-            observation.lowCardinalityKeyValue("outcome", outcome).stop();
+            metrics.registry().timer("emporia.oms.command.handle",
+                            "command_type", commandTypeTag(command),
+                            "outcome", outcome)
+                    .record(System.nanoTime() - handleStartNanos, java.util.concurrent.TimeUnit.NANOSECONDS);
         }
     }
 

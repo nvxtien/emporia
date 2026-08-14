@@ -61,6 +61,13 @@ public class DisruptorOrderPipeline {
     private final MeterRegistry meters;
     private final Counter warmupCounter;
     private final Timer queueLatency;
+    /**
+     * Splits the writer thread's own work. Everything here runs on the single
+     * writer, so anything but state mutation is time no other command can use.
+     */
+    private final Timer walLatency;
+    private final Timer commandLatency;
+    private final Timer safePointLatency;
     private final Timer handleLatency;
     private final AtomicLong queueDepth = new AtomicLong();
     private final AtomicBoolean accepting = new AtomicBoolean(true);
@@ -92,6 +99,9 @@ public class DisruptorOrderPipeline {
         this.meters = meters;
         this.warmupCounter = meters.counter("emporia.oms.pipeline.warmup.events");
         this.queueLatency = meters.timer("emporia.oms.pipeline.queue.latency");
+        this.walLatency = meters.timer("emporia.oms.pipeline.wal.latency");
+        this.commandLatency = meters.timer("emporia.oms.pipeline.command.latency");
+        this.safePointLatency = meters.timer("emporia.oms.pipeline.safepoint.latency");
         this.handleLatency = meters.timer("emporia.oms.pipeline.handle.latency");
         this.walFailures = meters.counter("emporia.oms.pipeline.wal.failures");
         meters.gauge("emporia.oms.pipeline.queue.depth", queueDepth);
@@ -167,20 +177,33 @@ public class DisruptorOrderPipeline {
                     long cpuNanos = threads.getCurrentThreadCpuTime();
                     long idleNanos = event.getStartedAtNanos() - lastFinishedNanos[0];
                     long cpuUsedNanos = cpuNanos - lastCpuNanos[0];
-                    log.warn("Ring queue wait {} ms: writer idle {} ms before this event, "
-                                    + "using {} ms CPU across that gap, ring depth {}, batch end {}. "
-                                    + "Idle time it did not spend on CPU is time it was not run.",
+                    // order_id is what makes this line joinable to the
+                    // emporia.order.submit span, which carries the same field:
+                    // the span says which order was slow, this says why.
+                    log.warn("Ring queue wait {} ms for order {}: writer idle {} ms before this "
+                                    + "event, using {} ms CPU across that gap, ring depth {}, "
+                                    + "batch end {}. Idle time it did not spend on CPU is time it "
+                                    + "was not run; near-zero idle with a deep ring is a backlog.",
                             TimeUnit.NANOSECONDS.toMillis(queueWaitNanos),
+                            event.getCommand().orderId(),
                             TimeUnit.NANOSECONDS.toMillis(idleNanos),
                             TimeUnit.NANOSECONDS.toMillis(cpuUsedNanos),
                             queueDepth.get(),
                             endOfBatch);
                 }
+                long walStart = System.nanoTime();
                 logAhead(event.getCommand());
+                long commandStart = System.nanoTime();
+                walLatency.record(commandStart - walStart, TimeUnit.NANOSECONDS);
+
                 ProcessingOutcome outcome = orderCommandHandler.handle(event.getCommand());
+                long safePointStart = System.nanoTime();
+                commandLatency.record(safePointStart - commandStart, TimeUnit.NANOSECONDS);
+
                 // Handled, so its rows are queued for the writer; the log space
                 // up to here is reclaimable once a flush persists them.
                 wal.markSafePoint();
+                safePointLatency.record(System.nanoTime() - safePointStart, TimeUnit.NANOSECONDS);
                 event.setOutcome(outcome);
                 if (event.getFuture() != null) {
                     event.getFuture().complete(outcome);
