@@ -343,6 +343,36 @@ been rotated out *is* the history for the period it covered, so rotation needs
 no database read at all. `generations` filters are retained behind the live one
 and rotation runs every `horizon / generations`.
 
+**Warm-up costs latency, not correctness**, and it is measured. The load runs
+after `ApplicationReadyEvent` on its own thread, so orders are accepted from the
+first moment and answered by Postgres - the behaviour that predates the index -
+until it finishes. Measured on a restart over a 20,001-row table:
+
+```
+Loaded 20001 processed commands, 20001 recent orders and 0 orders in
+working trees into the deduplication index in 292 ms (window=PT24H)
+
+Deduplication index ready: 40002 identifiers over PT24H, 43876 KB of filters
+```
+
+That is **~7.3 µs per identifier**, so the default sizing of 20M works out at
+roughly **two and a half minutes** of warm-up, not seconds. The 42.8 MB is the
+history filter sized for the whole horizon plus one live generation; the
+retained generations replace the history rather than adding to it.
+
+First run of the rotating design, both rates for 120 s through the gateway:
+
+| | 100/s | 120/s |
+|---|---:|---:|
+| submit p50/p95/p99 | 7 / 10 / 19 ms | 6 / 15 / 34 ms |
+| ring queue wait, mean | 0.027 ms | 0.114 ms |
+| lookups answered from the index | 24,068 | 52,870 |
+| lookups that reached Postgres | **0** | **0** |
+
+Zero read-throughs across 26,401 orders with 20,001 historical rows already in
+the table. What this run does **not** cover: rotation never fired, because the
+interval is six hours and the run was four minutes.
+
 **Two things must hold, or deduplication is wrong rather than slow:**
 
 - *Exactly one instance accepts orders.* The order path asks `isPrimary()` in
