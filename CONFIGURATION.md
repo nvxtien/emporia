@@ -175,6 +175,86 @@ instance named `ordercommands` and silently does nothing to `orderCommands` —
 it looks exactly like the setting having no effect. Use the env var declared in
 `application.yml` above, or `-Dresilience4j.bulkhead.instances.orderCommands.maxConcurrentCalls=...`.
 
+## Anything on the single writer thread is multiplied by the queue behind it
+
+- **Where**: `DisruptorOrderPipeline`'s handler, and everything it calls -
+  `logAhead`, `OrderCommandHandler.handle`, `wal.markSafePoint`
+
+Every order command passes through one thread, so a fixed per-event cost there
+does not add to latency, it multiplies. Measured at 120 orders/sec: 0.6 ms per
+command of tracing overhead showed up as several hundred milliseconds of ring
+queue wait, because each command paid it and every command behind it waited.
+
+**Measured breakdown of the writer's own work** (means, 120/s, 180 s):
+
+| | mean | share |
+|---|---:|---:|
+| handler total | 3.047 ms | 100% |
+| `OrderCommandHandler.handle` | 3.029 ms | 99.4% |
+| WAL `logAhead` | 0.011 ms | 0.3% |
+| `wal.markSafePoint` | 0.001 ms | 0.0% |
+
+The WAL is not the cost, which is worth knowing before reaching for the usual
+LMAX advice of moving journalling to a parallel handler - here that buys 0.3%.
+
+**Micrometer `Observation` is expensive here, and sampling does not help:**
+
+| | mean handler |
+|---|---:|
+| `Observation`, tracing 100% | 3.047 ms |
+| `Observation`, tracing 1% | 2.764 ms |
+| `Observation`, tracing off | 2.437 ms |
+| `Timer`, tracing 100% | 2.521 ms |
+
+0.53 ms of the 0.61 ms is the Observation machinery - handler lookup, context,
+key-values - which runs regardless of the sampling decision; only 0.08 ms is
+recording the span. Head sampling therefore recovers little, and **tail sampling
+recovers nothing**: deciding after the fact requires the span to record in full.
+The hot path now uses a plain `Timer` with the same metric name and tags.
+
+**Diagnosing a slow order**: `emporia.order.submit` still spans the whole
+request and carries `order_id`; the per-layer timers say which layer; and
+`emporia.disruptor.stall-threshold-ms` (0, off) logs long ring waits with the
+same `order_id`, plus how long the writer was idle and how much CPU it used
+across the gap - near-zero idle with a deep ring is a backlog, idle time not
+spent on CPU is time it was not scheduled.
+
+## The portfolio outbox distinguishes settled changes from margin reservations
+
+- **Where**: `exchange-core` 0.5.8's `EmporiaPortfolioChange`, and
+  `change_kind` on `exchange_core_portfolio_outbox`
+
+Publishing a snapshot for every accepted command filled the outbox at order-flow
+rate while it could only drain at delivery rate. Measured at 120 orders/sec for
+ten minutes: **72,002 rows enqueued, 248 delivered**, with the claim query's
+per-client anti-join running 71,753 subquery loops at 2,271 ms a call and
+holding a Postgres core at 102% indefinitely.
+
+`SETTLED` (a fill, or a funding adjustment) is delivered and acknowledged
+individually and is **never** collapsed - audit requires one confirmed delivery
+per completed change. `RESERVED` (margin moving on an order that has not traded)
+supersedes this client's earlier undelivered reservation, since a snapshot
+carries the whole balance and only the newest one carries anything. Enqueue is
+single-threaded so insertion order matches production order; superseding
+compares `sequence_id`.
+
+After: **0 pending, 100% resolved, Postgres 0.88%**.
+
+## The risk seed reads settled_balance, never available_balance
+
+- **Where**: `portfolio_balance.settled_balance`, read by
+  `/internal/v1/portfolios/{clientId}/risk-seed`
+
+Onboarding a client into the matching engine seeds it from portfolio-service,
+and the engine starts with an empty book and therefore no margin holds. Seeding
+from a hold-adjusted balance lost that margin permanently, silently, on every
+venue reset. Observed locally: a client seeded at 999,999,999,999 read back
+999,291,109,999 against 72,002 resting orders.
+
+`available_balance` follows every snapshot so a trader sees holds as they
+happen; `settled_balance` follows only settled changes and is what the seed
+reads.
+
 ## Re-seeding a portfolio balance has no effect until the outbox backlog is cleared
 
 - **Where**: `emporia_execution.exchange_core_portfolio_outbox` (execution DB,
