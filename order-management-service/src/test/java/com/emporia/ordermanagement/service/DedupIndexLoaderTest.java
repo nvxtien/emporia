@@ -8,6 +8,7 @@ import org.springframework.jdbc.core.RowCallbackHandler;
 import java.sql.ResultSet;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -19,42 +20,89 @@ import static org.mockito.Mockito.when;
 
 class DedupIndexLoaderTest {
 
+    private static final Duration WINDOW = Duration.ofHours(24);
+
     @Test
     void loadedCommandsAreNoLongerNewToTheIndex() {
         List<UUID> stored = List.of(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID());
-        JdbcTemplate jdbc = jdbcReturning(stored);
+        JdbcTemplate jdbc = jdbcReturning(Map.of("processed_order_command", stored));
         CommandDedupIndex index = new CommandDedupIndex(1_000, 0.001);
 
-        long loaded = new DedupIndexLoader(jdbc).load(index, Duration.ofHours(8));
+        long loaded = new DedupIndexLoader(jdbc).load(index, WINDOW);
 
         assertThat(loaded).isEqualTo(3);
         assertThat(stored).allSatisfy(id -> assertThat(index.definitelyNew(id)).isFalse());
     }
 
+    /**
+     * The 409 duplicate-order guard asks the same index the idempotency check
+     * does. Loading only command ids left it answering "never seen" for every
+     * order that existed before this process started.
+     */
     @Test
-    void anEmptyWindowLoadsNothingAndLeavesTheIndexUntouched() {
-        JdbcTemplate jdbc = jdbcReturning(List.of());
+    void orderIdsInTheWindowAreLoadedAlongsideCommandIds() {
+        UUID command = UUID.randomUUID();
+        UUID order = UUID.randomUUID();
+        JdbcTemplate jdbc = jdbcReturning(Map.of(
+                "processed_order_command", List.of(command),
+                "created_at", List.of(order)));
         CommandDedupIndex index = new CommandDedupIndex(1_000, 0.001);
 
-        long loaded = new DedupIndexLoader(jdbc).load(index, Duration.ofHours(8));
+        long loaded = new DedupIndexLoader(jdbc).load(index, WINDOW);
+
+        assertThat(loaded).isEqualTo(2);
+        assertThat(index.definitelyNew(command)).isFalse();
+        assertThat(index.definitelyNew(order)).isFalse();
+    }
+
+    /**
+     * A strategy parent can outlive the window and go on emitting child slices
+     * whose ids are derived from it. Those ids must stay known for as long as
+     * the parent can still produce them, which is not a matter of age.
+     */
+    @Test
+    void workingOrdersAreLoadedNoMatterHowOldTheyAre() {
+        UUID stillWorking = UUID.randomUUID();
+        JdbcTemplate jdbc = jdbcReturning(Map.of("order_status", List.of(stillWorking)));
+        CommandDedupIndex index = new CommandDedupIndex(1_000, 0.001);
+
+        long loaded = new DedupIndexLoader(jdbc).load(index, WINDOW);
+
+        assertThat(loaded).isEqualTo(1);
+        assertThat(index.definitelyNew(stillWorking)).isFalse();
+    }
+
+    @Test
+    void anEmptyWindowLoadsNothingAndLeavesTheIndexUntouched() {
+        JdbcTemplate jdbc = jdbcReturning(Map.of());
+        CommandDedupIndex index = new CommandDedupIndex(1_000, 0.001);
+
+        long loaded = new DedupIndexLoader(jdbc).load(index, WINDOW);
 
         assertThat(loaded).isZero();
         assertThat(index.definitelyNew(UUID.randomUUID())).isTrue();
     }
 
     /**
-     * Drives the loader's RowCallbackHandler over a fixed set of ids, standing in
-     * for the streaming query. Verifies the loader consumes rows one at a time
-     * rather than collecting them, which is the point of the streaming shape.
+     * Drives the loader's RowCallbackHandler over a fixed set of ids per query,
+     * standing in for the streaming reads. Queries are matched by a fragment of
+     * their SQL so each arm can return its own rows, which is what lets a test
+     * assert that a given arm ran at all. Verifies the loader consumes rows one
+     * at a time rather than collecting them, which is the point of the streaming
+     * shape.
      */
-    private static JdbcTemplate jdbcReturning(List<UUID> ids) {
+    private static JdbcTemplate jdbcReturning(Map<String, List<UUID>> rowsByQueryFragment) {
         JdbcTemplate jdbc = mock(JdbcTemplate.class);
         Answer<Void> stream = invocation -> {
+            String sql = invocation.getArgument(0);
             RowCallbackHandler handler = invocation.getArgument(1);
-            for (UUID id : ids) {
-                ResultSet row = mock(ResultSet.class);
-                when(row.getObject(1)).thenReturn(id);
-                handler.processRow(row);
+            for (Map.Entry<String, List<UUID>> arm : rowsByQueryFragment.entrySet()) {
+                if (!sql.contains(arm.getKey())) continue;
+                for (UUID id : arm.getValue()) {
+                    ResultSet row = mock(ResultSet.class);
+                    when(row.getObject(1)).thenReturn(id);
+                    handler.processRow(row);
+                }
             }
             return null;
         };
