@@ -538,6 +538,57 @@ class OrderCommandHandlerTest {
         return order;
     }
 
+    /**
+     * Deduplication with the index answering, which the benchmark could not
+     * cover: it never sends a duplicate, so a run proving the index adds no
+     * duplicates says nothing about whether it catches one.
+     *
+     * <p>The index only ever reports "definitely new" or "possibly seen". The
+     * first answer must not be given for a command already handled, and the
+     * second must fall through to the exact tier so the caller gets the original
+     * result rather than a second order.
+     */
+    @Test
+    void aDuplicateCommandIsStillRefusedWhileTheIndexIsAnswering() {
+        CommandDedupIndex live = new CommandDedupIndex(1_000, 0.001);
+        OrderStateCache indexed = new OrderStateCache(orders, processed, metrics, live, 1000, 1000);
+        indexed.publishSessionHistory(new CommandDedupIndex(1_000, 0.001));
+        OrderCommandHandler indexedHandler = new OrderCommandHandler(
+                orders, events, processed, new ObjectMapper(), observations, metrics, indexed, asyncDbWriter, dispatcher);
+        assertThat(indexed.isReady()).isTrue();
+
+        OrderCommand command = createCommand(UUID.randomUUID());
+        ProcessingOutcome first = indexedHandler.handle(command);
+        ProcessingOutcome duplicate = indexedHandler.handle(command);
+
+        assertThat(first.result().status()).isEqualTo(201);
+        assertThat(duplicate.result()).isEqualTo(first.result());
+        // One order, not two: the duplicate was answered, not executed.
+        verify(asyncDbWriter, times(1)).enqueue(any(TradingOrder.class));
+    }
+
+    /**
+     * A second CREATE reusing an orderId the index has already seen must be
+     * refused rather than silently upserting over the original - the guard that
+     * survived because existsById moved into the index instead of being deleted.
+     */
+    @Test
+    void aReusedOrderIdIsRefusedWhileTheIndexIsAnswering() {
+        CommandDedupIndex live = new CommandDedupIndex(1_000, 0.001);
+        OrderStateCache indexed = new OrderStateCache(orders, processed, metrics, live, 1000, 1000);
+        indexed.publishSessionHistory(new CommandDedupIndex(1_000, 0.001));
+        OrderCommandHandler indexedHandler = new OrderCommandHandler(
+                orders, events, processed, new ObjectMapper(), observations, metrics, indexed, asyncDbWriter, dispatcher);
+
+        UUID orderId = UUID.randomUUID();
+        indexedHandler.handle(createCommand(orderId));
+        // A different command carrying the same orderId, so commandId dedup
+        // cannot be what catches it.
+        ProcessingOutcome reused = indexedHandler.handle(createCommand(orderId));
+
+        assertThat(reused.result().status()).isEqualTo(409);
+    }
+
     private static OrderCommand createCommand(UUID orderId) {
         return new OrderCommand(
                 SCHEMA_VERSION, UUID.randomUUID(), CommandType.CREATE,

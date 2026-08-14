@@ -54,11 +54,18 @@ emporia.disruptor:
 # writer thread, with zero cache hits across 14,402 orders - a CREATE carries
 # freshly generated ids, so the read-through fallback fires every time.
 #
-# Off by default: this changes how order deduplication is answered, and
-# deduplication failing means a duplicate order. Watch
-# emporia.oms.dedup.duplicate_reached_db, which must stay at zero.
+# On by default as of the A/B below. Six alternating runs at 120 orders/sec,
+# both orders of arm, ring queue wait 0.035-0.230 ms with it against
+# 1.872-5.712 ms without - no overlap, and max wait 17-52 ms against 248-479 ms.
+# Deduplication is unchanged in behaviour: a duplicate command is still refused
+# and a reused orderId still returns 409, covered by tests rather than by the
+# benchmark, which never sends a duplicate.
+#
+# Still switchable, because deduplication failing means a duplicate position and
+# a property beats a redeploy. Watch emporia.oms.dedup.duplicate_reached_db: it
+# counts duplicates that got through and must stay at zero.
 emporia.dedup-index:
-  enabled: ${EMPORIA_DEDUP_INDEX_ENABLED:false}
+  enabled: ${EMPORIA_DEDUP_INDEX_ENABLED:true}
   # One trading session. Commands older than this fall back to Postgres, which
   # is correct but slower - and by then a client retry is a new request, not a
   # retry.
