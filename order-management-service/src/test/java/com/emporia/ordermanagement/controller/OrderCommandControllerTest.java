@@ -61,7 +61,7 @@ class OrderCommandControllerTest {
     void setUp() {
         observations.observationConfig()
                 .observationHandler(new DefaultMeterObservationHandler(meters));
-        disruptorPipeline = new DisruptorOrderPipeline(handler, meters, new MemoryMappedWalLogger(null, 1), null, "yielding", 0, 0, 0, "", "");
+        disruptorPipeline = new DisruptorOrderPipeline(handler, meters, new MemoryMappedWalLogger(null, 1), null, null, "yielding", 0, 0, 0, "", "");
         disruptorPipeline.start();
         controller = new OrderCommandController(staticData, handler, disruptorPipeline, inputRecorder, objectMapper, observations);
     }
@@ -118,7 +118,7 @@ class OrderCommandControllerTest {
                 observations, metrics, cache, asyncDbWriter);
         DisruptorOrderPipeline realPipeline = new DisruptorOrderPipeline(
                 realHandler, new SimpleMeterRegistry(), new MemoryMappedWalLogger(null, 1),
-                null, "yielding", 0, 0, 0, "", "");
+                null, null, "yielding", 0, 0, 0, "", "");
         realPipeline.start();
         try {
             OrderInputEventRecorder realRecorder = new OrderInputEventRecorder(asyncDbWriter, objectMapper);

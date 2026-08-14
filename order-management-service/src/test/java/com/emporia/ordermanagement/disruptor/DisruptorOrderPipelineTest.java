@@ -1,5 +1,6 @@
 package com.emporia.ordermanagement.disruptor;
 
+import com.emporia.ha.LeaderElectionService;
 import com.emporia.events.TradingEvents.CommandType;
 import com.emporia.events.TradingEvents.OrderCommand;
 import com.emporia.events.TradingEvents.OrderCommandResult;
@@ -29,6 +30,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class DisruptorOrderPipelineTest {
@@ -38,7 +40,7 @@ class DisruptorOrderPipelineTest {
     @BeforeEach
     void setUp() {
         handler = mock(OrderCommandHandler.class);
-        pipeline = new DisruptorOrderPipeline(handler, new SimpleMeterRegistry(), disabledWal(), null, "yielding", 0, 0, 0, "", "");
+        pipeline = new DisruptorOrderPipeline(handler, new SimpleMeterRegistry(), disabledWal(), null, null, "yielding", 0, 0, 0, "", "");
         pipeline.start();
     }
 
@@ -113,6 +115,47 @@ class DisruptorOrderPipelineTest {
                 .hasMessageContaining("kill switch");
     }
 
+    /**
+     * Command deduplication is only correct while exactly one instance accepts
+     * orders. Nothing on this path used to check that, so a second instance
+     * would silently accept duplicates rather than fail.
+     */
+    @Test
+    void rejectsCommandsWhenNotPrimary() {
+        LeaderElectionService standby = mock(LeaderElectionService.class);
+        when(standby.isPrimary()).thenReturn(false);
+        DisruptorOrderPipeline secondary = new DisruptorOrderPipeline(
+                handler, new SimpleMeterRegistry(), disabledWal(), null, standby,
+                "yielding", 0, 0, 0, "", "");
+        secondary.start();
+        try {
+            assertThatThrownBy(() -> secondary.submit(sampleCommand(UUID.randomUUID())).join())
+                    .hasCauseInstanceOf(HotPathRejectedException.class)
+                    .cause()
+                    .hasMessageContaining("not the primary");
+        } finally {
+            secondary.stop();
+        }
+    }
+
+    @Test
+    void acceptsCommandsWhenPrimary() {
+        LeaderElectionService primary = mock(LeaderElectionService.class);
+        when(primary.isPrimary()).thenReturn(true);
+        DisruptorOrderPipeline leader = new DisruptorOrderPipeline(
+                handler, new SimpleMeterRegistry(), disabledWal(), null, primary,
+                "yielding", 0, 0, 0, "", "");
+        leader.start();
+        try {
+            // The mocked handler returns null, so assert the command reached it
+            // rather than asserting on an outcome this test never provides.
+            leader.submit(sampleCommand(UUID.randomUUID())).join();
+            verify(handler).handle(any());
+        } finally {
+            leader.stop();
+        }
+    }
+
     @Test
     void rejectsIngressBurstWhenConsumerFallsBehind() throws Exception {
         CountDownLatch handlerEntered = new CountDownLatch(1);
@@ -121,6 +164,7 @@ class DisruptorOrderPipelineTest {
                 handler,
                 new SimpleMeterRegistry(),
                 disabledWal(),
+                null,
                 null,
                 "yielding",
                 65_535,
@@ -172,7 +216,7 @@ class DisruptorOrderPipelineTest {
                 return null;
             });
             DisruptorOrderPipeline logging = new DisruptorOrderPipeline(
-                    recordingHandler, new SimpleMeterRegistry(), wal, null,
+                    recordingHandler, new SimpleMeterRegistry(), wal, null, null,
                     "yielding", 0, 0, 0, "", "");
             logging.start();
 
@@ -195,7 +239,7 @@ class DisruptorOrderPipelineTest {
             wal.append(new byte[1024 * 1024 - 8]);
             OrderCommandHandler neverCalled = mock(OrderCommandHandler.class);
             DisruptorOrderPipeline logging = new DisruptorOrderPipeline(
-                    neverCalled, new SimpleMeterRegistry(), wal, null,
+                    neverCalled, new SimpleMeterRegistry(), wal, null, null,
                     "yielding", 0, 0, 0, "", "");
             logging.start();
 

@@ -23,6 +23,8 @@ import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadMXBean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.emporia.ha.LeaderElectionService;
+import org.jspecify.annotations.Nullable;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -46,6 +48,14 @@ public class DisruptorOrderPipeline {
     private final MemoryMappedWalLogger wal;
     /** Null only in tests that construct the pipeline without recovery. */
     private final OrderCommandReplayHarness replayHarness;
+    // Null when no leader election is wired, which accepts orders as before.
+    // Order deduplication is only correct while exactly one instance accepts
+    // orders, and nothing on this path used to check that: the javadoc on
+    // OrderStateCache claimed Kafka consumer-group partition assignment
+    // provided it, but intake moved in-process at 67eaecf and there are no
+    // Kafka listeners left. Enforced here so a second instance fails loudly
+    // rather than silently accepting duplicate orders.
+    private final @Nullable LeaderElectionService leaderElection;
     private final Counter walFailures;
     private final String waitStrategyName;
     private final long minRemainingCapacity;
@@ -87,6 +97,7 @@ public class DisruptorOrderPipeline {
                                  MeterRegistry meters,
                                  MemoryMappedWalLogger wal,
                                  OrderCommandReplayHarness replayHarness,
+                                 @Nullable LeaderElectionService leaderElection,
                                  @Value("${emporia.disruptor.wait-strategy:yielding}") String waitStrategyName,
                                  @Value("${emporia.disruptor.min-remaining-capacity:1024}") long minRemainingCapacity,
                                  @Value("${emporia.disruptor.warmup-iterations:2048}") int warmupIterations,
@@ -96,6 +107,7 @@ public class DisruptorOrderPipeline {
         this.orderCommandHandler = orderCommandHandler;
         this.wal = wal;
         this.replayHarness = replayHarness;
+        this.leaderElection = leaderElection;
         this.waitStrategyName = waitStrategyName;
         this.minRemainingCapacity = Math.max(0L, minRemainingCapacity);
         this.warmupIterations = Math.max(0, warmupIterations);
@@ -261,6 +273,10 @@ public class DisruptorOrderPipeline {
         if (!accepting.get()) {
             return rejected(503, "kill_switch",
                     "OMS hot path is disabled by kill switch: " + killSwitchReason);
+        }
+        if (leaderElection != null && !leaderElection.isPrimary()) {
+            return rejected(503, "not_primary",
+                    "This instance is not the primary and does not accept orders");
         }
         if (ringBuffer.remainingCapacity() <= minRemainingCapacity) {
             return rejected(429, "overload",
