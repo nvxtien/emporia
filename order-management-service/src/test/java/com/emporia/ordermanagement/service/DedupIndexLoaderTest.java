@@ -57,19 +57,20 @@ class DedupIndexLoaderTest {
 
     /**
      * A strategy parent can outlive the window and go on emitting child slices
-     * whose ids are derived from it. Those ids must stay known for as long as
-     * the parent can still produce them, which is not a matter of age.
+     * whose ids are derived from it. The ids at risk are the children's, and a
+     * child goes terminal long before its parent does - so loading only what is
+     * still working would miss exactly the ones that can be regenerated.
      */
     @Test
-    void workingOrdersAreLoadedNoMatterHowOldTheyAre() {
-        UUID stillWorking = UUID.randomUUID();
-        JdbcTemplate jdbc = jdbcReturning(Map.of("order_status", List.of(stillWorking)));
+    void everyOrderInAWorkingTreeIsLoadedNoMatterHowOldItIs() {
+        UUID filledChildOfALiveParent = UUID.randomUUID();
+        JdbcTemplate jdbc = jdbcReturning(Map.of("root_order_id", List.of(filledChildOfALiveParent)));
         CommandDedupIndex index = new CommandDedupIndex(1_000, 0.001);
 
         long loaded = new DedupIndexLoader(jdbc).load(index, WINDOW);
 
         assertThat(loaded).isEqualTo(1);
-        assertThat(index.definitelyNew(stillWorking)).isFalse();
+        assertThat(index.definitelyNew(filledChildOfALiveParent)).isFalse();
     }
 
     @Test

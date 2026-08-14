@@ -1,0 +1,21 @@
+-- Widens the startup deduplication load from working orders to whole strategy
+-- trees.
+--
+-- V11 loads every order still working, which covers a strategy parent that
+-- outlives the deduplication horizon. It does not cover that parent's children:
+-- a slice filled thirty hours ago is neither working nor inside the window, so
+-- nothing holds its id. The parent goes on emitting slices whose ids are derived
+-- from it - deterministic(parent + strategy + index) - so it can regenerate
+-- exactly that id, and the child's own commandId aged out of the window with it.
+-- Both guards miss, and the write upserts rather than failing, so a filled order
+-- reverts to live with nothing traded.
+--
+-- Loading by root_order_id covers the whole tree instead: parents, siblings and
+-- terminal children. It also subsumes V11's working-order arm, because a
+-- top-level order is its own root - TradingOrder sets root_order_id to the id
+-- when no parent is given - so every working order is in some loaded tree.
+--
+-- Composite with id so the outer scan can be index-only; the inner scan over
+-- working orders is small enough for the heap fetch not to matter.
+CREATE INDEX IF NOT EXISTS idx_trading_order_root
+    ON trading_order (root_order_id, id);

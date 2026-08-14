@@ -24,11 +24,16 @@ import java.util.UUID;
  * silently off - a false negative, the one direction that matters.
  *
  * <p>The order side has two arms. The window arm mirrors the command side.
- * The working arm ignores age deliberately: strategy child slices carry
- * deterministic ids, so a parent outliving the horizon regenerates ids the
- * window no longer holds, and the writer upserts rather than failing on the
- * primary key - the duplicate would overwrite a live order instead of being
- * rejected. That set is small enough to load whole.
+ * The tree arm ignores age deliberately: strategy child slices carry
+ * deterministic ids derived from their parent, so a parent outliving the horizon
+ * regenerates ids the window no longer holds, and the writer upserts rather than
+ * failing on the primary key - the duplicate would revert a filled order to live
+ * with nothing traded instead of being rejected.
+ *
+ * <p>It loads whole trees rather than only the orders still working, because the
+ * ids at risk belong to the <i>children</i>, which go terminal long before the
+ * parent does. A top-level order is its own root, so this covers every working
+ * order on its own.
  *
  * <p>Reads only the identifier column. The rest of the row is the previous
  * result, which matters solely for a retry inside the client's retry window -
@@ -36,8 +41,8 @@ import java.util.UUID;
  * processed. A window's worth of payloads would be gigabytes for a question
  * that is only ever "yes or no".
  *
- * <p>Bounded by {@code processed_at} and {@code created_at}, which the V10 and
- * V11 indexes support. That is sound because exactly one instance accepts
+ * <p>Bounded by {@code processed_at}, {@code created_at} and
+ * {@code root_order_id}, which the V10, V11 and V12 indexes support. That is sound because exactly one instance accepts
  * orders, so every row in the window came from a single clock - enforced on the
  * order path, not assumed.
  */
@@ -57,10 +62,12 @@ public class DedupIndexLoader {
              WHERE created_at > ?
             """;
 
-    private static final String SELECT_WORKING_ORDERS = """
+    private static final String SELECT_WORKING_TREES = """
             SELECT id
               FROM emporia_order_data.trading_order
-             WHERE order_status IN ('LIVE', 'PARTIALLY_FILLED')
+             WHERE root_order_id IN (SELECT root_order_id
+                                       FROM emporia_order_data.trading_order
+                                      WHERE order_status IN ('LIVE', 'PARTIALLY_FILLED'))
             """;
 
     private final JdbcTemplate jdbcTemplate;
@@ -92,13 +99,13 @@ public class DedupIndexLoader {
 
         long commands = stream(SELECT_COMMANDS, index, from);
         long recentOrders = stream(SELECT_RECENT_ORDERS, index, from);
-        long workingOrders = stream(SELECT_WORKING_ORDERS, index);
+        long workingTrees = stream(SELECT_WORKING_TREES, index);
 
         long elapsedMs = (System.nanoTime() - started) / 1_000_000;
-        log.info("Loaded {} processed commands, {} recent orders and {} working orders into the "
-                        + "deduplication index in {} ms (window={}, since={})",
-                commands, recentOrders, workingOrders, elapsedMs, window, since);
-        return commands + recentOrders + workingOrders;
+        log.info("Loaded {} processed commands, {} recent orders and {} orders in working trees into "
+                        + "the deduplication index in {} ms (window={}, since={})",
+                commands, recentOrders, workingTrees, elapsedMs, window, since);
+        return commands + recentOrders + workingTrees;
     }
 
     private long stream(String sql, CommandDedupIndex index, Object... arguments) {
