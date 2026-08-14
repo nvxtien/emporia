@@ -32,7 +32,7 @@ class OrderStateCacheIndexTest {
      */
     @Test
     void readsThroughToPostgresUntilTheSessionHistoryIsPublished() {
-        OrderStateCache cache = cacheWith(new CommandDedupIndex(1_000, 0.001, 100));
+        OrderStateCache cache = cacheWith(new CommandDedupIndex(1_000, 0.001));
         UUID id = UUID.randomUUID();
         when(orders.existsById(id)).thenReturn(false);
 
@@ -44,8 +44,8 @@ class OrderStateCacheIndexTest {
 
     @Test
     void answersFromMemoryOnceTheSessionHistoryIsPublished() {
-        OrderStateCache cache = cacheWith(new CommandDedupIndex(1_000, 0.001, 100));
-        cache.publishSessionHistory(new CommandDedupIndex(1_000, 0.001, 100));
+        OrderStateCache cache = cacheWith(new CommandDedupIndex(1_000, 0.001));
+        cache.publishSessionHistory(new CommandDedupIndex(1_000, 0.001));
 
         assertThat(cache.isReady()).isTrue();
         assertThat(cache.existsById(UUID.randomUUID())).isFalse();
@@ -62,10 +62,10 @@ class OrderStateCacheIndexTest {
     @Test
     void anIdentifierKnownOnlyToTheLoadedHistoryStillReachesPostgres() {
         UUID recovered = UUID.randomUUID();
-        CommandDedupIndex history = new CommandDedupIndex(1_000, 0.001, 100);
+        CommandDedupIndex history = new CommandDedupIndex(1_000, 0.001);
         history.remember(recovered);
 
-        OrderStateCache cache = cacheWith(new CommandDedupIndex(1_000, 0.001, 100));
+        OrderStateCache cache = cacheWith(new CommandDedupIndex(1_000, 0.001));
         cache.publishSessionHistory(history);
         when(processed.findById(recovered)).thenReturn(Optional.empty());
 

@@ -231,6 +231,6 @@ public class OrderStateCache {
         // Remembered even while warming: a command processed during the load
         // must be in the index by the time the load finishes, or the flip to
         // ready would leave a hole exactly the size of the warm-up window.
-        if (index != null) index.remember(command);
+        if (index != null) index.remember(command.result().commandId());
     }
 }

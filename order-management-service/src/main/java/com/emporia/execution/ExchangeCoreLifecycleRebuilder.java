@@ -174,7 +174,7 @@ final class ExchangeCoreLifecycleRebuilder {
      *
      * <p>Only the current {@code (id, version, operation)} can be seeded:
      * order-management records the order's state, not the history of delivery
-     * ids the venue has answered. That is the delivery a post-crash Kafka
+     * ids the venue has answered. That is the delivery a post-crash
      * redelivery repeats, so it is the one that matters; deduplication of
      * superseded versions is not restored.
      */

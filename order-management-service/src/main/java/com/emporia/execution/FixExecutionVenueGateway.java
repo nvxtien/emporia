@@ -399,8 +399,8 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
         // (admin/session messages we never logged) are bridged with GapFills.
         // Synchronized so "through current" (EndSeqNo=0) resolves against a
         // snapshot of outgoingSequence that can't be invalidated by a concurrent
-        // send() from another thread (order commands arrive on a Kafka consumer
-        // thread, independent of this session's own read-loop thread).
+        // send() from another thread (order commands arrive on a dispatcher
+        // shard thread, independent of this session's own read-loop thread).
         private synchronized void handleResendRequest(Map<Integer, String> fields) {
             int beginSeqNo = integer(fields, 7, 1);
             int endSeqNoRaw = integer(fields, 16, 0);

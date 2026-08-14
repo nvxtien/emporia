@@ -96,7 +96,7 @@ public class DedupIndexWarmup {
 
     private void loadAndPublish() {
         try {
-            CommandDedupIndex history = new CommandDedupIndex(expectedEntries, falsePositiveRate, 1);
+            CommandDedupIndex history = new CommandDedupIndex(expectedEntries, falsePositiveRate);
             long loaded = new DedupIndexLoader(jdbcTemplate).load(history, window);
             cache.publishSessionHistory(history);
             log.info("Deduplication index ready: {} commands over {}, {} KB of filter. "

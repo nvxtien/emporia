@@ -523,7 +523,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
      *
      * <p>The rebuild must happen here rather than in
      * {@code ExecutionEventConsumer.recover()}, which runs a second after the
-     * application is ready: by then the Kafka listeners are consuming, and
+     * application is ready: by then the dispatcher is delivering events, and
      * applying a rebuilt projection <em>replaces</em> whatever the lifecycle
      * holds, so any order accepted in that window would be silently erased.
      *

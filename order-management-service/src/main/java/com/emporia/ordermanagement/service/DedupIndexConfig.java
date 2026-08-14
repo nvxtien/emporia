@@ -24,8 +24,7 @@ public class DedupIndexConfig {
     @ConditionalOnProperty(name = "emporia.dedup-index.enabled", havingValue = "true")
     public CommandDedupIndex commandDedupIndex(
             @Value("${emporia.dedup-index.expected-entries:3500000}") long expectedEntries,
-            @Value("${emporia.dedup-index.false-positive-rate:0.001}") double falsePositiveRate,
-            @Value("${emporia.cache.processed-max-size:50000}") long recentResults) {
-        return new CommandDedupIndex(expectedEntries, falsePositiveRate, recentResults);
+            @Value("${emporia.dedup-index.false-positive-rate:0.001}") double falsePositiveRate) {
+        return new CommandDedupIndex(expectedEntries, falsePositiveRate);
     }
 }

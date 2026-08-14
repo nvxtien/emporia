@@ -112,7 +112,7 @@ class ExecutionEventConsumer {
 
     /**
      * Records {@code emporia.strategy.decision} around one complete strategy
-     * tick. Downstream HTTP/Kafka observations become children, so a trace shows
+     * tick. Downstream HTTP observations become children, so a trace shows
      * both the total decision latency and the compute/data-fetch split.
      */
     private void observeStrategyDecision(String strategy, Supplier<String> action) {
@@ -681,7 +681,7 @@ class ExecutionEventConsumer {
      *
      * <p>This previously appended, so a parent could accumulate schedulers.
      * {@code startSmart} does call {@link #stopRuntime} first, but
-     * stop-schedule-remember is not atomic and the Kafka listener runs on
+     * stop-schedule-remember is not atomic and the dispatcher runs on
      * several threads: two events for the same parent both find nothing to
      * stop, both schedule, and both are then remembered. The loser was never
      * cancelled and kept ticking for the life of the process.

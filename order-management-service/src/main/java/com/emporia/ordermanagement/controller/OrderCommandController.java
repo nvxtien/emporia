@@ -51,8 +51,10 @@ import static com.emporia.events.TradingEvents.SCHEMA_VERSION;
  * <p>Executes {@link OrderCommandHandler} directly in-process upon REST intake,
  * completely eliminating Kafka round-trips from the synchronous HTTP REST critical path.
  *
- * <p>Domain events and result records are published to Kafka asynchronously out-of-band
- * for downstream execution services, audit logs, and external consumers.
+ * <p>Domain events reach execution through {@code ShardedOrderDispatcher}, an
+ * in-process dispatcher sharded by order id, rather than through a broker. The
+ * Kafka legs this class used to describe were removed when execution merged into
+ * this service.
  */
 @RestController
 @RequestMapping("/orders")

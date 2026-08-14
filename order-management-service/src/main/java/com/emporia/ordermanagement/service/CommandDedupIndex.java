@@ -1,11 +1,5 @@
 package com.emporia.ordermanagement.service;
 
-import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
-import com.emporia.ordermanagement.model.ProcessedCommand;
-
-import java.time.Duration;
-import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -21,19 +15,20 @@ import java.util.UUID;
  * the queue depth rather than being absorbed in parallel.
  *
  * <p>A read-through cache can never answer "never seen"; it only knows what it
- * holds. This structure is the authority instead of a cache in front of one.
+ * holds. This answers exactly that one question, and nothing else.
  *
- * <h2>Two tiers</h2>
- * <ul>
- *   <li><b>Bloom filter</b> — answers <i>definitely never seen</i> for a whole
- *       trading session. A Bloom filter has no false negatives, which is
- *       exactly the guarantee the hot path needs. A false positive costs one
- *       database lookup that then returns the correct answer, so semantics are
- *       preserved exactly. ~6 MB covers an 8-hour session at 120 orders/sec.</li>
- *   <li><b>Exact map</b> — answers <i>what was the previous result</i> for a
- *       genuine retry. Sized for the client retry window, not for the
- *       session.</li>
- * </ul>
+ * <h2>One question only</h2>
+ * <p>A Bloom filter has no false negatives, which is the guarantee the hot path
+ * needs. A false positive costs one database lookup that then returns the
+ * correct answer, so semantics are preserved exactly. ~6 MB covers an 8-hour
+ * session at 120 orders/sec.
+ *
+ * <p>It deliberately does <b>not</b> hold results. Returning the previous
+ * result for a genuine retry is {@link OrderStateCache}'s exact tier, which is
+ * sized for the client retry window rather than the session. An earlier version
+ * carried its own copy of that tier, so every {@code ProcessedCommand} was held
+ * twice and one copy was never read - and worse, it made two things look like
+ * the authority for one decision.
  *
  * <p>Both key spaces share one filter: {@code commandId} for idempotency and
  * {@code orderId} for the duplicate-order guard. A collision between the two
@@ -60,17 +55,14 @@ public final class CommandDedupIndex {
     private final long[] bits;
     private final long bitCount;
     private final int hashCount;
-    private final Cache<UUID, ProcessedCommand> recent;
 
     /**
      * @param expectedEntries identifiers the session is sized for; both key
      *                        spaces count toward it
      * @param falsePositiveRate the share of "never seen" answers allowed to be
      *                          wrong in the safe direction, e.g. 0.001
-     * @param recentResults entries in the exact tier, sized for the client
-     *                      retry window rather than the session
      */
-    public CommandDedupIndex(long expectedEntries, double falsePositiveRate, long recentResults) {
+    public CommandDedupIndex(long expectedEntries, double falsePositiveRate) {
         if (expectedEntries <= 0) throw new IllegalArgumentException("expectedEntries must be positive");
         if (falsePositiveRate <= 0 || falsePositiveRate >= 1) {
             throw new IllegalArgumentException("falsePositiveRate must be between 0 and 1 exclusive");
@@ -80,11 +72,6 @@ public final class CommandDedupIndex {
         this.bitCount = Math.max(64L, m);
         this.bits = new long[(int) ((bitCount + 63) / 64)];
         this.hashCount = Math.max(1, (int) Math.round((double) bitCount / expectedEntries * ln2));
-        this.recent = Caffeine.newBuilder()
-                .maximumSize(recentResults)
-                .expireAfterWrite(Duration.ofHours(24))
-                .recordStats()
-                .build();
     }
 
     /**
@@ -112,23 +99,6 @@ public final class CommandDedupIndex {
             long index = Math.floorMod(h1 + (long) i * h2, bitCount);
             bits[(int) (index >>> 6)] |= 1L << (index & 63);
         }
-    }
-
-    /**
-     * Records a processed command in both tiers at once.
-     *
-     * <p>Both, always: if the Bloom filter only received entries evicted from
-     * the exact map, one missed eviction would be a permanent false negative.
-     */
-    public void remember(ProcessedCommand command) {
-        UUID commandId = command.result().commandId();
-        remember(commandId);
-        recent.put(commandId, command);
-    }
-
-    /** Returns the previous result when the exact tier still holds it. */
-    public Optional<ProcessedCommand> recall(UUID commandId) {
-        return Optional.ofNullable(recent.getIfPresent(commandId));
     }
 
     /** Bits allocated, for sizing checks and for reporting memory use. */

@@ -23,7 +23,7 @@ class DedupIndexLoaderTest {
     void loadedCommandsAreNoLongerNewToTheIndex() {
         List<UUID> stored = List.of(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID());
         JdbcTemplate jdbc = jdbcReturning(stored);
-        CommandDedupIndex index = new CommandDedupIndex(1_000, 0.001, 100);
+        CommandDedupIndex index = new CommandDedupIndex(1_000, 0.001);
 
         long loaded = new DedupIndexLoader(jdbc).load(index, Duration.ofHours(8));
 
@@ -34,7 +34,7 @@ class DedupIndexLoaderTest {
     @Test
     void anEmptyWindowLoadsNothingAndLeavesTheIndexUntouched() {
         JdbcTemplate jdbc = jdbcReturning(List.of());
-        CommandDedupIndex index = new CommandDedupIndex(1_000, 0.001, 100);
+        CommandDedupIndex index = new CommandDedupIndex(1_000, 0.001);
 
         long loaded = new DedupIndexLoader(jdbc).load(index, Duration.ofHours(8));
 
