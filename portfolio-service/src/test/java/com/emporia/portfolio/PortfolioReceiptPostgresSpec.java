@@ -171,6 +171,44 @@ public class PortfolioReceiptPostgresSpec {
                 Integer.class)).isEqualTo(1);
     }
 
+    /**
+     * The risk seed must not carry margin holds. The engine is onboarded with
+     * an empty book, so seeding it from a hold-adjusted figure lost that margin
+     * for good - measured on the local stack as a client drifting from
+     * 999,999,999,999 down to 999,291,109,999 against 72,002 resting orders.
+     */
+    @Test
+    void reservationMovesTheAvailableBalanceButNotTheSeed() {
+        applyChange(20, 400L, "settled", "SETTLED");
+        assertThat(assetBalance("available_balance")).isEqualTo(400L);
+        assertThat(assetBalance("settled_balance")).isEqualTo(400L);
+
+        // Margin held against a resting order: spendable drops, nothing settled.
+        applyChange(21, 250L, "hold", "RESERVED");
+        assertThat(assetBalance("available_balance")).isEqualTo(250L);
+        assertThat(assetBalance("settled_balance")).isEqualTo(400L);
+
+        assertThat(service.load(101L).balances().stream()
+                .filter(balance -> balance.assetId() == 20_001)
+                .findFirst().orElseThrow().amount()).isEqualTo(400L);
+    }
+
+    private void applyChange(final long deliveryId, final long amount,
+                             final String payload, final String change) {
+        service.apply(deliveryId, 101, "exchange-1:" + deliveryId + ":101",
+                payload.getBytes(StandardCharsets.UTF_8),
+                new Snapshot(PortfolioContracts.SCHEMA_VERSION, "exchange-1",
+                        deliveryId, 101L, change,
+                        List.of(new Balance(840, 0L), new Balance(20_001, amount))));
+    }
+
+    private long assetBalance(final String column) {
+        return jdbc.queryForObject(
+                "SELECT " + column + " FROM portfolio_balance "
+                        + "WHERE client_id = 101 AND asset_id = 20001",
+                Long.class);
+    }
+
     private PortfolioReceiptService.ReceiptResult apply(
             final byte[] payload) {
         return service.apply(
@@ -183,6 +221,7 @@ public class PortfolioReceiptPostgresSpec {
                         "exchange-1",
                         13L,
                         101L,
+                        "SETTLED",
                         List.of(
                                 new Balance(840, 0L),
                                 new Balance(20_001, 5L))));

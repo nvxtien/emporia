@@ -11,7 +11,9 @@ import org.springframework.stereotype.Repository;
 
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @Repository
 class PortfolioRepository implements PortfolioStore {
@@ -22,6 +24,12 @@ class PortfolioRepository implements PortfolioStore {
         this.jdbc = jdbc;
     }
 
+    /**
+     * Seeds the matching engine from the settled balance, not the available
+     * one. The engine is seeded with an empty book and therefore no margin
+     * holds, so seeding it from a figure that still had holds subtracted lost
+     * that margin for good.
+     */
     @Override
     public RiskSeed load(final long clientId) {
         final StateRow state = findState(clientId);
@@ -29,7 +37,7 @@ class PortfolioRepository implements PortfolioStore {
                 PortfolioContracts.SCHEMA_VERSION,
                 clientId,
                 state.firstTransactionId(),
-                List.copyOf(balances(clientId)));
+                List.copyOf(settledBalances(clientId)));
     }
 
     @Override
@@ -82,14 +90,16 @@ class PortfolioRepository implements PortfolioStore {
                     INSERT INTO portfolio_balance (
                         client_id,
                         asset_id,
-                        available_balance
+                        available_balance,
+                        settled_balance
                     )
-                    VALUES (?, ?, ?)
+                    VALUES (?, ?, ?, ?)
                     """,
                     balances.stream()
                             .map(balance -> new Object[] {
                                     clientId,
                                     balance.assetId(),
+                                    balance.amount(),
                                     balance.amount()
                             })
                             .toList());
@@ -153,9 +163,10 @@ class PortfolioRepository implements PortfolioStore {
                     client_id,
                     payload_sha256,
                     payload,
-                    received_at
+                    received_at,
+                    change_kind
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 eventId,
                 snapshot.exchangeId(),
@@ -163,13 +174,26 @@ class PortfolioRepository implements PortfolioStore {
                 snapshot.clientId(),
                 payloadSha256,
                 payload,
-                Timestamp.from(receivedAt));
+                Timestamp.from(receivedAt),
+                snapshot.settled() ? "SETTLED" : "RESERVED");
     }
 
+    /**
+     * Replaces the available balance from every snapshot, and the settled
+     * balance only from a settled one.
+     *
+     * <p>A reservation snapshot reports what is spendable while margin is held,
+     * which is not what the engine should be seeded with. Its settled figures
+     * are therefore carried forward from what is already stored rather than
+     * taken from the snapshot.
+     */
     @Override
     public void replaceBalances(
             final ValidatedPortfolioSnapshot snapshot,
             final Instant updatedAt) {
+        final Map<Integer, Long> settledBefore = snapshot.settled()
+                ? Map.of()
+                : currentSettled(snapshot.clientId());
         jdbc.update(
                 "DELETE FROM portfolio_balance WHERE client_id = ?",
                 snapshot.clientId());
@@ -180,7 +204,10 @@ class PortfolioRepository implements PortfolioStore {
                         .map(entry -> new Object[] {
                                 snapshot.clientId(),
                                 entry.getKey(),
-                                entry.getValue()
+                                entry.getValue(),
+                                snapshot.settled()
+                                        ? entry.getValue()
+                                        : settledBefore.getOrDefault(entry.getKey(), 0L)
                         })
                         .toList();
         if (!parameters.isEmpty()) {
@@ -189,9 +216,10 @@ class PortfolioRepository implements PortfolioStore {
                     INSERT INTO portfolio_balance (
                         client_id,
                         asset_id,
-                        available_balance
+                        available_balance,
+                        settled_balance
                     )
-                    VALUES (?, ?, ?)
+                    VALUES (?, ?, ?, ?)
                     """,
                     parameters);
         }
@@ -222,6 +250,36 @@ class PortfolioRepository implements PortfolioStore {
                     clientId,
                     error);
         }
+    }
+
+    private List<Balance> settledBalances(final long clientId) {
+        return jdbc.query(
+                """
+                SELECT asset_id, settled_balance
+                FROM portfolio_balance
+                WHERE client_id = ?
+                ORDER BY asset_id
+                """,
+                (result, row) -> new Balance(
+                        result.getInt("asset_id"),
+                        result.getLong("settled_balance")),
+                clientId);
+    }
+
+    private Map<Integer, Long> currentSettled(final long clientId) {
+        final Map<Integer, Long> settled = new HashMap<>();
+        jdbc.query(
+                """
+                SELECT asset_id, settled_balance
+                FROM portfolio_balance
+                WHERE client_id = ?
+                """,
+                result -> {
+                    settled.put(result.getInt("asset_id"),
+                            result.getLong("settled_balance"));
+                },
+                clientId);
+        return settled;
     }
 
     private List<Balance> balances(final long clientId) {

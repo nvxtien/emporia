@@ -43,6 +43,7 @@ public final class PortfolioContracts {
             String exchangeId,
             Long deliveryId,
             Long clientId,
+            String change,
             List<Balance> availableBalances) {
     }
 }

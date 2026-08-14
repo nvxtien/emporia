@@ -176,14 +176,14 @@ class PortfolioRepositoryTest {
 
     @Test
     void recordReceiptUpdatesDatabase() {
-        ValidatedPortfolioSnapshot snapshot = new ValidatedPortfolioSnapshot("1", 10L, 100L, Map.of(1, 500L));
+        ValidatedPortfolioSnapshot snapshot = new ValidatedPortfolioSnapshot("1", 10L, 100L, true, Map.of(1, 500L));
         repository.recordReceipt("evt-1", "sha-123", "data".getBytes(), snapshot, Instant.now());
-        verify(jdbc).update(anyString(), eq("evt-1"), eq("1"), eq(10L), eq(100L), eq("sha-123"), any(byte[].class), any());
+        verify(jdbc).update(anyString(), eq("evt-1"), eq("1"), eq(10L), eq(100L), eq("sha-123"), any(byte[].class), any(), eq("SETTLED"));
     }
 
     @Test
     void replaceBalancesUpdatesDatabase() {
-        ValidatedPortfolioSnapshot snapshot = new ValidatedPortfolioSnapshot("1", 10L, 100L, Map.of(1, 500L));
+        ValidatedPortfolioSnapshot snapshot = new ValidatedPortfolioSnapshot("1", 10L, 100L, true, Map.of(1, 500L));
         repository.replaceBalances(snapshot, Instant.now());
         verify(jdbc).update(eq("DELETE FROM portfolio_balance WHERE client_id = ?"), eq(100L));
         verify(jdbc).batchUpdate(anyString(), any(List.class));
@@ -191,7 +191,7 @@ class PortfolioRepositoryTest {
 
     @Test
     void replaceBalancesWithEmptyMap() {
-        ValidatedPortfolioSnapshot snapshot = new ValidatedPortfolioSnapshot("1", 10L, 100L, Map.of());
+        ValidatedPortfolioSnapshot snapshot = new ValidatedPortfolioSnapshot("1", 10L, 100L, true, Map.of());
         repository.replaceBalances(snapshot, Instant.now());
         verify(jdbc).update(eq("DELETE FROM portfolio_balance WHERE client_id = ?"), eq(100L));
     }

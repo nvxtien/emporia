@@ -40,7 +40,7 @@ class PortfolioControllerTest {
 
     @Test
     void publishValidPayloadSuccess() throws Exception {
-        Snapshot snapshot = new Snapshot(1, "1", 10L, 100L, List.of(new Balance(1, 1000L)));
+        Snapshot snapshot = new Snapshot(1, "1", 10L, 100L, "SETTLED", List.of(new Balance(1, 1000L)));
         byte[] payload = objectMapper.writeValueAsBytes(snapshot);
 
         ResponseEntity<Void> response = controller.publish(10L, 100L, "evt-1", payload);

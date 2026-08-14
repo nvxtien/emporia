@@ -249,6 +249,7 @@ class PortfolioReceiptServiceTest {
                 "exchange-1",
                 13L,
                 101L,
+                "SETTLED",
                 List.of(new Balance(840, 500L)));
     }
 

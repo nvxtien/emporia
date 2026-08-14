@@ -24,7 +24,7 @@
         <dependency>
             <groupId>exchange.core2</groupId>
             <artifactId>exchange-core</artifactId>
-            <version>0.5.7-emporia</version>
+            <version>0.5.8-emporia</version>
             <exclusions>
                 <exclusion>
                     <groupId>org.slf4j</groupId>

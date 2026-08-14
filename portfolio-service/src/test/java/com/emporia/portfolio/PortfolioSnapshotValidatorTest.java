@@ -82,19 +82,19 @@ class PortfolioSnapshotValidatorTest {
                 .isInstanceOf(PortfolioContractException.class)
                 .hasMessageContaining("snapshot body is required");
 
-        assertThatThrownBy(() -> validator.validate(13, 101, "exchange-1:13:101", new Snapshot(null, "exchange-1", 13L, 101L, List.of())))
+        assertThatThrownBy(() -> validator.validate(13, 101, "exchange-1:13:101", new Snapshot(null, "exchange-1", 13L, 101L, "SETTLED", List.of())))
                 .isInstanceOf(PortfolioContractException.class)
                 .hasMessageContaining("unsupported snapshot schema version");
 
-        assertThatThrownBy(() -> validator.validate(13, 101, "invalid:13:101", new Snapshot(1, "invalid space", 13L, 101L, List.of())))
+        assertThatThrownBy(() -> validator.validate(13, 101, "invalid:13:101", new Snapshot(1, "invalid space", 13L, 101L, "SETTLED", List.of())))
                 .isInstanceOf(PortfolioContractException.class)
                 .hasMessageContaining("exchangeId is invalid");
 
-        assertThatThrownBy(() -> validator.validate(13, 101, "exchange-1:13:101", new Snapshot(1, "exchange-1", 13L, null, List.of())))
+        assertThatThrownBy(() -> validator.validate(13, 101, "exchange-1:13:101", new Snapshot(1, "exchange-1", 13L, null, "SETTLED", List.of())))
                 .isInstanceOf(PortfolioContractException.class)
                 .hasMessageContaining("clientId does not match");
 
-        assertThatThrownBy(() -> validator.validate(13, 101, "exchange-1:13:101", new Snapshot(1, "exchange-1", 13L, 101L, null)))
+        assertThatThrownBy(() -> validator.validate(13, 101, "exchange-1:13:101", new Snapshot(1, "exchange-1", 13L, 101L, "SETTLED", null)))
                 .isInstanceOf(PortfolioContractException.class)
                 .hasMessageContaining("availableBalances is required");
 
@@ -102,15 +102,15 @@ class PortfolioSnapshotValidatorTest {
                 .isInstanceOf(PortfolioContractException.class)
                 .hasMessageContaining("non-negative");
 
-        assertThatThrownBy(() -> validator.validate(13, 101, "null:13:101", new Snapshot(1, null, 13L, 101L, List.of())))
+        assertThatThrownBy(() -> validator.validate(13, 101, "null:13:101", new Snapshot(1, null, 13L, 101L, "SETTLED", List.of())))
                 .isInstanceOf(PortfolioContractException.class)
                 .hasMessageContaining("exchangeId is invalid");
 
-        assertThatThrownBy(() -> validator.validate(-1L, 101, "exchange-1:-1:101", new Snapshot(1, "exchange-1", -1L, 101L, List.of())))
+        assertThatThrownBy(() -> validator.validate(-1L, 101, "exchange-1:-1:101", new Snapshot(1, "exchange-1", -1L, 101L, "SETTLED", List.of())))
                 .isInstanceOf(PortfolioContractException.class)
                 .hasMessageContaining("deliveryId does not match");
 
-        assertThatThrownBy(() -> validator.validate(13, 0, "exchange-1:13:0", new Snapshot(1, "exchange-1", 13L, 0L, List.of())))
+        assertThatThrownBy(() -> validator.validate(13, 0, "exchange-1:13:0", new Snapshot(1, "exchange-1", 13L, 0L, "SETTLED", List.of())))
                 .isInstanceOf(PortfolioContractException.class)
                 .hasMessageContaining("clientId does not match");
 
@@ -134,6 +134,7 @@ class PortfolioSnapshotValidatorTest {
                 "exchange-1",
                 13L,
                 101L,
+                "SETTLED",
                 balances);
     }
 }

@@ -53,6 +53,16 @@ class PortfolioSnapshotValidator {
             throw new PortfolioContractException(
                     "Idempotency-Key does not match the snapshot");
         }
+        // Absent means settled: a sender that does not state the kind gets the
+        // conservative reading, since a settled snapshot is never collapsed and
+        // always updates the seed.
+        final String change = snapshot.change() == null
+                ? "SETTLED"
+                : snapshot.change();
+        if (!"SETTLED".equals(change) && !"RESERVED".equals(change)) {
+            throw new PortfolioContractException(
+                    "change must be SETTLED or RESERVED");
+        }
         if (snapshot.availableBalances() == null) {
             throw new PortfolioContractException(
                     "availableBalances is required");
@@ -80,6 +90,7 @@ class PortfolioSnapshotValidator {
                 snapshot.exchangeId(),
                 pathDeliveryId,
                 pathClientId,
+                "SETTLED".equals(change),
                 Map.copyOf(balances));
     }
 }
