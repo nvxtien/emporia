@@ -10,15 +10,21 @@ import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.OrderEventRepository;
 import com.emporia.ordermanagement.repository.ProcessedCommandRepository;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.math.BigDecimal;
 import java.util.UUID;
 
 import static com.emporia.events.TradingEvents.SCHEMA_VERSION;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -34,6 +40,46 @@ class AsyncDbWriterTest {
     @BeforeEach
     void setUp() {
         writer = new AsyncDbWriter(orders, events, processed);
+    }
+
+    /**
+     * command_id is the primary key, so a command reaching this insert twice
+     * means deduplication let a duplicate order through. ON CONFLICT DO NOTHING
+     * absorbs the collision, so the per-row affected count is the only signal
+     * that it happened - 0 means the row was already there.
+     */
+    @Test
+    void countsCommandsThatReachedTheDatabaseTwice() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        when(jdbc.batchUpdate(anyString(), anyList(), anyInt(), any()))
+                .thenReturn(new int[][]{{1, 0}});
+        AsyncDbWriter instrumented = new AsyncDbWriter(orders, events, processed, null, jdbc, null, null, meters);
+
+        instrumented.enqueue(new ProcessedCommand(
+                new OrderCommandResult(SCHEMA_VERSION, UUID.randomUUID(), true, 201, null, "{}")));
+        instrumented.enqueue(new ProcessedCommand(
+                new OrderCommandResult(SCHEMA_VERSION, UUID.randomUUID(), true, 201, null, "{}")));
+        instrumented.flush();
+
+        assertThat(meters.counter("emporia.oms.dedup.duplicate_reached_db").count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void reportsNoDuplicatesWhenEveryRowIsInserted() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        when(jdbc.batchUpdate(anyString(), anyList(), anyInt(), any()))
+                .thenReturn(new int[][]{{1, 1}});
+        AsyncDbWriter instrumented = new AsyncDbWriter(orders, events, processed, null, jdbc, null, null, meters);
+
+        instrumented.enqueue(new ProcessedCommand(
+                new OrderCommandResult(SCHEMA_VERSION, UUID.randomUUID(), true, 201, null, "{}")));
+        instrumented.enqueue(new ProcessedCommand(
+                new OrderCommandResult(SCHEMA_VERSION, UUID.randomUUID(), true, 201, null, "{}")));
+        instrumented.flush();
+
+        assertThat(meters.counter("emporia.oms.dedup.duplicate_reached_db").count()).isZero();
     }
 
     @Test
@@ -80,7 +126,7 @@ class AsyncDbWriterTest {
     void failedFlushDoesNotCompactWalUntilRestoredRecordsPersist() {
         MemoryMappedWalLogger wal = mock(MemoryMappedWalLogger.class);
         org.mockito.Mockito.when(wal.isEnabled()).thenReturn(true);
-        AsyncDbWriter writerWithWal = new AsyncDbWriter(orders, events, processed, null, null, wal, null);
+        AsyncDbWriter writerWithWal = new AsyncDbWriter(orders, events, processed, null, null, wal, null, null);
         when(orders.saveAll(anyList()))
                 .thenThrow(new RuntimeException("database unavailable"))
                 .thenAnswer(invocation -> invocation.getArgument(0));
@@ -101,7 +147,7 @@ class AsyncDbWriterTest {
     void reclaimWaitsUntilEveryQueueDrainsBeforeCompactingTheLog() {
         MemoryMappedWalLogger wal = mock(MemoryMappedWalLogger.class);
         org.mockito.Mockito.when(wal.isEnabled()).thenReturn(true);
-        AsyncDbWriter writerWithWal = new AsyncDbWriter(orders, events, processed, null, null, wal, null);
+        AsyncDbWriter writerWithWal = new AsyncDbWriter(orders, events, processed, null, null, wal, null, null);
         // One more than a single flush batch, so one order is still queued
         // when reclaimWriteAheadLog runs its emptiness check.
         for (int i = 0; i < 501; i++) {

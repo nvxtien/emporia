@@ -6,7 +6,12 @@ import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.OrderEventRepository;
 import com.emporia.ordermanagement.repository.ProcessedCommandRepository;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import jakarta.annotation.PreDestroy;
+import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -35,6 +40,8 @@ public class AsyncDbWriter {
     private final com.emporia.ordermanagement.repository.OrderInputEventRepository inputEvents;
     private final JdbcTemplate jdbcTemplate;
     /** Rewound once its records are persisted; null when running without a log. */
+    private static final Logger log = LoggerFactory.getLogger(AsyncDbWriter.class);
+    private final Counter duplicateCommands;
     private final MemoryMappedWalLogger wal;
 
     private final ConcurrentLinkedDeque<TradingOrder> orderQueue = new ConcurrentLinkedDeque<>();
@@ -51,7 +58,7 @@ public class AsyncDbWriter {
     private final org.springframework.transaction.support.TransactionTemplate transactionTemplate;
 
     public AsyncDbWriter(TradingOrderRepository orders, OrderEventRepository events, ProcessedCommandRepository processed) {
-        this(orders, events, processed, null, null, null, null);
+        this(orders, events, processed, null, null, null, null, null);
     }
 
     // Marks the constructor Spring injects through. Without it there are two
@@ -66,7 +73,8 @@ public class AsyncDbWriter {
                          com.emporia.ordermanagement.repository.OrderInputEventRepository inputEvents,
                          JdbcTemplate jdbcTemplate,
                          MemoryMappedWalLogger wal,
-                         org.springframework.transaction.support.TransactionTemplate transactionTemplate) {
+                         org.springframework.transaction.support.TransactionTemplate transactionTemplate,
+                         io.micrometer.core.instrument.@Nullable MeterRegistry meters) {
         this.orders = orders;
         this.events = events;
         this.processed = processed;
@@ -74,6 +82,8 @@ public class AsyncDbWriter {
         this.jdbcTemplate = jdbcTemplate;
         this.wal = wal;
         this.transactionTemplate = transactionTemplate;
+        this.duplicateCommands = (meters == null ? new SimpleMeterRegistry() : meters)
+                .counter("emporia.oms.dedup.duplicate_reached_db");
     }
 
     public void enqueue(TradingOrder order) {
@@ -297,7 +307,7 @@ public class AsyncDbWriter {
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (command_id) DO NOTHING
             """;
-        jdbcTemplate.batchUpdate(sql, batch, batch.size(), (PreparedStatement ps, ProcessedCommand p) -> {
+        int[][] affected = jdbcTemplate.batchUpdate(sql, batch, batch.size(), (PreparedStatement ps, ProcessedCommand p) -> {
             ps.setObject(1, p.result().commandId());
             ps.setInt(2, p.result().schemaVersion());
             ps.setBoolean(3, p.result().success());
@@ -306,6 +316,36 @@ public class AsyncDbWriter {
             ps.setString(6, p.result().payload());
             ps.setTimestamp(7, p.getProcessedAt() == null ? null : Timestamp.from(p.getProcessedAt()));
         });
+        reportAbsorbedDuplicates(affected, batch);
+    }
+
+    /**
+     * Reports commands the deduplication layer let through.
+     *
+     * <p>{@code command_id} is the primary key, so a command that reaches this
+     * insert twice means the handler failed to recognise it as already
+     * processed - which in a trading system means a duplicate order, and a
+     * duplicate position. Postgres is already checking this for every command,
+     * but {@code ON CONFLICT DO NOTHING} absorbs the collision silently. The
+     * per-row affected count is the signal: 0 means the row was already there.
+     *
+     * <p>This counter should read zero forever. Anything above zero is the
+     * number of duplicates that got through, not a warning about one.
+     */
+    private void reportAbsorbedDuplicates(int[][] affected, List<ProcessedCommand> batch) {
+        int index = 0;
+        for (int[] group : affected) {
+            for (int rows : group) {
+                if (rows == 0 && index < batch.size()) {
+                    ProcessedCommand duplicate = batch.get(index);
+                    duplicateCommands.increment();
+                    log.error("Duplicate command reached the database: command_id={} status={}. "
+                                    + "The deduplication layer did not recognise it as already processed.",
+                            duplicate.result().commandId(), duplicate.result().status());
+                }
+                index++;
+            }
+        }
     }
 
     private void persistInputEvents(int count) {
