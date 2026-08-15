@@ -411,6 +411,34 @@ been rotated out *is* the history for the period it covered, so rotation needs
 no database read at all. `generations` filters are retained behind the live one
 and rotation runs every `horizon / generations`.
 
+**Sizing the two Caffeine tiers is now a measurement, not an argument.** Both
+had `recordStats()` on since they were written and nothing read it, so how often
+either answered was invisible. They are bound to Micrometer now:
+
+```
+cache_gets_total{cache="processed-commands",result="hit"|"miss"}
+cache_gets_total{cache="trading-orders",result="hit"|"miss"}
+cache_evictions_total{cache="..."}   cache_size{cache="..."}
+```
+
+The two tiers are not interchangeable with the index. `trading-orders` returns
+the order object that modify, cancel and fill mutate, which a Bloom filter
+cannot do - it answers a boolean. `processed-commands` returns the recorded
+result so a retry gets its original 201, and that one is worth questioning:
+50,000 entries at ~893 bytes of payload each (measured over 86,032 rows) is
+around 55 MB, more than the whole deduplication index at 43 MB, to save a
+database read on a path only retries take. It also covers by count rather than
+by time - 50,000 entries is about seven minutes of traffic at 120 orders/sec,
+against a client retry window measured in seconds.
+
+**A benchmark cannot settle it**, and running one would look like it had: every
+generated command carries a fresh id, so the hit rate is zero by construction -
+the same zero already measured on the read-through timers. The signals to read
+from real traffic are the hit rate and `cache_evictions_total`: evictions
+staying at zero means the cache never fills and `maximumSize` is not doing
+anything, while a high eviction count means entries leave before the retries
+they exist for arrive.
+
 **Warm-up costs latency, not correctness**, and it is measured. The load runs
 after `ApplicationReadyEvent` on its own thread, so orders are accepted from the
 first moment and answered by Postgres - the behaviour that predates the index -

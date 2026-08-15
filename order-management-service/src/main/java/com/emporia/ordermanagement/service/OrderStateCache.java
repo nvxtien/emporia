@@ -2,6 +2,7 @@ package com.emporia.ordermanagement.service;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import io.micrometer.core.instrument.binder.cache.CaffeineCacheMetrics;
 import io.micrometer.core.instrument.Timer;
 import org.jspecify.annotations.Nullable;
 import com.emporia.ordermanagement.model.ProcessedCommand;
@@ -112,6 +113,17 @@ public class OrderStateCache {
                 .expireAfterWrite(Duration.ofHours(24))
                 .recordStats()
                 .build();
+        // recordStats() has been on since these caches were written and nothing
+        // read it, so how often either tier actually answers has never been
+        // visible - and both are sized by argument rather than by measurement.
+        // The processed tier is the one that needs the answer: 50,000 entries at
+        // ~900 bytes of payload each is more memory than the whole deduplication
+        // index, held to save a database read on a path only retries take, and
+        // it covers by count rather than by time - about seven minutes of
+        // traffic at 120 orders/sec against a client retry window of seconds.
+        // cache_gets_total{result="hit"} against {result="miss"} settles it.
+        CaffeineCacheMetrics.monitor(metrics.registry(), this.orders, "trading-orders");
+        CaffeineCacheMetrics.monitor(metrics.registry(), this.processed, "processed-commands");
     }
 
     // ── TradingOrder ──────────────────────────────────────────────────────────
