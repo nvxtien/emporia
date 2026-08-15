@@ -345,11 +345,18 @@ what the log is genuinely good for. They do not survive the machine dying.
 | those orders | already answered 201, and may already exist at the venue |
 | what notices | **nothing** |
 
-The last row is the uncomfortable one. `emporia-reconciliation` covers positions
-and balances, not orders, so an order the venue holds and this service never
-recorded is not looked for by anything. `PositionReconciliationAuditService`
-would not help even where it overlaps: it catches `Exception` and returns
-`BigDecimal.ZERO`, so a failed query reads as a flat position.
+The last row is the uncomfortable one, and it is worse than "no order-level
+reconciliation". There is no reconciliation at all. `emporia-reconciliation`
+existed and has been deleted: its two services were never called from
+production, were never even scanned into the context, and queried
+`user_portfolio_positions` and `user_portfolio_accounts` - tables no migration
+creates and which exist in none of the databases. Each caught `Exception` and
+returned `BigDecimal.ZERO`, logging at `debug`, so a query against a table that
+is not there read as a flat position and, where the engine also held zero,
+counted as **matched** and reported `isConsistent = true`.
+
+Reconciling the venue against this service's own records is therefore an open
+gap with nothing standing in front of it, rather than a thing that half works.
 
 **Why there is no fsync on the append path.** A periodic `force` buys nothing:
 PostgreSQL fsyncs on commit and the writer flushes every 10 ms, so for this log

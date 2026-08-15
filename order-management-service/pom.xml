@@ -21,7 +21,6 @@
         <dependency><groupId>com.emporia</groupId><artifactId>trading-contracts</artifactId><version>${project.version}</version></dependency>
         <!-- Execution-service dependencies pulled in by the merge -->
         <dependency><groupId>com.emporia</groupId><artifactId>emporia-ha-core</artifactId><version>${project.version}</version></dependency>
-        <dependency><groupId>com.emporia</groupId><artifactId>emporia-reconciliation</artifactId><version>${project.version}</version></dependency>
         <dependency><groupId>com.emporia</groupId><artifactId>emporia-algorithmic-strategies</artifactId><version>${project.version}</version></dependency>
         <dependency><groupId>com.emporia</groupId><artifactId>emporia-journal</artifactId><version>${project.version}</version></dependency>
         <dependency>
