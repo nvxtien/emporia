@@ -74,7 +74,7 @@ class ExecutionEventConsumer {
                            MeterRegistry meters, ObservationRegistry observations,
                            @Value("${emporia.execution.strategy-time-compression}") int timeCompression,
                            @Value("${emporia.execution.vwap-default-buckets}") int defaultVwapBuckets,
-                           @Value("${emporia.execution.venue-mode:simulated}") String venueMode,
+                           @Value("${emporia.execution.venue-mode:exchange-core}") String venueMode,
                            @Value("${emporia.execution.sor.max-retries:3}") int maxSweepRetries) {
         this(objectMapper, tradingData, scheduler, executionVenue, executionCommands,
                 meters, observations, timeCompression, defaultVwapBuckets,
@@ -88,7 +88,7 @@ class ExecutionEventConsumer {
                            MeterRegistry meters, ObservationRegistry observations,
                            @Value("${emporia.execution.strategy-time-compression}") int timeCompression,
                            @Value("${emporia.execution.vwap-default-buckets}") int defaultVwapBuckets,
-                           @Value("${emporia.execution.venue-mode:simulated}") String venueMode,
+                           @Value("${emporia.execution.venue-mode:exchange-core}") String venueMode,
                            @Value("${emporia.execution.sor.max-retries:3}") int maxSweepRetries,
                            @org.springframework.context.annotation.Lazy @org.springframework.beans.factory.annotation.Autowired(required = false) com.emporia.ordermanagement.disruptor.DisruptorOrderPipeline disruptorPipeline,
                            @org.springframework.context.annotation.Lazy @org.springframework.beans.factory.annotation.Autowired(required = false) com.emporia.ordermanagement.service.OrderInputEventRecorder inputRecorder) {

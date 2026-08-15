@@ -191,7 +191,11 @@ emporia.execution:
       max-lifetime: ${EXECUTION_DB_POOL_MAX_LIFETIME_MS:1800000}
       keepalive-time: ${EXECUTION_DB_POOL_KEEPALIVE_TIME_MS:120000}
       leak-detection-threshold: ${EXECUTION_DB_POOL_LEAK_DETECTION_THRESHOLD_MS:5000}
-  venue-mode: ${EXECUTION_VENUE_MODE:simulated}
+  # Which execution venue this deployment uses. There is no development stand-in
+  # any more: the simulated gateway was deleted because a fake venue that fills
+  # deterministically is a poor rehearsal for either real path, and every
+  # benchmark and check script already set exchange-core.
+  venue-mode: ${EXECUTION_VENUE_MODE:exchange-core}
   fix-venues: ${FIX_EXECUTION_VENUES:}
   fix-tls-enabled: ${FIX_TLS_ENABLED:false}
   fix-tls-truststore-path: ${FIX_TLS_TRUSTSTORE_PATH:}

@@ -152,7 +152,7 @@ traded. SMART and VWAP orders must be cancelled and replaced.
 
 ### Simulated venue
 
-`EXECUTION_VENUE_MODE=simulated` is the default for local development. It fills
+`EXECUTION_VENUE_MODE=exchange-core` is now the default. The simulated gateway has been deleted; what follows describes what it used to do. It filled
 the remaining quantity after `EXECUTION_FILL_DELAY`, using the limit price or
 the listing reference price for a market order. Modification replaces the
 scheduled fill, and cancellation removes it before publishing a venue
@@ -409,7 +409,7 @@ seconds.
 | `EMPORIA_STATIC_DATA_URL` | `http://localhost:8081` | Same-instrument listing lookup |
 | `EMPORIA_MARKET_DATA_URL` | `http://localhost:8084` | Venue depth lookup |
 | `EMPORIA_ORDER_MANAGEMENT_URL` | `http://localhost:8086` | Strategy state and recovery (self, over HTTP) |
-| `EXECUTION_VENUE_MODE` | `simulated` | `simulated`, `fix`, or `exchange-core` |
+| `EXECUTION_VENUE_MODE` | `exchange-core` | `exchange-core` or `fix` |
 | `EXECUTION_FILL_DELAY` | `100ms` | Simulated fill delay |
 | `FIX_EXECUTION_VENUES` | empty | FIX session definitions by MIC |
 | `EXCHANGE_CORE_EXCHANGE_ID` | `emporia-simulation` | Exchange-core snapshot namespace |
