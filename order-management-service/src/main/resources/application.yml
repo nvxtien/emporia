@@ -175,6 +175,30 @@ emporia.auth:
   token-url: ${EMPORIA_AUTH_TOKEN_URL:http://localhost:9000/oauth2/token}
   client-id: ${EXECUTION_OAUTH_CLIENT_ID:emporia-execution}
   client-secret: ${EXECUTION_OAUTH_CLIENT_SECRET:emporia-execution-local-secret}
+# Whether the operating entity may match client orders inside Emporia, as
+# opposed to routing them to an external venue.
+#
+# This is a statement about the legal entity, not a tuning parameter. Matching
+# client orders internally is unavailable in some jurisdictions - listed
+# securities in Vietnam must trade through the Exchange - and doing it anyway is
+# not a bug that degrades service, it is trading the firm cannot lawfully do,
+# already done by the time anyone notices. So a deployment that configures
+# venue-mode: exchange-core without permission REFUSES TO START.
+#
+# jurisdiction supplies only the DEFAULT for internalisation-permitted, so the
+# safe answer is what you get without thinking about it. The code does not claim
+# to know the law: rules change, and a stale claim in source blocks something
+# lawful as silently as a missing one permits something unlawful. An entity that
+# is licensed to internalise declares it explicitly, in configuration an auditor
+# can read.
+#
+# Leaving jurisdiction unset leaves the guard INACTIVE. That preserves every
+# deployment and development machine that predates it, and it buys no protection
+# at all - see CONFIGURATION.md.
+emporia.compliance:
+  jurisdiction: ${EMPORIA_COMPLIANCE_JURISDICTION:unspecified}
+  internalisation-permitted: ${EMPORIA_COMPLIANCE_INTERNALISATION_PERMITTED:}
+
 emporia.execution:
   datasource:
     url: ${EXECUTION_DB_URL:${DB_URL:jdbc:postgresql://localhost:5432/emporia}}
@@ -195,6 +219,9 @@ emporia.execution:
   # any more: the simulated gateway was deleted because a fake venue that fills
   # deterministically is a poor rehearsal for either real path, and every
   # benchmark and check script already set exchange-core.
+  #
+  # This is a declaration of what the operating entity does, not a tuning knob,
+  # and emporia.compliance above can refuse startup on it.
   venue-mode: ${EXECUTION_VENUE_MODE:exchange-core}
   fix-venues: ${FIX_EXECUTION_VENUES:}
   fix-tls-enabled: ${FIX_TLS_ENABLED:false}

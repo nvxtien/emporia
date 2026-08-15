@@ -387,6 +387,49 @@ adds the force interval to every submit. The exposure above is accepted
 deliberately instead; revisit this if the requirement becomes "an acknowledged
 order survives machine loss".
 
+## Internalisation is a declaration about the entity, and it can refuse startup
+
+- **Where**: `InternalisationPolicy`, `emporia.compliance.*`
+  (env `EMPORIA_COMPLIANCE_*`), inactive by default
+
+Matching client orders inside Emporia — `venue-mode: exchange-core` — is not
+available to every operating entity. Listed securities in Vietnam must trade
+through the Exchange, so a securities company there may not match client orders
+internally at all; routing to an external venue is the only path.
+
+Doing it anyway is not a bug that degrades service. It is trading the firm
+cannot lawfully do, and every order it touches is already done by the time
+anyone reads a dashboard. There is no safe way to discover it late, so a
+deployment that configures an internalising venue mode without permission
+**refuses to start** — the same trade the deduplication horizon guard makes.
+
+```yaml
+emporia.compliance:
+  jurisdiction: VN                    # supplies the default below
+  internalisation-permitted:          # blank = take the jurisdiction default
+```
+
+**The code does not claim to know the law.** `jurisdiction` supplies only a
+*default* for `internalisation-permitted`, so the safe answer is the one you get
+without thinking about it. The authority is the explicit declaration, because
+rules change and a stale legal claim in source blocks something lawful exactly
+as silently as a missing one permits something unlawful. An entity licensed to
+internalise says so in configuration an auditor can read, and that declaration
+is a legal statement about the entity rather than a tuning parameter.
+
+The jurisdiction table currently holds one row, `VN`. It is not legal advice and
+adding a row needs counsel, not a grep.
+
+**Leaving `jurisdiction` unset leaves the guard inactive**, which preserves
+every deployment and development machine that predates it. State the cost
+plainly: an unspecified jurisdiction buys no protection at all. The guard only
+works for deployments that declare where they are.
+
+The resolved answer is published as an `InternalisationDecision` bean rather
+than re-derived, because the quoting engine will need exactly it: posting a
+two-sided price *is* internalisation, whether or not a client order ever takes
+it.
+
 ## The dedup index answers from memory, and its horizon is a correctness bound
 
 - **Where**: `RotatingDedupIndex`, `OrderStateCache`, `emporia.dedup-index.*`
