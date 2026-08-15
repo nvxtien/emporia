@@ -4,6 +4,7 @@ market-data-service/target_old*/
 
 .idea/
 .vscode/
+.obsidian/
 *.iml
 .DS_Store
 .jqwik-database
@@ -23,3 +24,5 @@ knowledge.html
 docs/NO_BLOCKING_DB_HOT_PATH_PLAN.md
 docs/DISK_RECLAIM_DEBEZIUM_WAL.md
 docs/FOUR_USE_CASES.md
+docs/FIX_ACCEPTOR_PLAN.md
+docs/QUOTING_ENGINE_PLAN.md
