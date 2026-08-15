@@ -476,6 +476,38 @@ Zero read-throughs across 26,401 orders with 20,001 historical rows already in
 the table. What this run does **not** cover: rotation never fired, because the
 interval is six hours and the run was four minutes.
 
+**Two hours under continuous duplicates**, which is the evidence the
+`enabled` flag was waiting for. 10 orders/sec for 7,200 s with one request in
+ten replaying an earlier `Idempotency-Key`:
+
+| | |
+|---|---:|
+| orders submitted | 72,001 |
+| **duplicate commands sent** | **~7,160** |
+| `duplicate_reached_db` | **0** |
+| `duplicate_order_reached_db` | **0** |
+| `writer.rejected_rows` | **0** |
+| lookups answered from the index | 131,836 |
+| lookups that reached PostgreSQL | 10 (0.0076%) |
+| business rejections / infra failures | 0.00% / 0.00% |
+
+The duplicates are what make this mean anything. Every earlier run of this
+system sent none, so both counters read zero for want of anything to catch;
+`DUPLICATE_RATE` on `order-load.js` exists for that reason and defaults to 0 so
+ordinary benchmarks are unchanged.
+
+The ten PostgreSQL lookups are the designed path, not a fault: a replay whose
+recorded result had been evicted from the Caffeine tier fell through to the
+filters, which answered "possibly seen", and the database returned the original
+result. Three tiers doing their own jobs.
+
+**Two things this run is not evidence for.** Latency: sells are refused by the
+venue for want of a share position, so half the orders rest and the book grows
+to ~36,000, and venue latency decays as it fills by design. And the retry
+pattern is synthetic - it replays keys from the last 50 that VU used, so it
+never asks for anything old. A client retrying after a 30-second timeout would
+fall through to PostgreSQL more often than 0.0076%.
+
 **Two things must hold, or deduplication is wrong rather than slow:**
 
 - *Exactly one instance accepts orders.* The order path asks `isPrimary()` in
