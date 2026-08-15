@@ -121,6 +121,11 @@ emporia.wal:
   # rotated, so it needs no more room than that window can hold. Unset the path
   # to run without it, at the cost of losing anything in flight on a crash.
   #
+  # Recovers process death, not machine loss: append writes into the page cache
+  # and never fsyncs, so a kill -9 is covered and a power failure is not. See
+  # MemoryMappedWalLogger for why forcing on the append path would cost more than
+  # it buys, and CONFIGURATION.md for the exposure that leaves.
+  #
   # Outside target/ deliberately: a build must not be able to delete live
   # runtime state.
   file-path: ${EMPORIA_WAL_FILE_PATH:.local-run/order-management.wal}

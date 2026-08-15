@@ -18,11 +18,40 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Ultra-low latency Memory-Mapped File (mmap) Write-Ahead Log (WAL) logger.
+ * Memory-mapped write-ahead log covering the window between the ring accepting
+ * a command and {@code AsyncDbWriter} persisting it.
  *
- * <p>Appends binary SBE event payloads directly into OS page-cache virtual memory
- * via {@link MappedByteBuffer}. Bypasses JVM file stream I/O and system call context switches,
- * achieving zero-allocation sub-microsecond event persistence.
+ * <p>Appends binary SBE event payloads into OS page-cache virtual memory via
+ * {@link MappedByteBuffer}, with no JVM stream I/O and no system call on the
+ * append itself.
+ *
+ * <h2>What it survives, and what it does not</h2>
+ * <p><b>Process death</b> - {@code kill -9}, a JVM crash - is recovered. The
+ * pages belong to the operating system, which writes them out regardless of
+ * what happened to the process. That is the case
+ * {@code scripts/perf/crash-recovery-check.sh} exercises.
+ *
+ * <p><b>Machine loss</b> - power failure, kernel panic - is not. {@link #append}
+ * does not {@code force}, so unwritten pages go with the machine. At the default
+ * 10 ms flush cadence that is on the order of one or two orders which have
+ * already been answered 201 and may already exist at the venue. Nothing
+ * reconciles orders against the venue to find them: {@code emporia-reconciliation}
+ * covers positions and balances, not orders.
+ *
+ * <h2>Why there is no force on the append path</h2>
+ * <p>A periodic {@code force} would buy nothing. PostgreSQL fsyncs on commit and
+ * the writer flushes every 10 ms, so for this log to be worth anything against
+ * machine loss it would have to become durable <i>sooner</i> than the database -
+ * which means an fsync per command, on the single Disruptor writer thread, where
+ * a blocking call is multiplied by the queue behind it rather than absorbed.
+ * That is the cost this hot path was built to avoid.
+ *
+ * <p>The alternative considered and not taken: append on the writer thread, and
+ * have a separate thread force and only then complete the HTTP response - group
+ * commit with a durable acknowledgement. It never loses an acknowledged order,
+ * at the price of adding the force interval to every submit. Worth revisiting if
+ * the requirement ever becomes "an acknowledged order survives machine loss";
+ * today the exposure is accepted deliberately.
  */
 @Component
 public class MemoryMappedWalLogger implements Closeable {
@@ -205,6 +234,11 @@ public class MemoryMappedWalLogger implements Closeable {
         return mappedBuffer != null ? mappedBuffer.position() : 0;
     }
 
+    /**
+     * Flushes the mapping to disk. Deliberately not called by {@link #append} -
+     * see the note on this class - and so reachable only from {@link #close()}
+     * and from a caller that has decided the cost is worth paying.
+     */
     public void force() {
         if (mappedBuffer != null) {
             mappedBuffer.force();

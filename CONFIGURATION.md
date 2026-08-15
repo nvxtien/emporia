@@ -311,6 +311,49 @@ succeeded. That is the guard working. The modify itself was never unsafe - it
 re-validates the new quantity against live traded quantity - so what the caller
 lost was a decision made on a stale read, and the fix is to re-read and retry.
 
+## The write-ahead log recovers process death, not machine loss
+
+- **Where**: `MemoryMappedWalLogger`, `emporia.wal.file-path`,
+  `emporia.async-db-writer.flush-delay-ms`
+
+An order is answered 201 before it reaches PostgreSQL - the write is enqueued
+and a batch flush persists it later. The write-ahead log covers that window, and
+it covers it for one kind of failure only.
+
+`append` writes into a memory-mapped region and does not `force`. Those pages
+belong to the operating system, so they survive the process dying - `kill -9`, a
+JVM crash - which is what `scripts/perf/crash-recovery-check.sh` exercises and
+what the log is genuinely good for. They do not survive the machine dying.
+
+**The exposure**, stated with numbers rather than left as a caveat:
+
+| | |
+|---|---|
+| flush cadence | 10 ms (`flush-delay-ms`) |
+| at 120 orders/sec | one or two orders in the window |
+| those orders | already answered 201, and may already exist at the venue |
+| what notices | **nothing** |
+
+The last row is the uncomfortable one. `emporia-reconciliation` covers positions
+and balances, not orders, so an order the venue holds and this service never
+recorded is not looked for by anything. `PositionReconciliationAuditService`
+would not help even where it overlaps: it catches `Exception` and returns
+`BigDecimal.ZERO`, so a failed query reads as a flat position.
+
+**Why there is no fsync on the append path.** A periodic `force` buys nothing:
+PostgreSQL fsyncs on commit and the writer flushes every 10 ms, so for this log
+to add durability against machine loss it would have to become durable *sooner*
+than the database - an fsync per command, on the single Disruptor writer thread,
+where a blocking call multiplies by the queue behind it rather than being
+absorbed. That is the cost the hot path exists to avoid.
+
+**The alternative, recorded rather than taken**: append on the writer thread and
+have a separate thread force and only then complete the HTTP response - group
+commit with a durable acknowledgement. It never loses an acknowledged order and
+adds the force interval to every submit. The exposure above is accepted
+deliberately instead; revisit this if the requirement becomes "an acknowledged
+order survives machine loss".
+
 ## The dedup index answers from memory, and its horizon is a correctness bound
 
 - **Where**: `RotatingDedupIndex`, `OrderStateCache`, `emporia.dedup-index.*`
