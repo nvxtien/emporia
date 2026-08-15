@@ -1,5 +1,7 @@
 package com.emporia.execution;
 
+import com.emporia.execution.fix.FixCodec;
+import com.emporia.execution.fix.FixSequenceState;
 import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.events.TradingEvents.OrderView;
@@ -25,12 +27,9 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
-import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -45,15 +44,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 @Component
 @ConditionalOnProperty(name = "emporia.execution.venue-mode", havingValue = "fix")
 class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(FixExecutionVenueGateway.class);
-    private static final DateTimeFormatter FIX_TIME =
-            DateTimeFormatter.ofPattern("yyyyMMdd-HH:mm:ss.SSS").withZone(ZoneOffset.UTC);
 
     private final Map<String, FixSession> sessions;
     private final Map<UUID, OrderView> orders = new ConcurrentHashMap<>();
@@ -160,7 +156,7 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
         fields.put(41, original);
         fields.put(55, order.listing().marketSymbol());
         fields.put(54, order.side() == OrderSide.BUY ? "1" : "2");
-        fields.put(60, FIX_TIME.format(Instant.now()));
+        fields.put(60, FixCodec.timestamp(Instant.now()));
         session.send("F", fields);
     }
 
@@ -189,7 +185,7 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
             fields.put(44, order.limitPrice().stripTrailingZeros().toPlainString());
         }
         fields.put(59, "0");
-        fields.put(60, FIX_TIME.format(Instant.now()));
+        fields.put(60, FixCodec.timestamp(Instant.now()));
         return fields;
     }
 
@@ -253,7 +249,6 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
     }
 
     private static final class FixSession {
-        private static final byte SOH = 1;
         private static final int HEARTBEAT_INTERVAL_SECONDS = 30;
         private static final int POLL_TIMEOUT_MS = 5_000;
         // NewOrderSingle, OrderCancelReplaceRequest, OrderCancelRequest: the only
@@ -266,11 +261,9 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
         private final String senderCompId;
         private final String targetCompId;
         private final MessageSink sink;
-        private final FixSessionStateStore sessionState;
         private final FixMessageLogStore messageLog;
         private final AtomicBoolean running = new AtomicBoolean();
-        private final AtomicInteger outgoingSequence = new AtomicInteger(1);
-        private final AtomicInteger incomingSequence = new AtomicInteger(1);
+        private final FixSequenceState sequence;
         private final AtomicBoolean loggingOut = new AtomicBoolean();
         private final AtomicReference<CountDownLatch> logoutAcknowledged = new AtomicReference<>();
         // Out-of-order arrivals held until the gap ahead of them is filled. Only
@@ -292,7 +285,7 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
             this.senderCompId = senderCompId;
             this.targetCompId = targetCompId;
             this.sink = sink;
-            this.sessionState = sessionState;
+            this.sequence = new FixSequenceState(mic, sessionState);
             this.messageLog = messageLog;
             this.tlsSocketFactory = tlsSocketFactory;
             this.executor = Executors.newSingleThreadExecutor(runnable -> {
@@ -342,12 +335,7 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
         }
 
         synchronized void send(String messageType, LinkedHashMap<Integer, String> fields) {
-            int seqNum = outgoingSequence.getAndIncrement();
-            // Persisted before the write is attempted, not after it succeeds: delivery
-            // is ambiguous once write() is called (the counterparty may have received a
-            // fragment before a failure), so a reconnect must never hand this number out
-            // again. Persisting only on success would let a reload-on-reconnect reuse it.
-            sessionState.saveOutgoing(mic, outgoingSequence.get());
+            int seqNum = sequence.claimOutgoing();
             Instant sentAt = Instant.now();
             if (APPLICATION_MESSAGE_TYPES.contains(messageType)) {
                 // Logged before the write for the same reason: if the counterparty
@@ -365,7 +353,7 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
                                           LinkedHashMap<Integer, String> fields) {
             if (output == null) throw new IllegalStateException("FIX session " + mic + " is disconnected");
             try {
-                output.write(encode(messageType, seqNum, sendingTime, fields));
+                output.write(FixCodec.encode(messageType, seqNum, sendingTime, senderCompId, targetCompId, fields));
                 output.flush();
             } catch (Exception exception) {
                 close();
@@ -379,7 +367,7 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
         private void resendLogged(FixMessageLogStore.LoggedMessage message) {
             LinkedHashMap<Integer, String> fields = new LinkedHashMap<>(message.fields());
             fields.put(43, "Y");
-            fields.put(122, FIX_TIME.format(message.sentAt()));
+            fields.put(122, FixCodec.timestamp(message.sentAt()));
             rawSend(message.msgType(), message.seqNum(), Instant.now(), fields);
         }
 
@@ -402,9 +390,9 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
         // send() from another thread (order commands arrive on a dispatcher
         // shard thread, independent of this session's own read-loop thread).
         private synchronized void handleResendRequest(Map<Integer, String> fields) {
-            int beginSeqNo = integer(fields, 7, 1);
-            int endSeqNoRaw = integer(fields, 16, 0);
-            int endSeqNo = endSeqNoRaw == 0 ? outgoingSequence.get() - 1 : endSeqNoRaw;
+            int beginSeqNo = FixCodec.integer(fields, 7, 1);
+            int endSeqNoRaw = FixCodec.integer(fields, 16, 0);
+            int endSeqNo = endSeqNoRaw == 0 ? sequence.lastOutgoing() : endSeqNoRaw;
             if (endSeqNo < beginSeqNo) return;
             List<FixMessageLogStore.LoggedMessage> logged = messageLog.range(mic, beginSeqNo, endSeqNo);
             Map<Integer, FixMessageLogStore.LoggedMessage> bySeq = new HashMap<>();
@@ -436,15 +424,6 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
             send("2", fields);
         }
 
-        private static int integer(Map<Integer, String> fields, int tag, int defaultValue) {
-            String value = fields.get(tag);
-            if (value == null) return defaultValue;
-            try {
-                return Integer.parseInt(value);
-            } catch (NumberFormatException malformed) {
-                return defaultValue;
-            }
-        }
 
         private void connectLoop() {
             while (running.get()) {
@@ -458,9 +437,7 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
                     }
                     socket = connected;
                     output = connected.getOutputStream();
-                    FixSessionStateStore.SessionState state = sessionState.loadForToday(mic);
-                    outgoingSequence.set(state.outgoingSeqNum());
-                    incomingSequence.set(state.incomingSeqNum());
+                    FixSessionStateStore.SessionState state = sequence.restoreForToday();
                     pendingMessages.clear();
                     resendRequestedForCurrentGap = false;
                     if (state.freshSession()) {
@@ -469,7 +446,7 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
                         // meaningless for today's resend requests anyway.
                         messageLog.clear(mic);
                     }
-                    LinkedHashMap<Integer, String> logon = linkedFields(98, "0",
+                    LinkedHashMap<Integer, String> logon = FixCodec.fields(98, "0",
                             108, String.valueOf(HEARTBEAT_INTERVAL_SECONDS), 1137, "9");
                     if (state.freshSession()) logon.put(141, "Y");
                     send("A", logon);
@@ -525,12 +502,12 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
                 testRequestSent = false;
                 buffered.write(chunk, 0, count);
                 byte[] bytes = buffered.toByteArray();
-                int boundary = messageBoundary(bytes);
+                int boundary = FixCodec.messageBoundary(bytes);
                 while (boundary >= 0) {
                     byte[] message = Arrays.copyOfRange(bytes, 0, boundary);
                     onIncomingMessage(message);
                     bytes = Arrays.copyOfRange(bytes, boundary, bytes.length);
-                    boundary = messageBoundary(bytes);
+                    boundary = FixCodec.messageBoundary(bytes);
                 }
                 buffered.reset();
                 buffered.write(bytes);
@@ -543,8 +520,8 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
         // of being processed immediately, so a lost message can never be
         // silently skipped over.
         private void onIncomingMessage(byte[] message) {
-            Map<Integer, String> fields = parse(message);
-            Integer seqNum = integerOrNull(fields.get(34));
+            Map<Integer, String> fields = FixCodec.parse(message);
+            Integer seqNum = FixCodec.integerOrNull(fields.get(34));
             if (seqNum == null) {
                 // No usable MsgSeqNum to compare; handle it directly rather than
                 // dropping a message we can't place in the sequence at all.
@@ -552,7 +529,7 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
                 return;
             }
 
-            int expected = incomingSequence.get();
+            int expected = sequence.expectedIncoming();
             if (seqNum < expected) {
                 log.debug("FIX session {} ignoring MsgSeqNum {} (already at {})", mic, seqNum, expected);
                 return;
@@ -573,7 +550,7 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
             // resend - still releases whatever was buffered behind it.
             while (true) {
                 Map.Entry<Integer, Map<Integer, String>> next = pendingMessages.firstEntry();
-                if (next == null || next.getKey() != incomingSequence.get()) break;
+                if (next == null || next.getKey() != sequence.expectedIncoming()) break;
                 pendingMessages.remove(next.getKey());
                 advanceAndHandle(next.getKey(), next.getValue());
             }
@@ -581,8 +558,7 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
         }
 
         private void advanceAndHandle(int seqNum, Map<Integer, String> fields) {
-            incomingSequence.set(seqNum + 1);
-            sessionState.saveIncoming(mic, seqNum + 1);
+            sequence.acceptIncoming(seqNum);
             handle(fields);
         }
 
@@ -618,69 +594,17 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
                 // skipping over admin messages it never logged either. A reset
                 // can only move forward - a lower NewSeqNo would regress our
                 // expectation and make later, legitimate messages look like gaps.
-                Integer newSeqNo = integerOrNull(fields.get(36));
-                if (newSeqNo != null && newSeqNo > incomingSequence.get()) {
-                    incomingSequence.set(newSeqNo);
-                    sessionState.saveIncoming(mic, newSeqNo);
-                }
+                Integer newSeqNo = FixCodec.integerOrNull(fields.get(36));
+                if (newSeqNo != null) sequence.resetIncomingForward(newSeqNo);
             } else {
                 sink.accept(mic, fields);
             }
         }
 
-        private static Integer integerOrNull(String value) {
-            if (value == null) return null;
-            try {
-                return Integer.parseInt(value);
-            } catch (NumberFormatException malformed) {
-                return null;
-            }
-        }
 
-        private byte[] encode(String messageType, int seqNum, Instant sendingTime, LinkedHashMap<Integer, String> fields) {
-            StringBuilder body = new StringBuilder();
-            append(body, 35, messageType);
-            append(body, 34, String.valueOf(seqNum));
-            append(body, 49, senderCompId);
-            append(body, 56, targetCompId);
-            append(body, 52, FIX_TIME.format(sendingTime));
-            fields.forEach((tag, value) -> append(body, tag, value));
-            byte[] bodyBytes = body.toString().getBytes(StandardCharsets.US_ASCII);
-            String header = "8=FIXT.1.1\u00019=" + bodyBytes.length + "\u0001";
-            byte[] withoutChecksum = (header + body).getBytes(StandardCharsets.US_ASCII);
-            int checksum = 0;
-            for (byte value : withoutChecksum) checksum = (checksum + Byte.toUnsignedInt(value)) % 256;
-            String trailer = "10=%03d\u0001".formatted(checksum);
-            byte[] result = Arrays.copyOf(withoutChecksum, withoutChecksum.length + trailer.length());
-            System.arraycopy(trailer.getBytes(StandardCharsets.US_ASCII), 0, result, withoutChecksum.length,
-                    trailer.length());
-            return result;
-        }
 
-        private static int messageBoundary(byte[] bytes) {
-            for (int index = 0; index <= bytes.length - 7; index++) {
-                if ((index == 0 || bytes[index - 1] == SOH)
-                        && bytes[index] == '1' && bytes[index + 1] == '0' && bytes[index + 2] == '='
-                        && bytes[index + 6] == SOH) {
-                    return index + 7;
-                }
-            }
-            return -1;
-        }
 
-        private static Map<Integer, String> parse(byte[] message) {
-            Map<Integer, String> fields = new LinkedHashMap<>();
-            for (String field : new String(message, StandardCharsets.US_ASCII).split("\\u0001")) {
-                int separator = field.indexOf('=');
-                if (separator > 0) fields.put(Integer.parseInt(field.substring(0, separator)),
-                        field.substring(separator + 1));
-            }
-            return fields;
-        }
 
-        private static void append(StringBuilder target, int tag, String value) {
-            target.append(tag).append('=').append(value).append((char) SOH);
-        }
 
         private synchronized void close() {
             output = null;
@@ -695,13 +619,6 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
             }
         }
 
-        private static LinkedHashMap<Integer, String> linkedFields(Object... values) {
-            LinkedHashMap<Integer, String> fields = new LinkedHashMap<>();
-            for (int index = 0; index < values.length; index += 2) {
-                fields.put((Integer) values[index], (String) values[index + 1]);
-            }
-            return fields;
-        }
     }
 
     @FunctionalInterface
