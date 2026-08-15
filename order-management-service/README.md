@@ -137,18 +137,32 @@ The migrations were also verified against PostgreSQL 16: valid and pending
 cancel rows were accepted, malformed target states and overfills were rejected,
 and the cancel/fill/ack sequence retained valid accounting.
 
-## PostgreSQL concurrency test
+## PostgreSQL specifications
 
-`TradingOrderPostgresConcurrencySpec` lives in the standard `src/test/java`
-source set. The optional `postgres-it` Maven profile selects that specification,
-starts PostgreSQL 16 with Testcontainers, applies the real Flyway migrations,
-and opens two independent Spring transactions. Both load the same
-`entity_version` before racing a full fill against cancellation.
+The optional `postgres-it` Maven profile starts PostgreSQL 16 with
+Testcontainers and applies the real Flyway migrations, so Hibernate validates
+its mappings against the production schema rather than against tables a test
+created.
 
-The race test requires exactly one commit, an optimistic-lock exception for the
-loser, a single version increment, and valid persisted fill accounting. A
-second PostgreSQL specification requests cancellation, applies a racing fill,
-then confirms cancellation and checks the stored target/status invariants.
+`TradingOrderPostgresPersistenceSpec` walks an order through a cancellation
+request, a partial fill that lands before the venue hears about it, and the
+confirmation - then checks the persisted state and invariants. It also asserts
+that saving an order the database has never seen inserts it, which is a
+regression guard: while `entity_version` carried `@Version`, Spring Data decided
+new from existing by `version == null`, the constructor assigned 0, and every
+save of a new order took the merge path and failed.
+
+`AbsorbedConflictReportingSpec` checks the one behaviour both duplicate oracles
+rest on - that a row absorbed by `ON CONFLICT DO NOTHING` comes back as zero
+affected rows through a JDBC batch.
+
+There is no optimistic-locking specification any more, because there is no
+optimistic locking. `@Version` came off `TradingOrder`: every order state change
+runs on the single Disruptor writer thread, so two transactions cannot race one
+row, and the writes that would carry the guard leave through raw JDBC where
+Hibernate is not involved. `entity_version` is now a revision counter advanced
+by `TradingOrder.recordRevision`, which is what callers echo back as
+`expectedVersion`. See `CONFIGURATION.md`.
 
 With a Docker-compatible runtime running:
 
@@ -187,7 +201,9 @@ instrumented JDK under the module's `target` directory. The specification's
 `*Spec` name keeps it out of Maven's default test selection, so the regular
 build has no Fray startup cost.
 
-This test covers in-process Java interleavings only. PostgreSQL optimistic
-locking still decides races between separate entity instances or service
-processes; `ShardedOrderDispatcher`'s per-order-ID shard ordering, database
-scheduling, and network timing require integration tests.
+This test covers in-process Java interleavings only. Nothing at the database
+decides races between separate service processes - optimistic locking is gone,
+and deduplication is correct only while exactly one instance accepts orders,
+which `DisruptorOrderPipeline`'s `isPrimary()` check enforces on the order path.
+`ShardedOrderDispatcher`'s per-order-ID shard ordering, database scheduling, and
+network timing still require integration tests.

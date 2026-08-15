@@ -167,12 +167,33 @@ All shell scripts in this repository adhere to the following strict operational 
 
 #### `scripts/perf/reset-venue-state.sh`
 - **Purpose**: Destructive local-only reset for clean exchange-core capacity baselines.
-- **Behavior**: Stops `order-management-service`, deletes local exchange-core storage, and force-cancels working orders in order-management.
+- **Behavior**: Stops `order-management-service`, deletes local exchange-core storage, force-cancels working orders in order-management, and always leaves the service started and health-checked - including when it found the service already down.
 - **Usage**:
   ```bash
   ./scripts/perf/reset-venue-state.sh --yes
   ```
 - **Warning**: Do not use this in production; it deliberately discards local venue state.
+
+#### `scripts/perf/order-dedup-check.sh`
+- **Purpose**: Exercises the two order-path guards no load test reaches, end to end through the gateway.
+- **Behavior**: Sends one `Idempotency-Key` twice and requires the same order back rather than a second one; then modifies an order at its current version and again at the now-stale one, requiring 409. Creates two orders and changes nothing else.
+- **Why it exists**: `order-load.js` mints a fresh key and a fresh order per request, so a benchmark never sends a duplicate and never sends a modify. Both guards ran only in unit tests, on code whose point is what it does against a real database - and running this found three defects the benchmarks could not.
+- **Usage**:
+  ```bash
+  ./scripts/perf/order-dedup-check.sh
+  ```
+
+#### `scripts/perf/dedup-horizon-check.sh`
+- **Purpose**: Demonstrates the deduplication horizon, and is the only thing that makes `emporia.oms.dedup.duplicate_reached_db` move off zero outside a unit test.
+- **Behavior**: Restarts with a two-minute horizon over four generations and a ten-entry processed cache, then sends one `Idempotency-Key` three times - fresh, inside the horizon, past it. Inside the horizon the replay must return the original order; past it, it must create a second one and the duplicate counter must fire.
+- **Why it exists**: The horizon is a correctness bound, not a performance one, and two layers hide it from any short test: the filters only forget after `generations` rotations, and the Caffeine tier answers a repeat from its own 24-hour memory first.
+- **Usage**:
+  ```bash
+  ./scripts/perf/dedup-horizon-check.sh
+  # then, to return to the configured horizon:
+  ./scripts/perf/reset-venue-state.sh --yes
+  ```
+- **Warning**: Destructive. Restarts the service with a compressed horizon and force-cancels working orders.
 
 #### `scripts/perf/order-submit-smoke.sh`
 - **Purpose**: High-concurrency HTTP/REST order submission test.
