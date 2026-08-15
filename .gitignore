@@ -21,3 +21,4 @@ exchange-core-production-hardening.html
 system-benchmark-plan.html
 knowledge.html
 docs/NO_BLOCKING_DB_HOT_PATH_PLAN.md
+docs/DISK_RECLAIM_DEBEZIUM_WAL.md
