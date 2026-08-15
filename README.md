@@ -22,13 +22,14 @@ For in-depth architectural guides, domain design patterns, microservice deep div
 | 📖 **[Trading Terminology Glossary](https://github.com/nvxtien/emporia/wiki/Trading-Terminology-Glossary)** | Financial terms: Order types (Limit, Market, Stop, TIF), BBO/NBBO, SOR, VWAP, P&L. |
 | 📐 **[Architecture & Order Flow](https://github.com/nvxtien/emporia/wiki/Architecture-and-Order-Flow)** | System architecture flow, port matrix, service boundaries, database ownership. |
 | ⚙️ **[Order Management Service](https://github.com/nvxtien/emporia/wiki/Order-Management-Service)** | State machine authority, `OrderCommandHandler`, `ExecutionCommandHandler`, idempotency. |
-| 🎯 **[Execution Service](https://github.com/nvxtien/emporia/wiki/Execution-Service)** | Algorithmic routing (`DMA`, `SMART` NBBO selector, `VWAP` slicer), venue gateways. |
+| 🎯 **[Execution Routing](https://github.com/nvxtien/emporia/wiki/Execution-Service)** | Algorithmic routing (`DMA`, `SMART` NBBO selector, `VWAP` slicer), venue gateways — in-process inside the OMS. |
+| ⚡ **[No Blocking DB on Hot Path](https://github.com/nvxtien/emporia/wiki/No-Blocking-DB-Hot-Path)** | Why the order hot path makes no blocking PostgreSQL call, the five mechanisms, and the three constraints accepted for it. |
 | 📜 **[Order Lifecycle & Invariants](https://github.com/nvxtien/emporia/wiki/Business-Logic-Order-Lifecycle)** | State machine invariants, tick/lot size checks, late fill accounting. |
 | 🧠 **[Order Routing & Execution](https://github.com/nvxtien/emporia/wiki/Business-Logic-Order-Routing-and-Execution)** | Smart Order Routing (SOR) venue splitting & VWAP time-slicing logic. |
 | 📊 **[Market Data & Pricing](https://github.com/nvxtien/emporia/wiki/Business-Logic-Market-Data-and-Pricing)** | L1/L2 order books, Price-Time priority matching, micro-price formulas. |
 | 💼 **[Portfolio & Risk Controls](https://github.com/nvxtien/emporia/wiki/Business-Logic-Portfolio-and-Risk-Management)** | Long/short positions, cost basis, Mark-to-Market P&L, fat-finger price collars. |
 | 🧩 **[Design Patterns Catalog](https://github.com/nvxtien/emporia/wiki/Design-Patterns)** | CQRS, Event-Driven Architecture, Saga, Strategy, State Machine patterns. |
-| 📦 **[Microservices Overview](https://github.com/nvxtien/emporia/wiki/Microservices-Overview)** | Deep-dive into all 8 microservices, Gateway, and OAuth2 Authorization. |
+| 📦 **[Microservices Overview](https://github.com/nvxtien/emporia/wiki/Microservices-Overview)** | Deep-dive into all 7 microservices, Gateway, and OAuth2 Authorization. |
 | ⚡ **[Exchange-Core Integration](https://github.com/nvxtien/emporia/wiki/Exchange-Core-Integration)** | Ultra-low latency LMAX Disruptor ring-buffer matching engine integration. |
 | 🧪 **[Testing & Verification](https://github.com/nvxtien/emporia/wiki/Testing-and-Verification)** | 91.95% JaCoCo coverage, Testcontainers PostgreSQL specs, Fray concurrency tests. |
 | 🛠️ **[Deployment & Operations](https://github.com/nvxtien/emporia/wiki/Deployment-and-Operations)** | Environment prerequisites, Docker Compose, Maven builds, React UI startup. |
@@ -105,9 +106,16 @@ cross-schema foreign key.
 3. `OrderCommandHandler` applies the transition against the in-memory order
    cache, enqueues write-behind persistence, and returns the correlated result
    to the waiting HTTP request.
-4. OMS passes order domain events directly to the in-process `ShardedOrderDispatcher`
-   (`entry-mode: direct`), partitioning events by order ID hash across dedicated
-   shard worker threads without network overhead or broker dependency.
+4. OMS passes order domain events directly to the in-process `ShardedOrderDispatcher`,
+   partitioning events by order ID hash across dedicated shard worker threads
+   without network overhead or broker dependency.
+
+**No step above makes a blocking database call.** The two idempotency lookups are
+answered from an in-memory deduplication index, and the row reaches PostgreSQL on
+a batched flush after the 201 is returned, with a memory-mapped write-ahead log
+covering the window. That trade has terms - one instance may accept orders, and a
+lost durable write is silent - which are set out in
+[docs/NO_BLOCKING_DB_HOT_PATH.md](docs/NO_BLOCKING_DB_HOT_PATH.md).
 
 ### In-Process 3-Leg Direct Pipeline
 
