@@ -4,6 +4,7 @@ import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderView;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -30,8 +31,16 @@ import java.util.stream.Collectors;
  * no code path in this system creates a venue order without first writing an
  * order-management row - so this direction covers the drift that is
  * actually reachable.
+ *
+ * <p>Conditional on the same property as the gateway it needs. Without it this
+ * endpoint asked for a bean that only exists in exchange-core mode, so the
+ * application could not start on its own default of {@code simulated} - a
+ * failure nothing had ever hit, because every launch script in the repository
+ * passes {@code EXECUTION_VENUE_MODE=exchange-core} and so never took the
+ * default path.
  */
 @Component
+@ConditionalOnProperty(name = "emporia.execution.venue-mode", havingValue = "exchange-core")
 @Endpoint(id = "reconciliation")
 class ReconciliationEndpoint {
 

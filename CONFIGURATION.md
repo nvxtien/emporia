@@ -345,18 +345,33 @@ what the log is genuinely good for. They do not survive the machine dying.
 | those orders | already answered 201, and may already exist at the venue |
 | what notices | **nothing** |
 
-The last row is the uncomfortable one, and it is worse than "no order-level
-reconciliation". There is no reconciliation at all. `emporia-reconciliation`
-existed and has been deleted: its two services were never called from
-production, were never even scanned into the context, and queried
+The last row is the uncomfortable one, and it needs stating precisely because
+it is easy to get wrong in both directions.
+
+**Order reconciliation exists, in one direction.** The `reconciliation` actuator
+endpoint walks every order this service holds as LIVE or PARTIALLY_FILLED and
+asks the venue whether it knows of it, so drift surfaces by inspection instead
+of as an "unknown lifecycle order" on the next command. Its javadoc explains why
+it does not walk the other way: enumerating every symbol's resting book is not
+something the venue's per-client report API offers cheaply, and "no code path in
+this system creates a venue order without first writing an order-management
+row".
+
+**That argument holds for code paths and not for durability failures**, which is
+exactly the gap above. `create` does write its row before dispatching - but the
+write is asynchronous, and if it never lands (the machine dies inside the 10 ms
+window, or a row the database refuses blocks the queue) the venue holds an order
+this service has no record of. Finding that needs the venue-to-service
+direction, and nothing walks it.
+
+**Position and balance reconciliation does not exist.**
+`emporia-reconciliation` has been deleted: its two services were never called
+from production, were never scanned into the context, and queried
 `user_portfolio_positions` and `user_portfolio_accounts` - tables no migration
 creates and which exist in none of the databases. Each caught `Exception` and
 returned `BigDecimal.ZERO`, logging at `debug`, so a query against a table that
 is not there read as a flat position and, where the engine also held zero,
 counted as **matched** and reported `isConsistent = true`.
-
-Reconciling the venue against this service's own records is therefore an open
-gap with nothing standing in front of it, rather than a thing that half works.
 
 **Why there is no fsync on the append path.** A periodic `force` buys nothing:
 PostgreSQL fsyncs on commit and the writer flushes every 10 ms, so for this log

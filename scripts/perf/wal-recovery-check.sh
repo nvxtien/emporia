@@ -82,13 +82,18 @@ accepted_file="$(mktemp)"
 submit_stream() {
     local worker="$1"
     for i in $(seq 1 "$BURST"); do
+        # The key is recorded beside the id because recovering the order is only
+        # half of it: a client that retries after the crash must receive the
+        # original order rather than create a second one, and that needs the
+        # processed-command record back too.
+        local key="wal-recovery-${worker}-${i}-$(date +%s%N)"
         curl -fsS --max-time 5 -X POST "${GATEWAY_URL}/api/orders" \
             -H "Authorization: Bearer ${token}" \
             -H "Content-Type: application/json" \
-            -H "Idempotency-Key: wal-recovery-${worker}-${i}-$(date +%s%N)" \
+            -H "Idempotency-Key: ${key}" \
             -d '{"listingId":1,"side":"BUY","type":"LIMIT","quantity":"1",
                  "limitPrice":"100.00","destination":"DMA"}' 2>/dev/null \
-            | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])' >> "$accepted_file" 2>/dev/null || true
+            | python3 -c "import sys,json; print('${key},' + json.load(sys.stdin)['id'])" >> "$accepted_file" 2>/dev/null || true
     done
 }
 for worker in $(seq 1 "${WAL_WORKERS:-12}"); do submit_stream "$worker" & done
@@ -109,9 +114,15 @@ accepted="$(grep -c . "$accepted_file" || true)"
 echo "    the API accepted ${accepted} orders before the kill"
 [ "${accepted:-0}" -gt 0 ] || fail "no orders were accepted; nothing to recover"
 
-missing_before="$(psql_q "select count(*) from (select unnest(string_to_array('$(paste -sd, "$accepted_file")', ','))::uuid as id) a
+ids_csv="$(cut -d, -f2 "$accepted_file" | paste -sd,)"
+missing_ids="$(psql_q "select a.id from (select unnest(string_to_array('${ids_csv}', ','))::uuid as id) a
     where not exists (select 1 from emporia_order_data.trading_order t where t.id = a.id);")"
+missing_before="$(printf '%s\n' "$missing_ids" | grep -c . || true)"
 echo "    orders not yet in the database at the moment of the kill: ${missing_before:-0}"
+
+# One of them, to replay after the restart.
+in_flight_id="$(printf '%s\n' "$missing_ids" | grep . | head -1 || true)"
+in_flight_key="$(grep ",${in_flight_id}\$" "$accepted_file" | cut -d, -f1 | head -1 || true)"
 
 echo "==> Restarting with the normal flush delay"
 restart_oms 10
@@ -121,19 +132,43 @@ replayed="$(grep -oE "Replaying [0-9]+ order command" "$log_file" | grep -oE "[0
 echo "    replayed from the write-ahead log: ${replayed:-0}"
 
 sleep 3
-missing_after="$(psql_q "select count(*) from (select unnest(string_to_array('$(paste -sd, "$accepted_file")', ','))::uuid as id) a
+missing_after="$(psql_q "select count(*) from (select unnest(string_to_array('${ids_csv}', ','))::uuid as id) a
     where not exists (select 1 from emporia_order_data.trading_order t where t.id = a.id);")"
 
 [ "${missing_after:-1}" = "0" ] || fail "${missing_after} order(s) the API accepted are absent after recovery.
   Those were acknowledged to the caller and then lost, which is the failure this
   log exists to prevent. Look for 'Replaying' in ${log_file}."
 
+# Recovering the order is half of it. A client that retries after the crash has
+# to receive the original order, which needs the processed-command record back
+# as well - and needs the deduplication index to have been filled from the
+# replay before it started answering. Replay runs in DisruptorOrderPipeline's
+# @PostConstruct, the index is published later on ApplicationReadyEvent, and
+# that ordering is the reason this holds. It had never been tested.
+if [ -n "${in_flight_key:-}" ]; then
+    echo "==> Replaying an in-flight command, which must be deduplicated"
+    replayed_id="$(curl -fsS --max-time 10 -X POST "${GATEWAY_URL}/api/orders" \
+        -H "Authorization: Bearer ${token}" \
+        -H "Content-Type: application/json" \
+        -H "Idempotency-Key: ${in_flight_key}" \
+        -d '{"listingId":1,"side":"BUY","type":"LIMIT","quantity":"1",
+             "limitPrice":"100.00","destination":"DMA"}' 2>/dev/null \
+        | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])' 2>/dev/null || true)"
+    [ "$replayed_id" = "$in_flight_id" ] \
+        || fail "replaying a command that was in flight at the kill returned '${replayed_id}',
+  not the original ${in_flight_id}. A caller retrying after a crash would have
+  created a second order for one intent - a duplicate position."
+    echo "    returned the original order ${in_flight_id}"
+else
+    echo "==> No in-flight command to replay; the deduplication half was not exercised"
+fi
+
 if [ "${missing_before:-0}" = "0" ]; then
     echo "==> PASS, but weakly: every order had already been flushed when the kill"
     echo "    landed, so nothing needed recovering. Re-run, or raise WAL_BURST,"
     echo "    to exercise the window properly."
 else
-    echo "==> PASS: ${missing_before} order(s) were unflushed at the kill and all"
-    echo "    are present after recovery"
+    echo "==> PASS: ${missing_before} order(s) were unflushed at the kill, all are"
+    echo "    present after recovery, and a retry of one is still deduplicated"
 fi
 rm -f "$accepted_file"
