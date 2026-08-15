@@ -82,9 +82,13 @@ public class OrderStateCache {
     private final Timer existsFromCache;
     private final Timer existsFromDb;
     private final Timer existsFromIndex;
-    // Null disables the index and restores the pure read-through behaviour.
-    // It owns every filter, including the rotation that stops them growing for
-    // as long as the process runs, and every filter it holds has a single writer.
+    // Owns every filter, including the rotation that stops them growing for as
+    // long as the process runs, and every filter it holds has a single writer.
+    //
+    // Nullable for tests only. The bean is unconditional since the enabled flag
+    // was removed, so this is never null at runtime - but a null here restores
+    // the pure read-through behaviour, which is the seam the tests use to cover
+    // the path the index replaced.
     private final @Nullable RotatingDedupIndex dedup;
 
     public OrderStateCache(

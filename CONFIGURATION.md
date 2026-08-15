@@ -492,8 +492,9 @@ the table. What this run does **not** cover: rotation never fired, because the
 interval is six hours and the run was four minutes.
 
 **Two hours under continuous duplicates**, which is the evidence the
-`enabled` flag was waiting for. 10 orders/sec for 7,200 s with one request in
-ten replaying an earlier `Idempotency-Key`:
+`enabled` flag was waiting for and on which it was removed. The index is now
+unconditional; turning it off is a deployment. 10 orders/sec for 7,200 s with
+one request in ten replaying an earlier `Idempotency-Key`:
 
 | | |
 |---|---:|

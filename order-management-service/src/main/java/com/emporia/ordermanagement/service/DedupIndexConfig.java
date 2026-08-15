@@ -1,18 +1,25 @@
 package com.emporia.ordermanagement.service;
 
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.time.Duration;
 
 /**
- * Creates the deduplication filters when the index is switched on.
+ * Creates the deduplication filters.
  *
- * <p>No bean means {@link OrderStateCache} receives null and reads through to
- * Postgres exactly as before, so the feature rolls out and rolls back by one
- * property rather than by a deployment.
+ * <p>Unconditional. There was an {@code emporia.dedup-index.enabled} property
+ * here, kept while the index was new because deduplication failing means a
+ * duplicate position and a property beats a redeploy. It is gone because the
+ * evidence it was waiting for arrived: two hours at 10 orders/sec with one
+ * request in ten replaying an earlier {@code Idempotency-Key} - roughly 7,160
+ * real duplicates, none reaching the database - on top of the horizon and crash
+ * behaviour being demonstrated rather than argued. See {@code CONFIGURATION.md}.
+ *
+ * <p>What replaces it is not nothing. The two duplicate counters are
+ * database-side, so they still report a failure of this index from the far side
+ * of it, and turning the index off is now a deployment rather than a property.
  */
 @Configuration
 public class DedupIndexConfig {
@@ -27,7 +34,6 @@ public class DedupIndexConfig {
      * that then gives the right answer.
      */
     @Bean
-    @ConditionalOnProperty(name = "emporia.dedup-index.enabled", havingValue = "true")
     public RotatingDedupIndex rotatingDedupIndex(
             @Value("${emporia.dedup-index.horizon:PT24H}") Duration horizon,
             @Value("${emporia.dedup-index.generations:4}") int generations,

@@ -61,11 +61,18 @@ emporia.disruptor:
 # and a reused orderId still returns 409, covered by tests rather than by the
 # benchmark, which never sends a duplicate.
 #
-# Still switchable, because deduplication failing means a duplicate position and
-# a property beats a redeploy. Watch emporia.oms.dedup.duplicate_reached_db: it
-# counts duplicates that got through and must stay at zero.
+# No longer switchable. The enabled flag was kept while this was new, because
+# deduplication failing means a duplicate position and a property beats a
+# redeploy - and it is gone because the evidence it waited for arrived: two
+# hours at 10 orders/sec with one request in ten replaying an earlier
+# Idempotency-Key, roughly 7,160 real duplicates, none reaching the database,
+# on top of the horizon and crash behaviour being demonstrated rather than
+# argued. See CONFIGURATION.md.
+#
+# Watch emporia.oms.dedup.duplicate_reached_db and duplicate_order_reached_db.
+# Both are database-side, so they report a failure of this index from the far
+# side of it, and both must stay at zero.
 emporia.dedup-index:
-  enabled: ${EMPORIA_DEDUP_INDEX_ENABLED:true}
   # How far back an identifier stays known from memory.
   #
   # This is a correctness parameter, not a performance one. Past the horizon the

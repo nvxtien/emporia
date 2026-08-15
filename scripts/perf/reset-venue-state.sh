@@ -126,7 +126,6 @@ EXCHANGE_CORE_ACCOUNTING_MODE="${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk
 EXCHANGE_CORE_PORTFOLIO_URL="${EXCHANGE_CORE_PORTFOLIO_URL:-http://localhost:8088}" \
 EXCHANGE_CORE_WAIT_STRATEGY="${EXCHANGE_CORE_WAIT_STRATEGY:-blocking}" \
 EMPORIA_DISRUPTOR_STALL_THRESHOLD_MS="${EMPORIA_DISRUPTOR_STALL_THRESHOLD_MS:-0}" \
-EMPORIA_DEDUP_INDEX_ENABLED="${EMPORIA_DEDUP_INDEX_ENABLED:-true}" \
     start_service order-management-service order-management-service mvn -DskipTests spring-boot:run
 wait_http_health order-management-service http://localhost:8086/actuator/health \
     || fail "order-management-service did not come up; see $log_dir/order-management-service.log"
