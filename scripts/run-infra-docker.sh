@@ -42,6 +42,12 @@ done
 echo "==> Building and installing reactor modules (mvn clean install ${MAVEN_TEST_SKIP_ARGS[*]})"
 mvn -q -f pom.xml clean install "${MAVEN_TEST_SKIP_ARGS[@]}"
 
+# Ten minutes suits a browser session. A soak test mints once and cannot renew
+# - this client only offers authorization-code + PKCE - so a run longer than the
+# lifetime collects 4xx that order-load.js counts as business rejections and
+# aborts on. Export a longer one for such a run:
+#   OAUTH_ACCESS_TOKEN_TTL=4h scripts/run-infra-docker.sh
+OAUTH_ACCESS_TOKEN_TTL="${OAUTH_ACCESS_TOKEN_TTL:-10m}" \
 AUTH_ISSUER=http://localhost:3001 \
 OAUTH_REDIRECT_URI=http://localhost:3001/auth/callback \
 OAUTH_POST_LOGOUT_REDIRECT_URI=http://localhost:3001/auth/logout-callback \
