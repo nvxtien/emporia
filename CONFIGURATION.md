@@ -470,7 +470,24 @@ Both rest on one behaviour that had never been checked: that a row absorbed by
 `ON CONFLICT DO NOTHING` comes back as zero affected rows through a JDBC batch.
 A counter reading zero proves only that it does not fire wrongly - the branch
 that fires had never run. `AbsorbedConflictReportingSpec` now checks it against
-a real PostgreSQL under the `postgres-it` profile.
+a real PostgreSQL under the `postgres-it` profile, and
+`scripts/perf/dedup-horizon-check.sh` has since made
+`duplicate_reached_db` move off zero in a running service.
+
+**The horizon, demonstrated rather than argued.** That script compresses the
+horizon to two minutes over four generations and shrinks the Caffeine tier to
+ten entries, then sends one Idempotency-Key three times:
+
+| | result |
+|---|---|
+| first submit | order A |
+| replay inside the horizon, cache evicted | **order A** - the filters said "possibly seen" and Postgres returned the recorded result |
+| replay past the horizon, after 6 rotations | **order B**, and `duplicate_reached_db` 0 → 1 |
+
+The middle row is the guarantee: deduplication holds inside the horizon even
+when the cache cannot help, so the filter-then-database path is doing the work.
+The last row is the bound, behaving exactly as documented - and the only time
+the duplicate oracle has fired in a running system.
 
 ## The portfolio outbox distinguishes settled changes from margin reservations
 
