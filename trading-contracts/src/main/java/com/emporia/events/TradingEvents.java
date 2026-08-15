@@ -9,9 +9,6 @@ import java.util.UUID;
 public final class TradingEvents {
 
     public static final int SCHEMA_VERSION = 1;
-    public static final String ORDER_COMMANDS_TOPIC = "emporia.order.commands.v1";
-    public static final String ORDERS_TOPIC = "emporia.orders.v1";
-    public static final String EXECUTION_COMMANDS_TOPIC = "emporia.execution.commands.v1";
 
     private TradingEvents() {
     }
@@ -200,7 +197,7 @@ public final class TradingEvents {
 
     /**
      * Durable execution-strategy state reconstructed from the order-management
-     * projection. Execution-service uses this instead of relying on in-memory
+     * projection. Execution routing uses this instead of relying on in-memory
      * timers or a private copy of child-order state.
      */
     public record StrategyStateView(OrderView parent, List<OrderView> children) {
@@ -210,7 +207,7 @@ public final class TradingEvents {
     }
 
     /**
-     * Orders that execution-service must reattach to after a process restart.
+     * Orders that execution routing must reattach to after a process restart.
      * DMA orders restore venue correlation; strategy parents restore their
      * schedules from the parent and child orders persisted in PostgreSQL.
      */
