@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.util.ClassUtils;
 
 import java.util.Locale;
 import java.util.Set;
@@ -53,6 +54,10 @@ public class InternalisationPolicy {
      */
     private static final Set<String> INTERNALISING_VENUE_MODES = Set.of("exchange-core");
 
+    /** Absent from the {@code -Dvn} artifact by construction. */
+    private static final String INTERNALISING_GATEWAY =
+            "com.emporia.execution.ExchangeCoreExecutionVenueGateway";
+
     /**
      * Jurisdictions whose default is "internalisation not available". Only a
      * default - see the class javadoc.
@@ -75,12 +80,15 @@ public class InternalisationPolicy {
             @Value("${emporia.compliance.internalisation-permitted:}") String declared,
             @Value("${emporia.execution.venue-mode:exchange-core}") String venueMode) {
 
+        String mode = venueMode.trim();
+        requireTheArtifactCanDoWhatIsAsked(mode);
+
         String code = jurisdiction.trim().toUpperCase(Locale.ROOT);
         boolean permitted = declared.isBlank()
                 ? !INTERNALISATION_PROHIBITED_BY_DEFAULT.contains(code)
                 : Boolean.parseBoolean(declared.trim());
 
-        if (!permitted && INTERNALISING_VENUE_MODES.contains(venueMode.trim())) {
+        if (!permitted && INTERNALISING_VENUE_MODES.contains(mode)) {
             throw new IllegalStateException(
                     "emporia.execution.venue-mode=" + venueMode + " matches client orders inside Emporia, "
                             + "but this deployment is not permitted to internalise"
@@ -100,6 +108,40 @@ public class InternalisationPolicy {
         return new InternalisationDecision(code, permitted);
     }
 
+    /**
+     * Turns "this jar was built without exchange-core" into a sentence rather
+     * than a {@code ClassNotFoundException} three frames inside Spring.
+     *
+     * <p>The {@code -Dvn} build exists so that "this deployment cannot match
+     * client orders internally" can be checked by hashing an artifact instead of
+     * trusting a property, which is what an auditor can actually verify after
+     * the fact. But an artifact that simply lacks a class fails obscurely, and
+     * an obscure failure invites someone to work around it. This says what was
+     * built and what to do about it.
+     */
+    private void requireTheArtifactCanDoWhatIsAsked(String venueMode) {
+        if (!INTERNALISING_VENUE_MODES.contains(venueMode)) return;
+        if (internalisingGatewayPresent()) return;
+        throw new IllegalStateException(
+                "emporia.execution.venue-mode=" + venueMode + " needs the exchange-core gateway, and this "
+                        + "artifact was built without it (the -Dvn build, which packages neither exchange-core "
+                        + "nor the gateway so that the absence is verifiable in the jar). Either deploy the "
+                        + "standard artifact, or route to an external venue with venue-mode=fix.");
+    }
+
+    /**
+     * Whether this artifact carries the internalising gateway at all.
+     *
+     * <p>A seam rather than an inline {@code ClassUtils.isPresent}, because the
+     * answer is a property of the build: a test can only ever observe the branch
+     * belonging to the build running it, so inlining the lookup made one of the
+     * two branches untestable and - worse - made every other test in this class
+     * fail under {@code -Dvn}, where the guard fired first and masked the
+     * jurisdiction logic it was supposed to sit beside.
+     */
+    boolean internalisingGatewayPresent() {
+        return ClassUtils.isPresent(INTERNALISING_GATEWAY, getClass().getClassLoader());
+    }
 
     /**
      * The resolved answer, published as a bean so later work reads it rather

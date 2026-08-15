@@ -8,7 +8,22 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class InternalisationPolicyTest {
 
-    private final InternalisationPolicy policy = new InternalisationPolicy();
+    /**
+     * Both branches are exercised from either build. Whether the gateway is on
+     * the classpath is a property of how the jar was built, so a test that read
+     * the real classpath could only ever see one of them - and under -Dvn the
+     * artifact check would fire first and mask everything else here.
+     */
+    private static InternalisationPolicy policyWithGateway(boolean present) {
+        return new InternalisationPolicy() {
+            @Override
+            boolean internalisingGatewayPresent() {
+                return present;
+            }
+        };
+    }
+
+    private final InternalisationPolicy policy = policyWithGateway(true);
 
     /**
      * The case this exists for: listed securities in Vietnam must trade through
@@ -43,6 +58,26 @@ class InternalisationPolicyTest {
         assertThatThrownBy(() -> policy.internalisationDecision("US", "false", "exchange-core"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("internalisation-permitted=false");
+    }
+
+    /**
+     * The -Dvn artifact contains neither exchange-core nor the gateway, so
+     * asking it to internalise has to say which build it is rather than raise a
+     * ClassNotFoundException three frames inside Spring. An obscure failure
+     * invites a workaround.
+     */
+    @Test
+    void anArtifactWithoutTheGatewayRefusesAnInternalisingVenueMode() {
+        assertThatThrownBy(() -> policyWithGateway(false).internalisationDecision("US", "true", "exchange-core"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("-Dvn build")
+                .hasMessageContaining("venue-mode=fix");
+    }
+
+    @Test
+    void anArtifactWithoutTheGatewayStillRoutesToAnExternalVenue() {
+        assertThatCode(() -> policyWithGateway(false).internalisationDecision("VN", "", "fix"))
+                .doesNotThrowAnyException();
     }
 
     @Test

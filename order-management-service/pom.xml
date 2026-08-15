@@ -23,17 +23,6 @@
         <dependency><groupId>com.emporia</groupId><artifactId>emporia-ha-core</artifactId><version>${project.version}</version></dependency>
         <dependency><groupId>com.emporia</groupId><artifactId>emporia-algorithmic-strategies</artifactId><version>${project.version}</version></dependency>
         <dependency><groupId>com.emporia</groupId><artifactId>emporia-journal</artifactId><version>${project.version}</version></dependency>
-        <dependency>
-            <groupId>exchange.core2</groupId>
-            <artifactId>exchange-core</artifactId>
-            <version>0.5.8-emporia</version>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.slf4j</groupId>
-                    <artifactId>slf4j-api</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
         <!-- OMS existing dependencies -->
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-data-jpa</artifactId></dependency>
@@ -158,6 +147,87 @@
                             <includes>
                                 <include>**/TradingOrderFraySpec.java</include>
                             </includes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <!--
+            The VN artifact. Activated by property (-Dvn) rather than -Pvn on
+            purpose: activeByDefault is switched off the moment any other -P is
+            passed, so a `-P postgres-it` build would silently drop exchange-core
+            and produce something that looks like a normal jar and is not.
+            Property activation composes instead of competing.
+
+            `vn` is a FLAG, not a boolean: Maven activates on the property being
+            DEFINED, whatever its value, so -Dvn=false also selects this build.
+            Omit the flag for the standard artifact; do not write -Dvn=false.
+            Making it value-sensitive was considered and is worse - -Dvn=false
+            would then match neither profile, dropping exchange-core without
+            excluding the sources that import it, and the result reads as a
+            broken build rather than a wrong flag. The finalName below is the
+            safety net instead: a mistake produces a jar with -vn- in its name.
+
+            Why an artifact and not just configuration: InternalisationPolicy
+            already refuses to start a deployment that may not internalise, and
+            for most purposes that is enough. What it cannot give is proof at the
+            artifact level - configuration can be changed after an audit, a
+            binary can be hashed. This profile builds a jar that contains neither
+            exchange-core nor the gateway that drives it, so "this deployment
+            cannot match client orders internally" is verifiable by inspecting
+            the artifact rather than by trusting a property.
+        -->
+        <profile>
+            <id>with-exchange-core</id>
+            <activation>
+                <property><name>!vn</name></property>
+            </activation>
+            <dependencies>
+                <dependency>
+                    <groupId>exchange.core2</groupId>
+                    <artifactId>exchange-core</artifactId>
+                    <version>0.5.8-emporia</version>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>org.slf4j</groupId>
+                            <artifactId>slf4j-api</artifactId>
+                        </exclusion>
+                    </exclusions>
+                </dependency>
+            </dependencies>
+        </profile>
+
+        <profile>
+            <id>vn</id>
+            <activation>
+                <property><name>vn</name></property>
+            </activation>
+            <build>
+                <finalName>${project.artifactId}-vn-${project.version}</finalName>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <configuration>
+                            <!--
+                                Everything that imports exchange.core2, plus
+                                everything that references those classes. The set
+                                is closed: ExecutionEventConsumer mentions the
+                                gateway only in a javadoc {@link}, which does not
+                                bind at compile time.
+                            -->
+                            <excludes>
+                                <exclude>**/execution/ExchangeCoreExecutionVenueGateway.java</exclude>
+                                <exclude>**/execution/ExchangeCoreLifecycleRebuilder.java</exclude>
+                                <exclude>**/execution/ReconciliationEndpoint.java</exclude>
+                                <exclude>**/execution/pool/OrderCommandObjectPool.java</exclude>
+                            </excludes>
+                            <testExcludes>
+                                <testExclude>**/execution/ExchangeCoreExecutionVenueGatewayTest.java</testExclude>
+                                <testExclude>**/execution/ExchangeCoreLifecycleRebuilderTest.java</testExclude>
+                                <testExclude>**/execution/ReconciliationDesyncDetectionTest.java</testExclude>
+                                <testExclude>**/execution/pool/OrderCommandObjectPoolTest.java</testExclude>
+                            </testExcludes>
                         </configuration>
                     </plugin>
                 </plugins>

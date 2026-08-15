@@ -425,6 +425,56 @@ every deployment and development machine that predates it. State the cost
 plainly: an unspecified jurisdiction buys no protection at all. The guard only
 works for deployments that declare where they are.
 
+### The `-Dvn` artifact proves it at the jar, not the property
+
+Configuration can be changed after an audit; a binary can be hashed. So there is
+a build that packages neither `exchange-core` nor the gateway that drives it:
+
+```bash
+mvn package -Dvn        # -> order-management-service-vn-<version>.jar
+```
+
+Verified on the produced jar: zero `exchange-core` entries and zero
+`ExchangeCoreExecutionVenueGateway` / `ExchangeCoreLifecycleRebuilder` /
+`ReconciliationEndpoint` classes, with the FIX gateway intact so external-venue
+routing still works. 294 tests run in that build against 346 in the standard
+one; the difference is the excluded classes' own tests.
+
+Whether the gateway is on the classpath is a property of the build, so
+`InternalisationPolicy` exposes it as an overridable seam rather than reading
+the classpath inline. Inlining it made one branch untestable and, under `-Dvn`,
+made the artifact check fire ahead of every jurisdiction test in the same class
+and mask it.
+
+**The default build is the standard artifact.** `mvn package` with no flags
+produces `order-management-service-<version>.jar` containing exchange-core and
+the gateway; the VN build is opt-in.
+
+**Activated by property (`-Dvn`), not by `-P`.** Maven switches off an
+`activeByDefault` profile the moment any other `-P` is passed, so a
+`-P postgres-it` build would have silently dropped exchange-core and produced
+something that looks like a normal jar and is not. Property activation composes
+instead of competing.
+
+**`vn` is a flag, not a boolean.** Maven activates on the property being
+*defined*, whatever its value, so `-Dvn=false` **also** produces the VN
+artifact. Omit the flag for the standard build. Making it value-sensitive is
+worse: `-Dvn=false` would then match neither profile, dropping exchange-core
+without excluding the sources that import it, and the result reads as a broken
+build rather than a wrong flag. The `-vn-` in the artifact name is the safety
+net - a mistake is visible in the output rather than inside the jar.
+
+Asking that artifact for `venue-mode: exchange-core` fails with a sentence
+naming the build, not a `ClassNotFoundException` inside Spring. An obscure
+failure invites a workaround.
+
+**This does not replace the startup guard.** The guard still catches the case
+the artifact cannot: deploying the wrong jar.
+
+`emporia-journal` declared `exchange-core` and imported nothing from it. That
+dead dependency is gone, which is also what kept it out of the VN artifact
+transitively.
+
 The resolved answer is published as an `InternalisationDecision` bean rather
 than re-derived, because the quoting engine will need exactly it: posting a
 two-sided price *is* internalisation, whether or not a client order ever takes
