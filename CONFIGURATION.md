@@ -407,14 +407,69 @@ A Bloom filter answers "never seen" from memory instead. Six alternating runs at
 | index on | 0.035 - 0.230 ms | 17 - 52 ms | 27 - 73 ms |
 | index off | 1.872 - 5.712 ms | 248 - 479 ms | 106 - 361 ms |
 
-**The horizon is not a performance knob.** Past `emporia.dedup-index.horizon`
-the filters report "never seen" and `OrderStateCache` returns that answer
-*without consulting Postgres*, so a command older than the horizon reads as new
-even though the database still holds it. That is a false negative, and on this
-system a false negative is a duplicate position. The default of 24 hours matches
-the Idempotency-Key TTL the processed-command cache already promises callers:
-past that TTL a repeated key is contractually a new request rather than a retry.
-Shortening the horizon shortens that promise.
+**The horizon is not a performance knob.** Past it the filters report "never
+seen" and `OrderStateCache` returns that answer *without consulting Postgres*, so
+a command older than the horizon reads as new even though the database still
+holds it. That is a false negative, and on this system a false negative is a
+duplicate position.
+
+### The horizon is a session count, not a duration
+
+There is no `horizon` property. It is derived from the rotation schedule and the
+number of generations retained, and rotation lands on the **start of each
+trading session**:
+
+```
+session-starts:    06:00, 12:30      # sessions run 06:00-12:00 and 12:30-18:00
+sessions-retained: 2
+horizon:           6h30 + 17h30 = 24 hours
+```
+
+Only session *starts* are configured. Session ends do not affect rotation, so
+holding them here would be configuration nothing reads and nothing would detect
+as wrong.
+
+**The rule when adjusting these per country:** retain as many generations as
+there are session starts. The gaps between consecutive starts always sum to
+exactly one day however unevenly the day is carved up, so that rule yields
+exactly 24 hours for any country and any number of sessions, with no arithmetic
+needed at the deployment site.
+
+24 hours is not chosen for tidiness: it matches
+`OrderStateCache.IDEMPOTENCY_KEY_TTL`, the window in which a repeated key is
+honoured as a retry rather than treated as a new request.
+
+**The service refuses to start if the horizon lands under that TTL.** Getting
+this wrong has no symptom - not a slow path, not an error, nothing - until a
+caller retries near the old bound and gets a second position, possibly months
+later. Refusing to start converts a silent correctness bug into a loud
+deployment one. The message names the computed horizon, the schedule and the
+retention that produced it.
+
+Two things about the arithmetic that are easy to get wrong:
+
+- **The horizon is the sum of the retained gaps, not the shortest gap times the
+  retention.** With 06:00 and 12:30 the gaps are 6h30 and 17h30, so the second
+  formula reports 13 hours against a real 24. This is not cosmetic:
+  `DedupIndexWarmup` loads exactly `horizon` worth of history from Postgres at
+  startup, so under-reporting it leaves a window that survives a restart reading
+  as "never seen".
+- **The horizon is a floor, not an average.** Coverage is at its minimum in the
+  instant *after* a rotation and grows until the next one. Reasoning from the
+  average overstates the guarantee.
+
+Wall-clock times rather than an interval because the previous scheme -
+`horizon / generations` counted from process start - meant two instances started
+an hour apart forgot different things at different moments, and "when does this
+system forget" had no answer without knowing the deployment time.
+
+`rotate-interval` overrides the session starts with a fixed spacing. It is
+test-only: `scripts/perf/dedup-horizon-check.sh` sets it to compress the horizon
+to a minute, because demonstrating the whole of it against a daily schedule
+takes more than a day. The startup guard warns rather than refuses on this
+schedule - enforcing it would stop the very script that proves the horizon - so
+a production deployment left on `rotate-interval` is caught by a log line and
+nothing else.
 
 The order-id key space carries a guard on top of the horizon that does not
 expire, because strategy child ids are derived from the parent - `deterministic(
@@ -430,8 +485,8 @@ restarts fills until every answer is a false positive - roughly 0.1% at eight
 hours, 15% at three days, 50% at a week. Nothing breaks and no short benchmark
 can see it; the hot path just drifts back to Postgres. A live filter that has
 been rotated out *is* the history for the period it covered, so rotation needs
-no database read at all. `generations` filters are retained behind the live one
-and rotation runs every `horizon / generations`.
+no database read at all. `sessions-retained` filters are kept behind the live
+one, and rotation runs at each session boundary.
 
 **Sizing the two Caffeine tiers is now a measurement, not an argument.** Both
 had `recordStats()` on since they were written and nothing read it, so how often
@@ -557,9 +612,10 @@ a real PostgreSQL under the `postgres-it` profile, and
 `scripts/perf/dedup-horizon-check.sh` has since made
 `duplicate_reached_db` move off zero in a running service.
 
-**The horizon, demonstrated rather than argued.** That script compresses the
-horizon to two minutes over four generations and shrinks the Caffeine tier to
-ten entries, then sends one Idempotency-Key three times:
+**The horizon, demonstrated rather than argued.** That script replaces the two
+daily resets with `rotate-interval`, compressing the horizon to a minute, and
+shrinks the Caffeine tier to ten entries, then sends one Idempotency-Key three
+times:
 
 | | result |
 |---|---|

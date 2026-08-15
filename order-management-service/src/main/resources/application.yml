@@ -73,38 +73,64 @@ emporia.disruptor:
 # Both are database-side, so they report a failure of this index from the far
 # side of it, and both must stay at zero.
 emporia.dedup-index:
-  # How far back an identifier stays known from memory.
+  # When the filters rotate: the START of each trading session.
   #
-  # This is a correctness parameter, not a performance one. Past the horizon the
-  # filters report "never seen" and OrderStateCache returns that answer WITHOUT
-  # consulting Postgres, so a command older than this reads as new even though
-  # the database still holds it. 24 hours matches the Idempotency-Key TTL the
-  # processed-command cache already promises callers: beyond that TTL a repeated
-  # key is contractually a new request rather than a retry.
+  # Two sessions here - 06:00-12:00 and 12:30-18:00 - so the starts are 06:00 and
+  # 12:30. Only the starts are configured, because session ends do not affect
+  # rotation; holding them here would be configuration nothing reads and nothing
+  # would detect as wrong. These are expected to be adjusted per country at
+  # deployment, and any number of sessions works.
+  #
+  # THE RULE WHEN CHANGING THESE: retain as many generations as there are
+  # session starts. The gaps between consecutive starts always sum to exactly one
+  # day however unevenly the day is carved up, so that rule yields exactly 24
+  # hours of horizon for any country, with no arithmetic needed here. Retaining
+  # fewer does not - 06:00 and 12:30 leave gaps of 6h30 and 17h30, so retaining
+  # one covers 6h30 at its worst. The service refuses to start if the horizon
+  # lands under the Idempotency-Key TTL, so a mistake here fails deployment
+  # rather than producing duplicate positions months later.
+  #
+  # Quoted because YAML 1.1 reads an unquoted 12:30 as the sexagesimal integer
+  # 750.
+  session-starts: "${EMPORIA_DEDUP_INDEX_SESSION_STARTS:06:00,12:30}"
+  zone: ${EMPORIA_DEDUP_INDEX_ZONE:UTC}
+  # Sessions retained behind the live filter. This is what turns the schedule
+  # above into the horizon, and it is a correctness parameter, not a performance
+  # one.
+  #
+  # Past the horizon the filters report "never seen" and OrderStateCache returns
+  # that answer WITHOUT consulting Postgres, so a command older than it reads as
+  # new even though the database still holds it. Coverage is at its minimum in
+  # the instant after a rotation, where it is exactly the sum of the retained
+  # gaps - here 6h30 + 17h30 = 24 hours, matching the Idempotency-Key TTL the
+  # processed-command cache already promises callers.
   #
   # The order-id key space carries a guard on top of this that does not expire,
   # because strategy parents derive child ids deterministically and can outlive
   # any window: DedupIndexLoader loads every working order regardless of age.
-  horizon: ${EMPORIA_DEDUP_INDEX_HORIZON:PT24H}
-  # Filters retained behind the live one. Rotation runs every horizon/generations
-  # - six hours by default - and drops the oldest, which is what bounds memory on
-  # a venue that runs 24/7 and never restarts. Without it a Bloom filter, which
-  # cannot delete, fills until every answer is a false positive: ~0.1% at eight
-  # hours, ~15% at three days, ~50% at a week. Nothing breaks, the hot path just
-  # drifts back to Postgres, and no short benchmark can see it happen.
-  #
-  # More generations forget in finer steps and cost slightly more memory; fewer
-  # cost less and forget in coarser ones.
-  generations: ${EMPORIA_DEDUP_INDEX_GENERATIONS:4}
+  sessions-retained: ${EMPORIA_DEDUP_INDEX_SESSIONS_RETAINED:2}
+  # Rotate at a fixed spacing instead, ignoring the two resets above. Test-only:
+  # scripts/perf/dedup-horizon-check.sh sets it to compress the horizon to
+  # minutes, because demonstrating the whole of it against the daily schedule
+  # takes a day and a half. Leaving it set in production would reintroduce the
+  # restart-relative window the fixed times replaced.
+  rotate-interval: ${EMPORIA_DEDUP_INDEX_ROTATE_INTERVAL:}
   # Identifiers expected across the whole horizon, both key spaces counted:
   # commandId for idempotency, orderId for the duplicate guard. 20M is 24 hours
   # at the 120 orders/sec this was benchmarked at, at roughly two identifiers per
   # order.
   #
   # ~1.8 bytes per entry at 0.001. Each generation is sized for
-  # expected-entries/generations, so steady state holds (generations + 1) of
-  # those - about 45 MB here - plus the startup history filter for the first
-  # horizon, released once the retained generations cover the horizon alone.
+  # expected-entries/sessions-retained - 10M, one session's worth - and steady
+  # state holds (sessions-retained + 1) of those, about 54 MB here, plus the
+  # startup history filter for the first horizon, released once the retained
+  # generations cover the horizon alone.
+  #
+  # Rotation must bound memory on a venue that runs 24/7 and never restarts:
+  # a Bloom filter cannot delete, so a single one fills until every answer is a
+  # false positive - ~0.1% at eight hours, ~15% at three days, ~50% at a week.
+  # Nothing breaks, the hot path just drifts back to Postgres, and no short
+  # benchmark can see it happen.
   #
   # Under-sizing is safe and costs latency, not correctness: it raises the
   # false-positive rate, and a false positive is one Postgres lookup that then

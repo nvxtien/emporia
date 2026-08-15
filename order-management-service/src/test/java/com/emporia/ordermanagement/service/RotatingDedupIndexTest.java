@@ -16,10 +16,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class RotatingDedupIndexTest {
 
     private static final Duration HORIZON = Duration.ofHours(24);
-    private static final int GENERATIONS = 4;
+    private static final int SESSIONS_RETAINED = 2;
 
     private static RotatingDedupIndex index() {
-        return new RotatingDedupIndex(HORIZON, GENERATIONS, 4_000, 0.001);
+        return new RotatingDedupIndex(HORIZON, SESSIONS_RETAINED, 4_000, 0.001);
     }
 
     /**
@@ -30,7 +30,7 @@ class RotatingDedupIndexTest {
     @Property
     void everythingRememberedStaysKnownForAWholeHorizon(
             @ForAll @Size(min = 1, max = 100) List<Long> seeds,
-            @ForAll @IntRange(min = 0, max = GENERATIONS) int rotations) {
+            @ForAll @IntRange(min = 0, max = SESSIONS_RETAINED) int rotations) {
         List<UUID> ids = seeds.stream().map(seed -> new UUID(seed, ~seed)).toList();
         RotatingDedupIndex index = index();
         ids.forEach(index::remember);
@@ -53,18 +53,22 @@ class RotatingDedupIndexTest {
         UUID id = UUID.randomUUID();
         index.remember(id);
 
-        for (int rotation = 0; rotation <= GENERATIONS; rotation++) {
+        for (int rotation = 0; rotation <= SESSIONS_RETAINED; rotation++) {
             index.rotate();
         }
 
         assertThat(index.definitelyNew(id)).isTrue();
     }
 
+    /**
+     * The horizon is worked out by {@link RotationSchedule#minimumCoverage} and
+     * handed here, rather than recomputed from a session length - which is what
+     * keeps uneven session starts from silently understating it.
+     */
     @Test
-    void rotationInterval() {
-        assertThat(index().rotateInterval()).isEqualTo(Duration.ofHours(6));
+    void reportsTheHorizonItWasGiven() {
         assertThat(index().horizon()).isEqualTo(HORIZON);
-        assertThat(index().generations()).isEqualTo(GENERATIONS);
+        assertThat(index().sessionsRetained()).isEqualTo(SESSIONS_RETAINED);
     }
 
     @Test
@@ -112,7 +116,7 @@ class RotatingDedupIndexTest {
 
         // One rotation short of release, where the generations are nearly full
         // and the history is still held: this is the high-water mark.
-        for (int rotation = 0; rotation < GENERATIONS - 1; rotation++) {
+        for (int rotation = 0; rotation < SESSIONS_RETAINED - 1; rotation++) {
             index.rotate();
         }
         long peak = index.bytes();
@@ -131,7 +135,7 @@ class RotatingDedupIndexTest {
     void rejectsNonsensicalSizing() {
         assertThatThrownBy(() -> new RotatingDedupIndex(HORIZON, 0, 1_000, 0.001))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> new RotatingDedupIndex(Duration.ZERO, 4, 1_000, 0.001))
+        assertThatThrownBy(() -> new RotatingDedupIndex(Duration.ZERO, 2, 1_000, 0.001))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 }

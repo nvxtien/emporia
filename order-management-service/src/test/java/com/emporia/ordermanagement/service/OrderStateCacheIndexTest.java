@@ -22,8 +22,10 @@ class OrderStateCacheIndexTest {
     private final ProcessedCommandRepository processed = mock(ProcessedCommandRepository.class);
     private final OrderMetrics metrics = new OrderMetrics(new SimpleMeterRegistry());
 
+    private static final int SESSIONS_RETAINED = 2;
+
     private static RotatingDedupIndex dedupIndex() {
-        return new RotatingDedupIndex(Duration.ofHours(24), 4, 1_000, 0.001);
+        return new RotatingDedupIndex(Duration.ofHours(24), SESSIONS_RETAINED, 1_000, 0.001);
     }
 
     private OrderStateCache cacheWith(RotatingDedupIndex dedup) {
@@ -94,7 +96,9 @@ class OrderStateCacheIndexTest {
 
         UUID commandId = UUID.randomUUID();
         dedup.remember(commandId);
-        for (int rotation = 0; rotation < 4; rotation++) {
+        // Exactly the horizon: one rotation more and it is legitimately gone, so
+        // the bound is read from the configured value rather than written out.
+        for (int rotation = 0; rotation < SESSIONS_RETAINED; rotation++) {
             dedup.rotate();
         }
         when(processed.findById(commandId)).thenReturn(Optional.empty());

@@ -8,11 +8,14 @@
 # PostgreSQL, so a repeated command is accepted as new. CONFIGURATION.md says so;
 # this shows it.
 #
-# Two layers hide the bound from a short test, and both are compressed here. The
-# filters only forget after `generations` rotations, so a two-minute horizon over
-# four generations rotates every thirty seconds. And OrderStateCache's Caffeine
-# tier answers a repeat from its own memory before the filters are consulted at
-# all, so it is shrunk to ten entries and then evicted.
+# Two layers hide the bound from a short test, and both are compressed here.
+# Production rotates at each trading-session start, so demonstrating a whole
+# horizon against it would take more than a day; rotate-interval replaces the
+# clock with a fixed spacing. Thirty-second sessions with two retained is a one-minute
+# horizon, and an identifier is only dropped one rotation past it - ninety
+# seconds. And OrderStateCache's Caffeine tier answers a repeat from its own
+# memory before the filters are consulted at all, so it is shrunk to ten entries
+# and then evicted.
 #
 # One Idempotency-Key is then sent three times - fresh, inside the horizon, past
 # it - and the third must behave differently from the second.
@@ -25,8 +28,8 @@ set -uo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
-export EMPORIA_DEDUP_INDEX_HORIZON="${EMPORIA_DEDUP_INDEX_HORIZON:-PT2M}"
-export EMPORIA_DEDUP_INDEX_GENERATIONS="${EMPORIA_DEDUP_INDEX_GENERATIONS:-4}"
+export EMPORIA_DEDUP_INDEX_ROTATE_INTERVAL="${EMPORIA_DEDUP_INDEX_ROTATE_INTERVAL:-PT30S}"
+export EMPORIA_DEDUP_INDEX_SESSIONS_RETAINED="${EMPORIA_DEDUP_INDEX_SESSIONS_RETAINED:-2}"
 export EMPORIA_CACHE_PROCESSED_MAX_SIZE="${EMPORIA_CACHE_PROCESSED_MAX_SIZE:-10}"
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8082}"
 
@@ -42,8 +45,8 @@ echo "    $schedule"
 # Trusting the environment reached the forked JVM would make a run that never
 # rotates look like one that rotated and kept its answer.
 case "$schedule" in
-    *"rotates every PT30S"*) ;;
-    *) fail "the compressed horizon did not reach the JVM";;
+    *"FixedInterval[interval=PT30S]"*) ;;
+    *) fail "the compressed horizon did not reach the JVM; it is still on the daily schedule";;
 esac
 
 token="$(EMPORIA_ORIGIN="${EMPORIA_ORIGIN:-http://localhost:3001}" \

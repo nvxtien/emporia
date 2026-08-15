@@ -185,8 +185,8 @@ All shell scripts in this repository adhere to the following strict operational 
 
 #### `scripts/perf/dedup-horizon-check.sh`
 - **Purpose**: Demonstrates the deduplication horizon, and is the only thing that makes `emporia.oms.dedup.duplicate_reached_db` move off zero outside a unit test.
-- **Behavior**: Restarts with a two-minute horizon over four generations and a ten-entry processed cache, then sends one `Idempotency-Key` three times - fresh, inside the horizon, past it. Inside the horizon the replay must return the original order; past it, it must create a second one and the duplicate counter must fire.
-- **Why it exists**: The horizon is a correctness bound, not a performance one, and two layers hide it from any short test: the filters only forget after `generations` rotations, and the Caffeine tier answers a repeat from its own 24-hour memory first.
+- **Behavior**: Restarts with `rotate-interval` set, which replaces the daily session starts with thirty-second sessions - a one-minute horizon - alongside a ten-entry processed cache, then sends one `Idempotency-Key` three times: fresh, inside the horizon, past it. Inside the horizon the replay must return the original order; past it, it must create a second one and the duplicate counter must fire.
+- **Why it exists**: The horizon is a correctness bound, not a performance one, and three layers hide it from any short test: production rotates at each trading-session start so a whole horizon takes more than a day to observe, the filters only drop an identifier one rotation past the horizon, and the Caffeine tier answers a repeat from its own 24-hour memory first.
 - **Usage**:
   ```bash
   ./scripts/perf/dedup-horizon-check.sh

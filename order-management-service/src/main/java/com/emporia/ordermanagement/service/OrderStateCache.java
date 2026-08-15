@@ -68,6 +68,15 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class OrderStateCache {
 
+    /**
+     * How long a repeated {@code Idempotency-Key} is honoured as a retry rather
+     * than treated as a new request. This is a promise made to callers, and the
+     * deduplication horizon has to be at least as long or the system forgets a
+     * key it said it still honours - {@code DedupIndexConfig} refuses to start
+     * when it is not, which is why this is public rather than inlined below.
+     */
+    public static final Duration IDEMPOTENCY_KEY_TTL = Duration.ofHours(24);
+
     private final Cache<UUID, TradingOrder> orders;
     private final Cache<UUID, ProcessedCommand> processed;
     private final TradingOrderRepository orderRepository;
@@ -114,7 +123,7 @@ public class OrderStateCache {
                 .build();
         this.processed = Caffeine.newBuilder()
                 .maximumSize(processedMaxSize)
-                .expireAfterWrite(Duration.ofHours(24))
+                .expireAfterWrite(IDEMPOTENCY_KEY_TTL)
                 .recordStats()
                 .build();
         // recordStats() has been on since these caches were written and nothing

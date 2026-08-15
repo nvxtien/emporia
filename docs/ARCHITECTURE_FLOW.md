@@ -137,9 +137,10 @@ against process death, not machine loss, because `append` does not fsync. See
 
 **One answer is authoritative in memory rather than in the database**: "this
 identifier has certainly never been seen". `RotatingDedupIndex` answers it
-without consulting PostgreSQL, which is why its horizon is a correctness
-parameter rather than a cache-sizing one - past 24 hours a repeated command
-reads as new. Every other answer, including every positive one, still comes from
+without consulting PostgreSQL, which is why its horizon is a correctness bound
+rather than a cache-sizing one - past 24 hours a repeated command reads as new.
+The horizon is not configured directly; it falls out of rotating at each
+trading-session start and retaining one generation per session. Every other answer, including every positive one, still comes from
 the database.
 
 Two consequences follow, and both are enforced rather than assumed:

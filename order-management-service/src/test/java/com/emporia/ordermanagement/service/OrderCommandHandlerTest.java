@@ -551,7 +551,7 @@ class OrderCommandHandlerTest {
      */
     @Test
     void aDuplicateCommandIsStillRefusedWhileTheIndexIsAnswering() {
-        RotatingDedupIndex dedup = new RotatingDedupIndex(Duration.ofHours(24), 4, 1_000, 0.001);
+        RotatingDedupIndex dedup = new RotatingDedupIndex(Duration.ofHours(24), 2, 1_000, 0.001);
         OrderStateCache indexed = new OrderStateCache(orders, processed, metrics, dedup, 1000, 1000);
         dedup.publishHistory(new CommandDedupIndex(1_000, 0.001));
         OrderCommandHandler indexedHandler = new OrderCommandHandler(
@@ -575,7 +575,7 @@ class OrderCommandHandlerTest {
      */
     @Test
     void aReusedOrderIdIsRefusedWhileTheIndexIsAnswering() {
-        RotatingDedupIndex dedup = new RotatingDedupIndex(Duration.ofHours(24), 4, 1_000, 0.001);
+        RotatingDedupIndex dedup = new RotatingDedupIndex(Duration.ofHours(24), 2, 1_000, 0.001);
         OrderStateCache indexed = new OrderStateCache(orders, processed, metrics, dedup, 1000, 1000);
         dedup.publishHistory(new CommandDedupIndex(1_000, 0.001));
         OrderCommandHandler indexedHandler = new OrderCommandHandler(

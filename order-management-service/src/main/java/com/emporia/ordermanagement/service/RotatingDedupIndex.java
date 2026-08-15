@@ -35,14 +35,20 @@ import java.util.UUID;
  * reads one volatile.
  *
  * <h2>The horizon this creates</h2>
- * <p>{@code retained} generations each cover one rotation interval, so an
- * identifier stays known for at least {@code horizon}. Past that the filters
- * report "never seen" and {@link OrderStateCache} returns that answer
- * <b>without consulting Postgres</b> - a false negative with respect to the
- * database, not merely a slower path. The horizon is therefore a correctness
- * parameter, and it is set to match the Idempotency-Key TTL promised to
- * callers: beyond that TTL a repeated key is contractually a new request rather
- * than a retry.
+ * <p>Each retained generation covers one session, so an identifier stays known
+ * for at least the horizon, which {@link RotationSchedule#minimumCoverage} works
+ * out from the session starts. It is a floor rather than an average: coverage is
+ * exactly the horizon in the instant after a rotation and grows until the
+ * next one. Past it
+ * the filters report "never seen" and {@link OrderStateCache} returns that
+ * answer <b>without consulting Postgres</b> - a false negative with respect to
+ * the database, not merely a slower path.
+ *
+ * <p>The horizon is therefore a correctness bound rather than a tuning knob,
+ * and it is not configured directly: it falls out of the rotation schedule and
+ * the number of sessions retained, chosen together so the product matches the
+ * Idempotency-Key TTL promised to callers. Beyond that TTL a repeated key is
+ * contractually a new request rather than a retry.
  *
  * <p>The order-id key space has a second guard that does not expire, because
  * strategy parents can outlive any window: {@link DedupIndexLoader} loads every
@@ -54,12 +60,11 @@ import java.util.UUID;
  */
 public final class RotatingDedupIndex {
 
-    private final int generations;
+    private final int sessionsRetained;
     private final long expectedEntries;
     private final long entriesPerGeneration;
     private final double falsePositiveRate;
     private final Duration horizon;
-    private final Duration rotateInterval;
 
     /**
      * One immutable snapshot so the hot path reads a consistent set of filters
@@ -76,22 +81,30 @@ public final class RotatingDedupIndex {
     private int rotationsSinceHistory;
 
     /**
-     * @param horizon how far back an identifier stays known from memory
-     * @param generations filters retained behind the live one; the rotation
-     *                    interval is {@code horizon / generations}
+     * @param horizon how far back an identifier is guaranteed to stay known,
+     *                from {@link RotationSchedule#minimumCoverage}. This class
+     *                schedules nothing and does no calendar arithmetic of its
+     *                own; it is told the answer.
+     * @param sessionsRetained filters kept behind the live one, each covering one
+     *                         session. Retaining as many as there are session
+     *                         starts is what makes the horizon exactly the
+     *                         twenty-four hours the Idempotency-Key TTL promises
+     *                         callers.
      * @param expectedEntries identifiers expected across the whole horizon, both
      *                        key spaces counted
      * @param falsePositiveRate share of "never seen" answers allowed to be wrong
      *                          in the safe direction
      */
-    public RotatingDedupIndex(Duration horizon, int generations, long expectedEntries, double falsePositiveRate) {
-        if (generations < 1) throw new IllegalArgumentException("generations must be at least 1");
-        if (horizon.isZero() || horizon.isNegative()) throw new IllegalArgumentException("horizon must be positive");
+    public RotatingDedupIndex(Duration horizon, int sessionsRetained,
+                              long expectedEntries, double falsePositiveRate) {
+        if (sessionsRetained < 1) throw new IllegalArgumentException("sessions-retained must be at least 1");
+        if (horizon.isZero() || horizon.isNegative()) {
+            throw new IllegalArgumentException("horizon must be positive");
+        }
+        this.sessionsRetained = sessionsRetained;
         this.horizon = horizon;
-        this.generations = generations;
-        this.rotateInterval = horizon.dividedBy(generations);
         this.expectedEntries = expectedEntries;
-        this.entriesPerGeneration = Math.max(1, expectedEntries / generations);
+        this.entriesPerGeneration = Math.max(1, expectedEntries / sessionsRetained);
         this.falsePositiveRate = falsePositiveRate;
         this.current = new Filters(newGeneration(), List.of(), null, false);
     }
@@ -146,22 +159,22 @@ public final class RotatingDedupIndex {
      * retained generation has aged past the horizon.
      *
      * <p>The startup history is released once the retained generations cover the
-     * horizon on their own, which is exactly {@code generations} rotations after
-     * it was published. Holding it longer would keep the largest single filter
+     * horizon on their own, which is exactly {@code sessionsRetained} rotations
+     * after it was published. Holding it longer would keep the largest single filter
      * alive for no added coverage.
      */
     public synchronized void rotate() {
         Filters filters = current;
-        List<CommandDedupIndex> retained = new ArrayList<>(generations);
+        List<CommandDedupIndex> retained = new ArrayList<>(sessionsRetained);
         retained.add(filters.live());
         List<CommandDedupIndex> previous = filters.retained();
-        for (int i = 0; i < previous.size() && retained.size() < generations; i++) {
+        for (int i = 0; i < previous.size() && retained.size() < sessionsRetained; i++) {
             retained.add(previous.get(i));
         }
         CommandDedupIndex history = filters.history();
         if (history != null) {
             rotationsSinceHistory++;
-            if (rotationsSinceHistory >= generations) history = null;
+            if (rotationsSinceHistory >= sessionsRetained) history = null;
         }
         this.current = new Filters(newGeneration(), List.copyOf(retained), history, filters.ready());
     }
@@ -176,14 +189,9 @@ public final class RotatingDedupIndex {
         return horizon;
     }
 
-    /** How often {@link #rotate()} should be called to deliver that horizon. */
-    public Duration rotateInterval() {
-        return rotateInterval;
-    }
-
-    /** Generations retained behind the live one, for reporting. */
-    public int generations() {
-        return generations;
+    /** Sessions retained behind the live generation, for reporting. */
+    public int sessionsRetained() {
+        return sessionsRetained;
     }
 
     /** Bytes currently held across every generation, for reporting. */
