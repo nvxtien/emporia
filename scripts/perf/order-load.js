@@ -26,6 +26,19 @@ const TOKENS = __ENV.EMPORIA_TOKENS
     ? __ENV.EMPORIA_TOKENS.split(',').map((t) => t.trim()).filter((t) => t.length > 0)
     : [TOKEN];
 const MIX_SIDES = __ENV.MIX_SIDES === 'true';
+// Fraction of requests that replay an Idempotency-Key this VU has already used,
+// rather than minting a fresh one. Zero by default, so an ordinary benchmark is
+// unchanged.
+//
+// A soak of the deduplication index that never sends a duplicate proves almost
+// nothing: the counters sit at zero because there is nothing to catch. Setting
+// this makes the run continuously exercise the path the index exists for, and
+// emporia.oms.dedup.duplicate_reached_db staying at zero then means something.
+//
+// A replay is answered from the recorded result, so it comes back 201 carrying
+// the original order and counts as accepted - which is the point. A replay that
+// created a second order would show up as a duplicate reaching the database.
+const DUPLICATE_RATE = parseFloat(__ENV.DUPLICATE_RATE || '0');
 const RATE = parseInt(__ENV.RATE || '10', 10);
 const DURATION = __ENV.DURATION || '60s';
 const LISTING_IDS = (__ENV.LISTING_IDS || '1').split(',').map((s) => parseInt(s.trim(), 10));
@@ -74,6 +87,24 @@ export const options = {
     },
 };
 
+// Keys this VU has used, kept small: a replay is only interesting while the
+// tiers that might answer it still could, and an unbounded list would grow for
+// the length of a soak.
+const usedKeys = [];
+const REPLAYABLE_KEYS = 50;
+
+function idempotencyKey() {
+    if (DUPLICATE_RATE > 0 && usedKeys.length > 0 && Math.random() < DUPLICATE_RATE) {
+        return usedKeys[Math.floor(Math.random() * usedKeys.length)];
+    }
+    const fresh = `k6-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    if (DUPLICATE_RATE > 0) {
+        usedKeys.push(fresh);
+        if (usedKeys.length > REPLAYABLE_KEYS) usedKeys.shift();
+    }
+    return fresh;
+}
+
 function submitOrder() {
     const listingId = LISTING_IDS[Math.floor(Math.random() * LISTING_IDS.length)];
     const token = TOKENS[Math.floor(Math.random() * TOKENS.length)];
@@ -100,7 +131,7 @@ function submitOrder() {
                 // Deliberately not __VU/__ITER: those are undefined in setup(),
                 // where the warmup order is submitted, and referencing them
                 // there aborts the whole run.
-                'Idempotency-Key': `k6-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                'Idempotency-Key': idempotencyKey(),
             },
             tags: { name: 'POST /api/orders' },
             timeout: '30s',

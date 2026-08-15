@@ -66,13 +66,13 @@ echo "    engine storage: ${STORAGE_DIR} ($(du -sh "$STORAGE_DIR" 2>/dev/null | 
 # Stop the service first. Clearing storage under a running engine leaves it
 # writing snapshots into a directory that no longer describes its state.
 pid_file="$pid_dir/order-management-service.pid"
-restart_needed=false
 if [ -f "$pid_file" ]; then
     launcher="$(cat "$pid_file")"
     if kill -0 "$launcher" 2>/dev/null; then
         echo "==> Stopping order-management-service"
         stop_pid_tree "$launcher"
-        restart_needed=true
+    else
+        echo "==> order-management-service was already down; it will be started at the end"
     fi
     rm -f "$pid_file"
 fi
@@ -110,23 +110,26 @@ echo "    cancelled ${cancelled:-0} orders"
 remaining="$(psql_q "select count(*) from emporia_order_data.trading_order where order_status in ('LIVE','PARTIALLY_FILLED');")"
 [ "${remaining:-0}" = "0" ] || fail "expected no working orders after reset, found ${remaining}"
 
-if [ "$restart_needed" = true ]; then
-    echo "==> Restarting order-management-service on a clean engine"
-    DB_URL="${DB_URL:-jdbc:postgresql://localhost:5436/emporia_order_management}" \
-    DB_PASSWORD="${DB_PASSWORD:-admin123}" \
-    EXECUTION_DB_URL="${EXECUTION_DB_URL:-jdbc:postgresql://localhost:5437/emporia_execution}" \
-    EXECUTION_DB_USERNAME="${EXECUTION_DB_USERNAME:-postgres}" \
-    EXECUTION_DB_PASSWORD="${EXECUTION_DB_PASSWORD:-admin123}" \
-    EXECUTION_VENUE_MODE="${EXECUTION_VENUE_MODE:-exchange-core}" \
-    EXCHANGE_CORE_ACCOUNTING_MODE="${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk}" \
-    EXCHANGE_CORE_PORTFOLIO_URL="${EXCHANGE_CORE_PORTFOLIO_URL:-http://localhost:8088}" \
-    EXCHANGE_CORE_WAIT_STRATEGY="${EXCHANGE_CORE_WAIT_STRATEGY:-blocking}" \
-    EMPORIA_DISRUPTOR_STALL_THRESHOLD_MS="${EMPORIA_DISRUPTOR_STALL_THRESHOLD_MS:-0}" \
-    EMPORIA_DEDUP_INDEX_ENABLED="${EMPORIA_DEDUP_INDEX_ENABLED:-true}" \
-        start_service order-management-service order-management-service mvn -DskipTests spring-boot:run
-    wait_http_health order-management-service http://localhost:8086/actuator/health \
-        || fail "order-management-service did not come back up; see $log_dir/order-management-service.log"
-    echo "    up on a clean engine"
-fi
+# Unconditionally, not only when this script did the stopping. It used to skip
+# the start when the process was already gone, so a service that had crashed
+# left this script clearing the engine, printing "Reset complete" and exiting 0
+# with nothing running - and every caller of this script goes straight on to
+# send orders. A reset that ends with no venue is not a reset anyone wants.
+echo "==> Starting order-management-service on a clean engine"
+DB_URL="${DB_URL:-jdbc:postgresql://localhost:5436/emporia_order_management}" \
+DB_PASSWORD="${DB_PASSWORD:-admin123}" \
+EXECUTION_DB_URL="${EXECUTION_DB_URL:-jdbc:postgresql://localhost:5437/emporia_execution}" \
+EXECUTION_DB_USERNAME="${EXECUTION_DB_USERNAME:-postgres}" \
+EXECUTION_DB_PASSWORD="${EXECUTION_DB_PASSWORD:-admin123}" \
+EXECUTION_VENUE_MODE="${EXECUTION_VENUE_MODE:-exchange-core}" \
+EXCHANGE_CORE_ACCOUNTING_MODE="${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk}" \
+EXCHANGE_CORE_PORTFOLIO_URL="${EXCHANGE_CORE_PORTFOLIO_URL:-http://localhost:8088}" \
+EXCHANGE_CORE_WAIT_STRATEGY="${EXCHANGE_CORE_WAIT_STRATEGY:-blocking}" \
+EMPORIA_DISRUPTOR_STALL_THRESHOLD_MS="${EMPORIA_DISRUPTOR_STALL_THRESHOLD_MS:-0}" \
+EMPORIA_DEDUP_INDEX_ENABLED="${EMPORIA_DEDUP_INDEX_ENABLED:-true}" \
+    start_service order-management-service order-management-service mvn -DskipTests spring-boot:run
+wait_http_health order-management-service http://localhost:8086/actuator/health \
+    || fail "order-management-service did not come up; see $log_dir/order-management-service.log"
+echo "    up on a clean engine"
 
-echo "==> Reset complete: 0 working orders, empty engine state"
+echo "==> Reset complete: 0 working orders, empty engine state, service healthy"
