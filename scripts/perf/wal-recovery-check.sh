@@ -47,7 +47,15 @@ restart_oms() {
     local flush_delay="$1"
     local launcher child
     launcher="$(cat "$pid_file" 2>/dev/null || true)"
-    child="$(lsof -ti :8086 2>/dev/null | head -1)"
+    # -sTCP:LISTEN, not a bare port match. `lsof -i :8086` also returns processes
+    # holding a *connection to* 8086 - the gateway proxies there, so it appears in
+    # that list the moment any request has flowed - and head -1 then picked it.
+    # This script killed the gateway instead of order-management-service, twice,
+    # and the symptom surfaced two steps later as "could not mint an access token".
+    # `|| true` because a correct selector legitimately matches nothing once the
+    # service is down, and under `set -euo pipefail` an empty match would kill
+    # the script silently - which it did, mid-restart, with no message at all.
+    child="$(lsof -ti tcp:8086 -sTCP:LISTEN 2>/dev/null | head -1 || true)"
     if [ -n "$child" ]; then kill -9 "$child" 2>/dev/null || true; fi
     if [ -n "$launcher" ]; then kill -9 "$launcher" 2>/dev/null || true; fi
     while [ -n "$child" ] && kill -0 "$child" 2>/dev/null; do sleep 1; done
@@ -103,7 +111,15 @@ sleep "${WAL_KILL_AFTER:-3}"
 # Located by the port it serves, not by parent pid: the mvn launcher can exit
 # and leave the application JVM running, in which case pgrep -P finds nothing.
 launcher="$(cat "$pid_file" 2>/dev/null || true)"
-child="$(lsof -ti :8086 2>/dev/null | head -1)"
+# -sTCP:LISTEN, not a bare port match. `lsof -i :8086` also returns processes
+    # holding a *connection to* 8086 - the gateway proxies there, so it appears in
+    # that list the moment any request has flowed - and head -1 then picked it.
+    # This script killed the gateway instead of order-management-service, twice,
+    # and the symptom surfaced two steps later as "could not mint an access token".
+    # `|| true` because a correct selector legitimately matches nothing once the
+    # service is down, and under `set -euo pipefail` an empty match would kill
+    # the script silently - which it did, mid-restart, with no message at all.
+    child="$(lsof -ti tcp:8086 -sTCP:LISTEN 2>/dev/null | head -1 || true)"
 [ -n "$child" ] || fail "could not find the JVM serving port 8086"
 kill -9 "$child" 2>/dev/null || true
 [ -n "$launcher" ] && kill -9 "$launcher" 2>/dev/null || true
@@ -114,7 +130,8 @@ accepted="$(grep -c . "$accepted_file" || true)"
 echo "    the API accepted ${accepted} orders before the kill"
 [ "${accepted:-0}" -gt 0 ] || fail "no orders were accepted; nothing to recover"
 
-ids_csv="$(cut -d, -f2 "$accepted_file" | paste -sd,)"
+# BSD paste needs an explicit - for stdin; GNU accepts it too.
+ids_csv="$(cut -d, -f2 "$accepted_file" | paste -sd, -)"
 missing_ids="$(psql_q "select a.id from (select unnest(string_to_array('${ids_csv}', ','))::uuid as id) a
     where not exists (select 1 from emporia_order_data.trading_order t where t.id = a.id);")"
 missing_before="$(printf '%s\n' "$missing_ids" | grep -c . || true)"
@@ -147,17 +164,27 @@ missing_after="$(psql_q "select count(*) from (select unnest(string_to_array('${
 # that ordering is the reason this holds. It had never been tested.
 if [ -n "${in_flight_key:-}" ]; then
     echo "==> Replaying an in-flight command, which must be deduplicated"
-    replayed_id="$(curl -fsS --max-time 10 -X POST "${GATEWAY_URL}/api/orders" \
+    # Status and body are both kept. An earlier version took only .id, so a
+    # failed request and a duplicated order looked identical - an empty string -
+    # and the failure message accused the system of the wrong thing.
+    replay_body="$(curl -sS --max-time 10 -w '\n%{http_code}' -X POST "${GATEWAY_URL}/api/orders" \
         -H "Authorization: Bearer ${token}" \
         -H "Content-Type: application/json" \
         -H "Idempotency-Key: ${in_flight_key}" \
         -d '{"listingId":1,"side":"BUY","type":"LIMIT","quantity":"1",
-             "limitPrice":"100.00","destination":"DMA"}' 2>/dev/null \
-        | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])' 2>/dev/null || true)"
+             "limitPrice":"100.00","destination":"DMA"}' 2>&1 || true)"
+    replay_status="$(printf '%s' "$replay_body" | tail -1)"
+    replay_json="$(printf '%s' "$replay_body" | sed '$d')"
+    replayed_id="$(printf '%s' "$replay_json" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)"
+
+    [ "$replay_status" = "201" ] \
+        || fail "replaying an in-flight command returned HTTP ${replay_status}, not 201.
+  That is a failed request rather than a deduplication result, so this says
+  nothing about the guard. Body: ${replay_json}"
     [ "$replayed_id" = "$in_flight_id" ] \
-        || fail "replaying a command that was in flight at the kill returned '${replayed_id}',
-  not the original ${in_flight_id}. A caller retrying after a crash would have
-  created a second order for one intent - a duplicate position."
+        || fail "replaying a command that was in flight at the kill returned order
+  '${replayed_id}', not the original ${in_flight_id}. A caller retrying after a
+  crash would have created a second order for one intent - a duplicate position."
     echo "    returned the original order ${in_flight_id}"
 else
     echo "==> No in-flight command to replay; the deduplication half was not exercised"
