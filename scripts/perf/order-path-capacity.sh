@@ -347,7 +347,11 @@ limit_price=${LIMIT_PRICE}
 listing_ids=${LISTING_IDS}
 rates=${RATES}
 probe_step=${PROBE_STEP}
-exchange_core_journaling=${EXCHANGE_CORE_JOURNALING:-false}
+# Defaults to true because application.yml does. It defaulted to false here,
+# which is the opposite of what the service was actually doing - runs were
+# recorded as unjournalled while the log said journaling=true, and a metadata
+# field that contradicts the run is worse than an absent one.
+exchange_core_journaling=${EXCHANGE_CORE_JOURNALING:-true}
 exchange_core_snapshot_interval=${EXCHANGE_CORE_SNAPSHOT_INTERVAL:-60s}
 exchange_core_retained_checkpoints=${EXCHANGE_CORE_RETAINED_CHECKPOINTS:-2}
 java_version=$(java -version 2>&1 | head -1)
@@ -432,7 +436,7 @@ capture_execution_health "after"
     echo "Run directory: ${OUT_DIR}"
     echo "Gateway URL: ${GATEWAY_URL}"
     echo "Workload: scripts/perf/order-load.js via k6, quantity=${QUANTITY}, limitPrice=${LIMIT_PRICE}, ${PROBE_STEP} per rate"
-    echo "Exchange-core journaling: ${EXCHANGE_CORE_JOURNALING:-false}, snapshot interval: ${EXCHANGE_CORE_SNAPSHOT_INTERVAL:-60s}"
+    echo "Exchange-core journaling: ${EXCHANGE_CORE_JOURNALING:-true}, snapshot interval: ${EXCHANGE_CORE_SNAPSHOT_INTERVAL:-60s}"
     echo "Runtime: $(java -version 2>&1 | head -1)"
     echo
     echo "Summary:"
