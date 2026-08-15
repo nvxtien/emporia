@@ -284,11 +284,25 @@ firing**, and no test caught it because the tests that touch versions mock
 `orders.save`, which is the path production no longer uses.
 
 The revision is now stamped in `OrderStateCache.put`, the single funnel every
-committed state change passes through. **Not** in `TradingOrder`'s mutators,
-where it belongs on every other ground: assigning a `@Version` field on an
-entity Hibernate manages is undefined behaviour, and the repository path still
-relies on Hibernate owning the column - `TradingOrderPostgresConcurrencySpec`
-asserts exactly one of two competing transactions commits.
+committed state change passes through, and `@Version` is gone from the entity.
+
+Optimistic locking was not wanted here and was not working here. Every order
+state change runs on the single Disruptor writer thread, so the race it guards -
+a venue fill and a user cancel updating one row at once - cannot occur, and the
+writes that would carry the guard leave through raw JDBC where Hibernate is not
+involved. Keeping the annotation cost two things instead:
+
+- Spring Data decides new from existing by `version == null` when the entity has
+  a version attribute. `TradingOrder`'s constructor assigns 0, so **every
+  `save()` of a brand-new order took the `merge()` path** - a select, no insert,
+  then an optimistic-lock error for a conflict that never happened. Confirmed by
+  SQL logging: a `select ... where id=?` and no `insert into trading_order`.
+- The version incremented twice on the repository path, once in
+  `recordRevision()` and again at flush, against once on the hot path.
+
+Neither showed up because `orders.save`/`saveAll` is reachable only through
+`AsyncDbWriter`'s fallback, which needs `jdbcTemplate` to be null - and Spring
+injects it as a required constructor argument. The path is test-only.
 
 **Expect more 409s on `PUT /orders/{id}`.** Every state change advances the
 revision, fills included, so a caller that reads an order and modifies it while

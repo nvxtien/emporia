@@ -15,7 +15,6 @@ import jakarta.persistence.Id;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
-import jakarta.persistence.Version;
 import lombok.Getter;
 
 import java.math.BigDecimal;
@@ -28,7 +27,26 @@ import java.util.UUID;
 public class TradingOrder {
     @Id
     private UUID id;
-    @Version @Column(name = "entity_version", nullable = false)
+    /**
+     * The revision callers echo back as {@code expectedVersion}, advanced by
+     * {@link #recordRevision()} and by nothing else.
+     *
+     * <p>Deliberately <b>not</b> {@code @Version}. Hibernate's optimistic
+     * locking is not wanted here: order state changes all run on the single
+     * Disruptor writer thread, so the race it guards against - a venue fill and
+     * a user cancel updating one row at once - cannot occur, and the writes that
+     * would carry the guard go out through raw JDBC where Hibernate is not
+     * involved at all.
+     *
+     * <p>Keeping the annotation was not free. It made Spring Data decide new
+     * from existing by {@code version == null}, and this constructor assigns 0,
+     * so every {@code save()} of a brand-new order took the {@code merge()} path
+     * and failed against a real database with an optimistic-lock error for a
+     * conflict that never happened. It also meant the version incremented twice
+     * on the repository path - once here, once at flush - while incrementing
+     * once on the hot path.
+     */
+    @Column(name = "entity_version", nullable = false)
     private Long version;
     @Column(name = "user_subject", nullable = false, length = 200)
     private String userSubject;
@@ -203,17 +221,8 @@ public class TradingOrder {
      * Advances the revision this order publishes to callers.
      *
      * <p>Called by {@link com.emporia.ordermanagement.service.OrderStateCache}
-     * once per committed state change, and nowhere else.
-     *
-     * <h2>Why this is not inside the mutators</h2>
-     * <p>It belongs there - every mutator already ends with the same
-     * {@code updatedAt}/{@code validateInvariants} tail - but {@code version}
-     * carries {@code @Version}, and assigning a {@code @Version} field on an
-     * entity Hibernate is managing is undefined behaviour. The repository path
-     * still relies on Hibernate owning the column, and
-     * {@code TradingOrderPostgresConcurrencySpec} asserts exactly one of two
-     * competing transactions commits. Keeping the increment on the hot path's
-     * own commit funnel leaves that mechanism alone.
+     * once per committed state change, and nowhere else - it is now the only
+     * thing that moves this column.
      *
      * <h2>Why it is needed at all</h2>
      * <p>Order writes moved to raw JDBC in {@code AsyncDbWriter}, which bypasses

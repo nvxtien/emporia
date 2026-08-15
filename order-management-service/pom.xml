@@ -127,7 +127,7 @@
                         <artifactId>maven-surefire-plugin</artifactId>
                         <configuration>
                             <includes>
-                                <include>**/TradingOrderPostgresConcurrencySpec.java</include>
+                                <include>**/TradingOrderPostgresPersistenceSpec.java</include>
                                 <include>**/AbsorbedConflictReportingSpec.java</include>
                             </includes>
                         </configuration>
