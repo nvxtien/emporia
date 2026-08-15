@@ -284,11 +284,23 @@ public class OrderCommandController {
      * from the processed-command cache has only the stored payload.
      */
     private <T> T viewOf(ProcessingOutcome outcome, Class<T> type) {
+        // A refused command carries its status and its reason and no payload,
+        // so it has to be answered before anything tries to read a view out of
+        // it. Falling through here is what turned every domain rejection into
+        // 502 Bad Gateway: view() is null, payload is null, the parse fails, and
+        // "Order changed since it was loaded" reached the caller as "the
+        // platform is broken". The gateway then counted the 502 as a downstream
+        // failure and fed it to the order circuit breaker, so enough refusals -
+        // each of them a correct answer - would open it and refuse every order.
+        var result = outcome.result();
+        if (!result.success()) {
+            throw new ResponseStatusException(HttpStatus.valueOf(result.status()), result.detail());
+        }
         Object carried = outcome.view();
         if (type.isInstance(carried)) {
             return type.cast(carried);
         }
-        return read(outcome.result().payload(), type);
+        return read(result.payload(), type);
     }
 
     private <T> T read(String json, Class<T> type) {

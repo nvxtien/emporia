@@ -311,6 +311,17 @@ succeeded. That is the guard working. The modify itself was never unsafe - it
 re-validates the new quantity against live traded quantity - so what the caller
 lost was a decision made on a stale read, and the fix is to re-read and retry.
 
+They are 409s now. Until this was found they were **502 Bad Gateway**: a refused
+command carries its status and reason and no payload, and the controller fell
+through to parsing that absent payload as an `OrderView`, failed, and answered
+502. Every domain rejection did this - order already exists, pending
+cancellation, create incomplete, order not found, risk checks - so a caller
+could not tell a refusal from an outage, and retrying was the natural response
+to what it was told. At the edge it was worse: 502 is in the order route's
+circuit-breaker `statusCodes`, so correct refusals counted as downstream
+failures and enough of them would open the breaker and refuse every order.
+`scripts/perf/order-dedup-check.sh` covers both this and the idempotent replay.
+
 ## The write-ahead log recovers process death, not machine loss
 
 - **Where**: `MemoryMappedWalLogger`, `emporia.wal.file-path`,

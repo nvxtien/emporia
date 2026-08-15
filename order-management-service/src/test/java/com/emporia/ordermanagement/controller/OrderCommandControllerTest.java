@@ -102,6 +102,36 @@ class OrderCommandControllerTest {
         assertThat(command.deskId()).isEqualTo("DESK-A");
     }
 
+    /**
+     * A refused command carries its status and its reason and no payload. The
+     * controller used to fall through to parsing that absent payload as an
+     * OrderView, fail, and answer 502 Bad Gateway - so every domain rejection
+     * reached the caller as a platform fault. Worse at the edge: 502 is in the
+     * order route's circuit-breaker statusCodes, so enough correct refusals
+     * would open it and refuse every order.
+     */
+    @Test
+    void aRefusedCommandKeepsItsOwnStatusInsteadOfBecomingABadGateway() {
+        Jwt jwt = jwt("trader-1", true, "DESK-A");
+        when(staticData.get(1L, "Bearer token")).thenReturn(listing());
+
+        OrderCommandResult refused = new OrderCommandResult(SCHEMA_VERSION, UUID.randomUUID(), false, 409,
+                "Order changed since it was loaded; refresh before modifying it", null);
+        when(handler.handle(any())).thenReturn(new ProcessingOutcome(refused, List.of()));
+
+        OrderCommandController.CreateOrderRequest request = new OrderCommandController.CreateOrderRequest(
+                1L, OrderSide.BUY, OrderType.LIMIT, new BigDecimal("100"), new BigDecimal("150.00"),
+                "DMA", "ref-123", null, Map.of());
+
+        assertThatThrownBy(() -> controller.create(jwt, "Bearer token", "idem-key", request))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class)
+                .satisfies(thrown -> {
+                    var problem = (org.springframework.web.server.ResponseStatusException) thrown;
+                    assertThat(problem.getStatusCode().value()).isEqualTo(409);
+                    assertThat(problem.getReason()).contains("changed since it was loaded");
+                });
+    }
+
     @Test
     void createOrderRecordsInputEventForShadowReplay() {
         Jwt jwt = jwt("trader-1", true, "DESK-A");
