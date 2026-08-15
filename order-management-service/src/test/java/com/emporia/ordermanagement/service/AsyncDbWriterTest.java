@@ -17,6 +17,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import org.mockito.ArgumentCaptor;
 
+import java.sql.PreparedStatement;
+
 import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.List;
@@ -29,6 +31,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -110,39 +113,114 @@ class AsyncDbWriterTest {
         verify(processed).saveAll(anyList());
     }
 
+    /**
+     * The failure this replaces: a row the database will never accept was
+     * restored to the queue and retried every ten milliseconds forever, with
+     * every write behind it waiting. Seen for real as 26,070 identical
+     * check-constraint failures and not one row persisted, while callers went on
+     * receiving 201.
+     */
     @Test
-    void retriesRecordsDrainedByAFailedFlush() {
-        when(orders.saveAll(anyList()))
-                .thenThrow(new RuntimeException("database unavailable"))
-                .thenAnswer(invocation -> invocation.getArgument(0));
+    void aRowTheDatabaseRefusesIsDroppedRatherThanRetriedForever() {
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        AsyncDbWriter isolating = new AsyncDbWriter(orders, events, processed, null, null, null, null, meters);
+        when(orders.saveAll(anyList())).thenThrow(new RuntimeException("violates check constraint"));
 
-        writer.enqueue(testOrder());
+        isolating.enqueue(testOrder());
+        isolating.flush();
 
-        assertThatThrownBy(writer::flush)
-                .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("database unavailable");
-
-        writer.flush();
-
+        assertThat(meters.counter("emporia.oms.writer.rejected_rows").count()).isEqualTo(1.0);
+        // The batch attempt and one retry of the single row, then nothing: the
+        // row is gone rather than queued for the next flush, and the next.
+        verify(orders, times(2)).saveAll(anyList());
+        isolating.flush();
         verify(orders, times(2)).saveAll(anyList());
     }
 
     @Test
-    void failedFlushDoesNotCompactWalUntilRestoredRecordsPersist() {
+    @SuppressWarnings("unchecked")
+    void rowsTheDatabaseAcceptsStillLandWhenOneRowInTheBatchFails() {
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        AsyncDbWriter isolating = new AsyncDbWriter(orders, events, processed, null, null, null, null, meters);
+        TradingOrder poison = testOrder();
+        TradingOrder healthy = testOrder();
+        when(orders.saveAll(anyList())).thenAnswer(invocation -> {
+            List<TradingOrder> batch = invocation.getArgument(0);
+            if (batch.stream().anyMatch(o -> o.getId().equals(poison.getId()))) {
+                throw new RuntimeException("violates check constraint");
+            }
+            return batch;
+        });
+
+        isolating.enqueue(poison);
+        isolating.enqueue(healthy);
+        isolating.flush();
+
+        assertThat(meters.counter("emporia.oms.writer.rejected_rows").count()).isEqualTo(1.0);
+        ArgumentCaptor<List<TradingOrder>> written = ArgumentCaptor.forClass(List.class);
+        verify(orders, times(3)).saveAll(written.capture());
+        assertThat(written.getAllValues())
+                .as("the healthy row was written on its own after the batch failed")
+                .anySatisfy(batch -> assertThat(batch).singleElement()
+                        .extracting(TradingOrder::getId).isEqualTo(healthy.getId()));
+    }
+
+    /**
+     * The queue held the entity and the flush thread read its fields later, from
+     * another thread, through unsynchronised getters while the writer thread
+     * mutated it under synchronized. A flush crossing a mutation could read half
+     * of it - a modified remainingQuantity beside the original quantity, which
+     * the fill-accounting check constraint refuses.
+     */
+    @Test
+    void anOrderIsWrittenAsItWasWhenEnqueuedNotAsItIsAtFlush() throws Exception {
+        PreparedStatement statement = mock(PreparedStatement.class);
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        when(jdbc.batchUpdate(anyString(), anyList(), anyInt(), any())).thenAnswer(invocation -> {
+            List<Object> batch = invocation.getArgument(1);
+            org.springframework.jdbc.core.ParameterizedPreparedStatementSetter<Object> setter =
+                    invocation.getArgument(3);
+            for (Object row : batch) setter.setValues(statement, row);
+            int[] applied = new int[batch.size()];
+            Arrays.fill(applied, 1);
+            return new int[][]{applied};
+        });
+        AsyncDbWriter snapshotting = new AsyncDbWriter(
+                orders, events, processed, null, jdbc, null, null, new SimpleMeterRegistry());
+
+        TradingOrder order = testOrder();
+        snapshotting.enqueue(order);
+        // Stands in for the writer thread mutating the order while the flush
+        // thread is part-way through binding it.
+        order.modify(new BigDecimal("120"), new BigDecimal("150.00"));
+        snapshotting.flush();
+
+        // Proves the premise: the entity really did change after it was enqueued,
+        // so a captured 100 can only have come from the snapshot.
+        assertThat(order.getQuantity()).isEqualByComparingTo("120");
+
+        ArgumentCaptor<BigDecimal> quantity = ArgumentCaptor.forClass(BigDecimal.class);
+        ArgumentCaptor<BigDecimal> remaining = ArgumentCaptor.forClass(BigDecimal.class);
+        verify(statement).setBigDecimal(eq(20), quantity.capture());
+        verify(statement).setBigDecimal(eq(22), remaining.capture());
+        assertThat(quantity.getValue()).isEqualByComparingTo("100");
+        assertThat(remaining.getValue()).isEqualByComparingTo("100");
+    }
+
+    /**
+     * A dropped row's log record goes with it. Holding the log back would keep
+     * the mapping from being reused for a record nothing will ever replay - the
+     * row was refused deliberately and logged, not lost in flight.
+     */
+    @Test
+    void aSalvagedBatchLeavesNothingQueuedSoTheLogIsCompacted() {
         MemoryMappedWalLogger wal = mock(MemoryMappedWalLogger.class);
         org.mockito.Mockito.when(wal.isEnabled()).thenReturn(true);
-        AsyncDbWriter writerWithWal = new AsyncDbWriter(orders, events, processed, null, null, wal, null, null);
-        when(orders.saveAll(anyList()))
-                .thenThrow(new RuntimeException("database unavailable"))
-                .thenAnswer(invocation -> invocation.getArgument(0));
+        AsyncDbWriter writerWithWal = new AsyncDbWriter(
+                orders, events, processed, null, null, wal, null, new SimpleMeterRegistry());
+        when(orders.saveAll(anyList())).thenThrow(new RuntimeException("violates check constraint"));
 
         writerWithWal.enqueue(testOrder());
-
-        assertThatThrownBy(writerWithWal::flush)
-                .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("database unavailable");
-        verify(wal, never()).compactToSafePoint();
-
         writerWithWal.flush();
 
         verify(wal, times(1)).compactToSafePoint();
@@ -164,6 +242,36 @@ class AsyncDbWriterTest {
 
         writerWithWal.flush();
         verify(wal, times(1)).compactToSafePoint();
+    }
+
+    /**
+     * A modify changes quantity and limitPrice, and the upsert did not carry
+     * either through: the stored row kept its original quantity while taking the
+     * new remaining_quantity, so traded + remaining = quantity stopped holding
+     * and PostgreSQL refused the row. Every quantity or price change was
+     * therefore lost, and the refusal then blocked all persistence.
+     */
+    @Test
+    void theUpsertCarriesEveryFieldAModifyChanges() {
+        assertThat(writerSql("ON CONFLICT (id) DO UPDATE"))
+                .contains("quantity = EXCLUDED.quantity")
+                .contains("limit_price = EXCLUDED.limit_price")
+                .contains("remaining_quantity = EXCLUDED.remaining_quantity");
+    }
+
+    /** The order upsert as the writer builds it, read back through a flush. */
+    private String writerSql(String fragment) {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        when(jdbc.batchUpdate(anyString(), anyList(), anyInt(), any())).thenReturn(new int[][]{{1}});
+        AsyncDbWriter probing = new AsyncDbWriter(
+                orders, events, processed, null, jdbc, null, null, new SimpleMeterRegistry());
+        probing.enqueue(testOrder());
+        probing.flush();
+
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).batchUpdate(sql.capture(), anyList(), anyInt(), any());
+        assertThat(sql.getValue()).contains(fragment);
+        return sql.getValue();
     }
 
     /**

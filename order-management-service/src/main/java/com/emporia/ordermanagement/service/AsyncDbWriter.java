@@ -1,6 +1,8 @@
 package com.emporia.ordermanagement.service;
 
 import com.emporia.ordermanagement.model.OrderEvent;
+import com.emporia.events.TradingEvents.ListingSnapshot;
+import com.emporia.events.TradingEvents.OrderView;
 import com.emporia.ordermanagement.model.ProcessedCommand;
 import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.OrderEventRepository;
@@ -49,9 +51,31 @@ public class AsyncDbWriter {
     private static final Logger log = LoggerFactory.getLogger(AsyncDbWriter.class);
     private final Counter duplicateCommands;
     private final Counter duplicateOrders;
+    private final Counter rejectedRows;
     private final MemoryMappedWalLogger wal;
 
-    private final ConcurrentLinkedDeque<TradingOrder> orderQueue = new ConcurrentLinkedDeque<>();
+    /**
+     * An order write, paired with the state it was enqueued for.
+     *
+     * <p>The queue used to hold the entity alone and the flush thread read its
+     * fields when it got round to them - thirty-four unsynchronised getters on
+     * an object the Disruptor writer thread mutates under {@code synchronized}.
+     * There is no happens-before between the two, so a flush that ran across a
+     * mutation could read half of it: observed in the field as an order carrying
+     * a modified {@code remaining_quantity} beside its original
+     * {@code quantity}, which the {@code ck_trading_order_fill_accounting} check
+     * refused - and one refused row used to stop all persistence permanently.
+     *
+     * <p>{@code view()} is {@code synchronized} on the same monitor as every
+     * mutator, so taking it at enqueue time, on the thread that just made the
+     * change, yields a consistent picture of one state. It also fixes the
+     * quieter half of the same problem: two enqueues of one order used to write
+     * whatever the object held at flush time, twice, rather than the two states
+     * they were enqueued for.
+     */
+    private record PendingOrder(TradingOrder entity, OrderView snapshot) { }
+
+    private final ConcurrentLinkedDeque<PendingOrder> orderQueue = new ConcurrentLinkedDeque<>();
     // Ids whose next write is an order's first, so that write can use DO NOTHING
     // and report a collision instead of upserting over a row that already
     // exists. Same queue as every other order write, deliberately: a separate
@@ -63,7 +87,7 @@ public class AsyncDbWriter {
     private final ConcurrentLinkedDeque<com.emporia.ordermanagement.model.OrderInputEvent> inputEventQueue = new ConcurrentLinkedDeque<>();
 
     // Pre-allocated reusable batch buffers per thread / flush iteration
-    private final TradingOrder[] orderBatchBuffer = new TradingOrder[BATCH_SIZE];
+    private final PendingOrder[] orderBatchBuffer = new PendingOrder[BATCH_SIZE];
     private final OrderEvent[] eventBatchBuffer = new OrderEvent[BATCH_SIZE];
     private final ProcessedCommand[] processedBatchBuffer = new ProcessedCommand[BATCH_SIZE];
     private final com.emporia.ordermanagement.model.OrderInputEvent[] inputEventBatchBuffer = new com.emporia.ordermanagement.model.OrderInputEvent[BATCH_SIZE];
@@ -98,10 +122,11 @@ public class AsyncDbWriter {
         io.micrometer.core.instrument.MeterRegistry registry = meters == null ? new SimpleMeterRegistry() : meters;
         this.duplicateCommands = registry.counter("emporia.oms.dedup.duplicate_reached_db");
         this.duplicateOrders = registry.counter("emporia.oms.dedup.duplicate_order_reached_db");
+        this.rejectedRows = registry.counter("emporia.oms.writer.rejected_rows");
     }
 
     public void enqueue(TradingOrder order) {
-        if (order != null) orderQueue.addLast(order);
+        if (order != null) orderQueue.addLast(new PendingOrder(order, order.view()));
     }
 
     /**
@@ -117,7 +142,7 @@ public class AsyncDbWriter {
     public void enqueueNew(TradingOrder order) {
         if (order == null) return;
         firstWriteIds.add(order.getId());
-        orderQueue.addLast(order);
+        orderQueue.addLast(new PendingOrder(order, order.view()));
     }
 
     public void enqueue(OrderEvent event) {
@@ -146,13 +171,78 @@ public class AsyncDbWriter {
         try {
             persistBatch(batch);
         } catch (RuntimeException failure) {
-            batch.restoreToQueues();
-            throw failure;
+            // The transaction has already rolled back, so nothing in this batch
+            // landed. Retrying it whole is what used to happen, and one row the
+            // database will never accept then blocked every write behind it -
+            // observed as 26,070 identical check-constraint failures and not one
+            // row persisted, while callers kept receiving 201. Rows are retried
+            // individually instead, so a bad one is isolated and named.
+            salvage(batch, failure);
         } finally {
             batch.clearBuffers();
         }
 
         reclaimWriteAheadLog();
+    }
+
+    /**
+     * Writes a failed batch one row at a time, dropping whichever rows the
+     * database refuses and keeping the rest.
+     *
+     * <p>Each row gets its own transaction, because the failed batch's
+     * transaction is already rolled back and PostgreSQL refuses further commands
+     * on an aborted one.
+     *
+     * <p>Dropping a row is not comfortable, and it is the lesser of the two
+     * failures available. The alternative - what this replaces - is that a row
+     * the database will never accept is retried every ten milliseconds forever
+     * while every write behind it waits, so the service keeps answering 201 and
+     * persists nothing at all. A drop costs one row and says so; the retry loop
+     * costs all of them and says nothing.
+     *
+     * <p>{@code emporia.oms.writer.rejected_rows} counts them and must stay at
+     * zero. The log line carries enough to reconstruct the row by hand.
+     */
+    private void salvage(PendingFlushBatch batch, RuntimeException failure) {
+        log.error("Batch write failed; retrying its rows individually so one row the database "
+                + "refuses cannot hold the rest back", failure);
+        salvageEach(Arrays.asList(orderBatchBuffer).subList(0, batch.orderCount),
+                this::writeOrders,
+                row -> "order " + row.snapshot().id() + " status=" + row.snapshot().status()
+                        + " quantity=" + row.snapshot().quantity()
+                        + " traded=" + row.snapshot().tradedQuantity()
+                        + " remaining=" + row.snapshot().remainingQuantity());
+        salvageEach(Arrays.asList(eventBatchBuffer).subList(0, batch.eventCount),
+                this::writeEvents,
+                row -> "order event " + row.getId() + " type=" + row.getEventType());
+        salvageEach(Arrays.asList(processedBatchBuffer).subList(0, batch.processedCount),
+                this::writeProcessed,
+                row -> "processed command " + row.result().commandId() + " status=" + row.result().status());
+        salvageEach(Arrays.asList(inputEventBatchBuffer).subList(0, batch.inputEventCount),
+                this::writeInputEvents,
+                row -> "order input event " + row.getSequenceId());
+    }
+
+    private <T> void salvageEach(List<T> rows, java.util.function.Consumer<List<T>> write,
+                                 java.util.function.Function<T, String> describe) {
+        for (T row : rows) {
+            try {
+                inItsOwnTransaction(() -> write.accept(List.of(row)));
+            } catch (RuntimeException rowFailure) {
+                rejectedRows.increment();
+                log.error("Dropped a row the database refused: {}. It is not retried - a row it will "
+                                + "never accept would otherwise stop every write behind it.",
+                        describe.apply(row), rowFailure);
+            }
+        }
+    }
+
+    private void inItsOwnTransaction(Runnable write) {
+        if (transactionTemplate != null) {
+            transactionTemplate.executeWithoutResult(status -> write.run());
+        } else {
+            write.run();
+        }
     }
 
     private void persistBatch(PendingFlushBatch batch) {
@@ -205,12 +295,6 @@ public class AsyncDbWriter {
         return count;
     }
 
-    private <T> void restoreFront(ConcurrentLinkedDeque<T> queue, T[] buffer, int count) {
-        for (int index = count - 1; index >= 0; index--) {
-            queue.addFirst(buffer[index]);
-        }
-    }
-
     private void persist(PendingFlushBatch batch) {
         persistOrders(batch.orderCount);
         persistEvents(batch.eventCount);
@@ -219,18 +303,22 @@ public class AsyncDbWriter {
     }
 
     private void persistOrders(int count) {
-        if (count <= 0) return;
-        List<TradingOrder> batch = Arrays.asList(orderBatchBuffer).subList(0, count);
+        if (count > 0) writeOrders(Arrays.asList(orderBatchBuffer).subList(0, count));
+    }
+
+    private void writeOrders(List<PendingOrder> batch) {
         if (jdbcTemplate != null) {
             flushOrdersJdbc(batch);
         } else {
-            orders.saveAll(batch);
+            orders.saveAll(batch.stream().map(PendingOrder::entity).toList());
         }
     }
 
     private void persistEvents(int count) {
-        if (count <= 0) return;
-        List<OrderEvent> batch = Arrays.asList(eventBatchBuffer).subList(0, count);
+        if (count > 0) writeEvents(Arrays.asList(eventBatchBuffer).subList(0, count));
+    }
+
+    private void writeEvents(List<OrderEvent> batch) {
         if (jdbcTemplate != null) {
             flushEventsJdbc(batch);
         } else {
@@ -239,8 +327,10 @@ public class AsyncDbWriter {
     }
 
     private void persistProcessed(int count) {
-        if (count <= 0) return;
-        List<ProcessedCommand> batch = Arrays.asList(processedBatchBuffer).subList(0, count);
+        if (count > 0) writeProcessed(Arrays.asList(processedBatchBuffer).subList(0, count));
+    }
+
+    private void writeProcessed(List<ProcessedCommand> batch) {
         if (jdbcTemplate != null) {
             flushProcessedJdbc(batch);
         } else {
@@ -267,6 +357,8 @@ public class AsyncDbWriter {
                 entity_version = EXCLUDED.entity_version,
                 order_status = EXCLUDED.order_status,
                 target_status = EXCLUDED.target_status,
+                quantity = EXCLUDED.quantity,
+                limit_price = EXCLUDED.limit_price,
                 remaining_quantity = EXCLUDED.remaining_quantity,
                 traded_quantity = EXCLUDED.traded_quantity,
                 average_trade_price = EXCLUDED.average_trade_price,
@@ -280,23 +372,24 @@ public class AsyncDbWriter {
      */
     private static final String ON_CONFLICT_NOTHING = "ON CONFLICT (id) DO NOTHING";
 
-    private void flushOrdersJdbc(List<TradingOrder> batch) {
+    private void flushOrdersJdbc(List<PendingOrder> batch) {
         if (firstWriteIds.isEmpty()) {
             upsertOrders(batch);
             return;
         }
-        List<TradingOrder> firstWrites = new ArrayList<>();
-        List<TradingOrder> updates = new ArrayList<>();
+        List<PendingOrder> firstWrites = new ArrayList<>();
+        List<PendingOrder> updates = new ArrayList<>();
         Set<UUID> claimed = new HashSet<>();
-        for (TradingOrder order : batch) {
+        for (PendingOrder pending : batch) {
             // Only an order's first appearance in this batch is its first write.
-            // A create and a modify inside one flush window are two entries
-            // pointing at the same object, and calling both inserts would report
-            // the second as a duplicate of the first.
-            if (firstWriteIds.contains(order.getId()) && claimed.add(order.getId())) {
-                firstWrites.add(order);
+            // A create and a modify inside one flush window are two entries for
+            // one order, and calling both inserts would report the second as a
+            // duplicate of the first.
+            UUID orderId = pending.snapshot().id();
+            if (firstWriteIds.contains(orderId) && claimed.add(orderId)) {
+                firstWrites.add(pending);
             } else {
-                updates.add(order);
+                updates.add(pending);
             }
         }
         // Inserts before upserts: an upsert running ahead of its own insert
@@ -310,54 +403,61 @@ public class AsyncDbWriter {
         firstWriteIds.removeAll(claimed);
     }
 
-    private void upsertOrders(List<TradingOrder> batch) {
+    private void upsertOrders(List<PendingOrder> batch) {
         jdbcTemplate.batchUpdate(INSERT_ORDER + ON_CONFLICT_UPDATE, batch, batch.size(), this::bindOrder);
     }
 
-    private void insertNewOrders(List<TradingOrder> batch) {
+    private void insertNewOrders(List<PendingOrder> batch) {
         int[][] affected = jdbcTemplate.batchUpdate(
                 INSERT_ORDER + ON_CONFLICT_NOTHING, batch, batch.size(), this::bindOrder);
         reportAbsorbedOrders(affected, batch);
     }
 
-    private void bindOrder(PreparedStatement ps, TradingOrder o) throws java.sql.SQLException {
-            ps.setObject(1, o.getId());
-            ps.setLong(2, o.getVersion() == null ? 0L : o.getVersion());
-            ps.setString(3, o.getUserSubject());
-            ps.setString(4, o.getDeskId());
-            ps.setLong(5, o.getListing() == null ? 0L : o.getListing().getId());
-            ps.setString(6, o.getListing() == null ? "" : o.getListing().getSymbol());
-            ps.setString(7, o.getListing() == null ? "" : o.getListing().getExchangeMic());
-            ps.setString(8, o.getListing() == null ? "" : o.getListing().getCurrency());
-            ps.setBigDecimal(9, o.getListing() == null ? null : o.getListing().getTickSize());
-            ps.setBigDecimal(10, o.getListing() == null ? null : o.getListing().getSizeIncrement());
-            // These seven are NOT NULL with no default. Omitting them made every
-            // insert of a new order fail; only the ON CONFLICT update path,
-            // which never touches them, appeared to work.
-            ps.setInt(11, o.getListing() == null ? 0 : o.getListing().getVersion());
-            ps.setString(12, o.getListing() == null ? "" : o.getListing().getName());
-            ps.setString(13, o.getListing() == null ? "" : o.getListing().getMarketSymbol());
-            ps.setString(14, o.getListing() == null ? "" : o.getListing().getExchangeName());
-            ps.setString(15, o.getListing() == null ? "" : o.getListing().getCountryCode());
-            ps.setBigDecimal(16, o.getListing() == null ? null : o.getListing().getReferencePrice());
-            ps.setBigDecimal(17, o.getListing() == null ? null : o.getListing().getPreviousClose());
-            ps.setString(18, o.getSide() == null ? null : o.getSide().name());
-            ps.setString(19, o.getType() == null ? null : o.getType().name());
-            ps.setBigDecimal(20, o.getQuantity());
-            ps.setBigDecimal(21, o.getLimitPrice());
-            ps.setBigDecimal(22, o.getRemainingQuantity());
-            ps.setBigDecimal(23, o.getTradedQuantity());
-            ps.setBigDecimal(24, o.getAverageTradePrice());
-            ps.setString(25, o.getStatus() == null ? null : o.getStatus().name());
-            ps.setString(26, o.getTargetStatus() == null ? null : o.getTargetStatus().name());
-            ps.setString(27, o.getDestination());
-            ps.setString(28, o.getOriginatorReference());
-            if (o.getParentOrderId() != null) ps.setObject(29, o.getParentOrderId()); else ps.setNull(29, Types.OTHER);
-            ps.setObject(30, o.getRootOrderId());
-            ps.setString(31, o.getExecutionParameters());
-            ps.setString(32, o.getErrorMessage());
-            ps.setTimestamp(33, o.getCreatedAt() == null ? null : Timestamp.from(o.getCreatedAt()));
-            ps.setTimestamp(34, o.getUpdatedAt() == null ? null : Timestamp.from(o.getUpdatedAt()));
+    /**
+     * Binds from the snapshot taken at enqueue time, never from the live entity.
+     * Reading the entity here would be a cross-thread read of an object the
+     * writer thread is still mutating - see {@link PendingOrder}.
+     */
+    private void bindOrder(PreparedStatement ps, PendingOrder pending) throws java.sql.SQLException {
+        OrderView o = pending.snapshot();
+        ListingSnapshot listing = o.listing();
+        ps.setObject(1, o.id());
+        ps.setLong(2, o.version());
+        ps.setString(3, o.ownerSubject());
+        ps.setString(4, o.deskId());
+        ps.setLong(5, listing == null ? 0L : listing.id());
+        ps.setString(6, listing == null ? "" : listing.symbol());
+        ps.setString(7, listing == null ? "" : listing.exchangeMic());
+        ps.setString(8, listing == null ? "" : listing.currency());
+        ps.setBigDecimal(9, listing == null ? null : listing.tickSize());
+        ps.setBigDecimal(10, listing == null ? null : listing.sizeIncrement());
+        // These seven are NOT NULL with no default. Omitting them made every
+        // insert of a new order fail; only the ON CONFLICT update path, which
+        // never touches them, appeared to work.
+        ps.setInt(11, listing == null ? 0 : listing.version());
+        ps.setString(12, listing == null ? "" : listing.name());
+        ps.setString(13, listing == null ? "" : listing.marketSymbol());
+        ps.setString(14, listing == null ? "" : listing.exchangeName());
+        ps.setString(15, listing == null ? "" : listing.countryCode());
+        ps.setBigDecimal(16, listing == null ? null : listing.referencePrice());
+        ps.setBigDecimal(17, listing == null ? null : listing.previousClose());
+        ps.setString(18, o.side() == null ? null : o.side().name());
+        ps.setString(19, o.type() == null ? null : o.type().name());
+        ps.setBigDecimal(20, o.quantity());
+        ps.setBigDecimal(21, o.limitPrice());
+        ps.setBigDecimal(22, o.remainingQuantity());
+        ps.setBigDecimal(23, o.tradedQuantity());
+        ps.setBigDecimal(24, o.averageTradePrice());
+        ps.setString(25, o.status() == null ? null : o.status().name());
+        ps.setString(26, o.targetStatus() == null ? null : o.targetStatus().name());
+        ps.setString(27, o.destination());
+        ps.setString(28, o.originatorReference());
+        if (o.parentOrderId() != null) ps.setObject(29, o.parentOrderId()); else ps.setNull(29, Types.OTHER);
+        ps.setObject(30, o.rootOrderId());
+        ps.setString(31, o.executionParameters());
+        ps.setString(32, o.errorMessage());
+        ps.setTimestamp(33, o.createdAt() == null ? null : Timestamp.from(o.createdAt()));
+        ps.setTimestamp(34, o.updatedAt() == null ? null : Timestamp.from(o.updatedAt()));
     }
 
     private void flushEventsJdbc(List<OrderEvent> batch) {
@@ -439,14 +539,14 @@ public class AsyncDbWriter {
      * <p>This counter should read zero forever. Anything above zero is the
      * number of orders that got through, not a warning about one.
      */
-    private void reportAbsorbedOrders(int[][] affected, List<TradingOrder> batch) {
+    private void reportAbsorbedOrders(int[][] affected, List<PendingOrder> batch) {
         forEachAbsorbed(affected, batch.size(), index -> {
-            TradingOrder duplicate = batch.get(index);
+            OrderView duplicate = batch.get(index).snapshot();
             duplicateOrders.increment();
             log.error("Duplicate order reached the database: order_id={} status={}. "
                             + "The deduplication layer reported an id as new that already exists; "
                             + "the existing row was left untouched.",
-                    duplicate.getId(), duplicate.getStatus());
+                    duplicate.id(), duplicate.status());
         });
     }
 
@@ -467,8 +567,10 @@ public class AsyncDbWriter {
     }
 
     private void persistInputEvents(int count) {
-        if (count <= 0) return;
-        List<com.emporia.ordermanagement.model.OrderInputEvent> batch = Arrays.asList(inputEventBatchBuffer).subList(0, count);
+        if (count > 0) writeInputEvents(Arrays.asList(inputEventBatchBuffer).subList(0, count));
+    }
+
+    private void writeInputEvents(List<com.emporia.ordermanagement.model.OrderInputEvent> batch) {
         if (jdbcTemplate != null) {
             flushInputEventsJdbc(batch);
         } else if (inputEvents != null) {
@@ -498,7 +600,6 @@ public class AsyncDbWriter {
         private final int eventCount;
         private final int processedCount;
         private final int inputEventCount;
-        private boolean restored;
 
         private PendingFlushBatch(int orderCount, int eventCount, int processedCount,
                                   int inputEventCount) {
@@ -513,15 +614,6 @@ public class AsyncDbWriter {
                     && eventCount == 0
                     && processedCount == 0
                     && inputEventCount == 0;
-        }
-
-        private void restoreToQueues() {
-            if (restored) return;
-            restoreFront(inputEventQueue, inputEventBatchBuffer, inputEventCount);
-            restoreFront(processedQueue, processedBatchBuffer, processedCount);
-            restoreFront(eventQueue, eventBatchBuffer, eventCount);
-            restoreFront(orderQueue, orderBatchBuffer, orderCount);
-            restored = true;
         }
 
         private void clearBuffers() {
