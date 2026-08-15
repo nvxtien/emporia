@@ -109,6 +109,68 @@ retail.
 Verified at 120/s through the gateway after the change: 5,344 accepted, **0%**
 business rejections, versus ~39% 429s before.
 
+## Order path capacity: the knee is between 200 and 250 orders/sec
+
+- **Where**: `scripts/perf/order-path-capacity.sh`, measured 2026-08-16 after
+  Kafka removal, the execution-service merge and the branch-A decision
+
+Through the gateway, full edge path, 60 s per rate, benchmark identity promoted
+to the institutional tier so the rate limiter is in the path but not the
+ceiling:
+
+| offered | position | p50 | p95 | p99 |
+|---:|---|---:|---:|---:|
+| 120/s | first | 3.56 ms | 9.37 ms | 47.51 ms |
+| 150/s | second | 3.43 ms | 8.31 ms | 28.52 ms |
+| 200/s | **first** | 3.24 ms | 5.51 ms | **15.62 ms** |
+| 250/s | second | 5.00 ms | 54.24 ms | **148.24 ms** |
+| 250/s | **first** | 4.23 ms | 29.56 ms | **123.95 ms** |
+| 200/s | second | 4.30 ms | 20.32 ms | **52.41 ms** |
+
+Every rate was accepted in full - 54,000 orders across the 200/250 runs, 0%
+business rejections, 0% infrastructure failures, and all three duplicate
+counters still at zero.
+
+**250/s degrades in both positions**, so that is the workload and not an
+artifact of ordering. 200/s stays comfortable even from the unfavourable
+position. The knee is between them; the ceiling has not been found.
+
+**Order within a run matters, and it is not JIT warm-up.** Running the pair
+forwards and backwards was meant to cancel warm-up and instead ruled it out:
+whichever rate ran *second* was slower, both times. Warm-up would make the
+second one faster. The likelier explanation is accumulated state - the first
+rate leaves 12,000-15,000 orders resting in the exchange-core book and as many
+rows behind them, so the second runs against a deeper book. One sample per
+configuration, so this is the better explanation rather than a demonstrated one.
+
+**p99 is ring queue wait, not processing cost.**
+
+| run | mean queue wait | max |
+|---|---:|---:|
+| 200 then 250 | 0.229 ms | 64.9 ms |
+| 250 then 200 | 0.280 ms | 150.3 ms |
+
+The mean is near zero - the single writer keeps up. The max tracks p99 closely
+(150.3 against 148.24, 64.9 against 52.41), so the tail is the writer stalling
+and everything queued behind it waiting, exactly the multiplication described
+above. What causes the stalls is not established; exchange-core's synchronous
+per-operation checkpoint at a 60 s interval is the standing suspect, and is the
+same one recorded against the unexplained 890 ms blip at 40/s.
+
+**There is no latency requirement anywhere in this project** - no SLO, no
+budget, no alert threshold on latency; the only alerts are the gateway's rate
+limit and circuit breaker. So these numbers describe the system without saying
+whether it is fast enough, and "fast enough" has no answer here yet. Note also
+that the figures are for the REST path through gateway authentication, which is
+what quadrants (1) and (2) use; FIX order entry does not repeat that per
+message and should not be predicted from them.
+
+**A metadata field was wrong until now.** The script recorded
+`Exchange-core journaling: false` by defaulting an unset environment variable to
+`false`, while the service log said `journaling=true`. Every earlier run was
+labelled unjournalled while journalling. Corrected to default to `true`, matching
+`application.yml`; runs recorded before 2026-08-16 carry the wrong label.
+
 ## The gateway's order bulkhead is a concurrency limit, and it defaulted to 25
 
 - **Where**: `gateway/src/main/resources/application.yml`,
