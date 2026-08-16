@@ -23,6 +23,25 @@
         <dependency><groupId>com.emporia</groupId><artifactId>emporia-ha-core</artifactId><version>${project.version}</version></dependency>
         <dependency><groupId>com.emporia</groupId><artifactId>emporia-algorithmic-strategies</artifactId><version>${project.version}</version></dependency>
         <dependency><groupId>com.emporia</groupId><artifactId>emporia-journal</artifactId><version>${project.version}</version></dependency>
+        <!--
+            JMH, test scope. The matching engine has never been measured: every
+            throughput number this project has is the HTTP path wrapped around
+            it, so "is exchange-core efficient" has had no evidence either way.
+            The benchmark class is named *Benchmark, which surefire's include
+            patterns do not match, so it never runs during mvn test.
+        -->
+        <dependency>
+            <groupId>org.openjdk.jmh</groupId>
+            <artifactId>jmh-core</artifactId>
+            <version>1.37</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.openjdk.jmh</groupId>
+            <artifactId>jmh-generator-annprocess</artifactId>
+            <version>1.37</version>
+            <scope>test</scope>
+        </dependency>
         <!-- OMS existing dependencies -->
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-data-jpa</artifactId></dependency>
@@ -102,6 +121,35 @@
                         </path>
                     </annotationProcessorPaths>
                 </configuration>
+                <executions>
+                    <execution>
+                        <!--
+                            Test sources need JMH's processor as well as Lombok.
+                            Declaring annotationProcessorPaths at all replaces
+                            classpath discovery entirely, and JDK 23 onwards
+                            disables that discovery by default anyway - so a JMH
+                            benchmark compiles cleanly and then fails at run time
+                            with "Unable to find the resource /META-INF/BenchmarkList",
+                            which names neither cause.
+                        -->
+                        <id>default-testCompile</id>
+                        <goals><goal>testCompile</goal></goals>
+                        <configuration>
+                            <annotationProcessorPaths>
+                                <path>
+                                    <groupId>org.projectlombok</groupId>
+                                    <artifactId>lombok</artifactId>
+                                    <version>${lombok.version}</version>
+                                </path>
+                                <path>
+                                    <groupId>org.openjdk.jmh</groupId>
+                                    <artifactId>jmh-generator-annprocess</artifactId>
+                                    <version>1.37</version>
+                                </path>
+                            </annotationProcessorPaths>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>
@@ -227,6 +275,8 @@
                                 <testExclude>**/execution/ExchangeCoreLifecycleRebuilderTest.java</testExclude>
                                 <testExclude>**/execution/ReconciliationDesyncDetectionTest.java</testExclude>
                                 <testExclude>**/execution/pool/OrderCommandObjectPoolTest.java</testExclude>
+                                <!-- Drives exchange-core directly, so it cannot compile without it. -->
+                                <testExclude>**/execution/benchmark/MatchingEngineBenchmark.java</testExclude>
                             </testExcludes>
                         </configuration>
                     </plugin>
