@@ -589,6 +589,48 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     }
 
     /**
+     * Answers {@link ExecutionVenueGateway#openOrders} by doing the identifier
+     * translation the caller must not have to know about.
+     *
+     * <p>The venue's report API is per client, so the expected orders are
+     * grouped by the uid they were submitted under, and each client's resting
+     * ids are matched back against the orders that produced them.
+     * {@link #coreOrderId} is one-way - a hash of the order UUID - so the
+     * reverse map is built from the orders that were asked about, and anything
+     * resting outside it has no order-management identity to report. Those come
+     * back described in the venue's terms.
+     */
+    @Override
+    public CompletableFuture<VenueOpenOrders> openOrders(java.util.List<OrderView> expected) {
+        Map<Long, java.util.List<OrderView>> byClient = expected.stream()
+                .collect(java.util.stream.Collectors.groupingBy(ExchangeCoreExecutionVenueGateway::clientId));
+
+        Set<UUID> known = ConcurrentHashMap.newKeySet();
+        java.util.List<String> unknown = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+
+        CompletableFuture<?>[] perClient = byClient.entrySet().stream()
+                .map(entry -> {
+                    Map<Long, UUID> byCoreId = entry.getValue().stream().collect(
+                            java.util.stream.Collectors.toMap(
+                                    ExchangeCoreExecutionVenueGateway::coreOrderId, OrderView::id, (a, b) -> a));
+                    return venue.openOrderIds(entry.getKey()).thenAccept(resting -> {
+                        for (Long coreId : resting) {
+                            UUID orderId = byCoreId.get(coreId);
+                            if (orderId != null) {
+                                known.add(orderId);
+                            } else {
+                                unknown.add("core-order-" + coreId + " (client " + entry.getKey() + ")");
+                            }
+                        }
+                    });
+                })
+                .toArray(CompletableFuture[]::new);
+
+        return CompletableFuture.allOf(perClient)
+                .thenApply(ignored -> VenueOpenOrders.of(known, java.util.List.copyOf(unknown)));
+    }
+
+    /**
      * Snapshots engine state on a timer rather than per order.
      *
      * <p>The journal alone is enough to recover, but replay time grows without

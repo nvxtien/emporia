@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -101,6 +102,11 @@ class RoutingExecutionVenueGateway implements ExecutionVenueGateway {
     @Override
     public void recover(OrderView order) {
         configured.recover(order);
+    }
+
+    @Override
+    public CompletableFuture<VenueOpenOrders> openOrders(List<OrderView> expected) {
+        return configured.openOrders(expected);
     }
 
     private static String normalise(String mode) {

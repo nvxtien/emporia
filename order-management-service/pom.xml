@@ -300,13 +300,11 @@
                             <excludes>
                                 <exclude>**/execution/ExchangeCoreExecutionVenueGateway.java</exclude>
                                 <exclude>**/execution/ExchangeCoreLifecycleRebuilder.java</exclude>
-                                <exclude>**/execution/ReconciliationEndpoint.java</exclude>
                                 <exclude>**/execution/pool/OrderCommandObjectPool.java</exclude>
                             </excludes>
                             <testExcludes>
                                 <testExclude>**/execution/ExchangeCoreExecutionVenueGatewayTest.java</testExclude>
                                 <testExclude>**/execution/ExchangeCoreLifecycleRebuilderTest.java</testExclude>
-                                <testExclude>**/execution/ReconciliationDesyncDetectionTest.java</testExclude>
                                 <testExclude>**/execution/pool/OrderCommandObjectPoolTest.java</testExclude>
                                 <!-- Drives exchange-core directly, so it cannot compile without it. -->
                                 <testExclude>**/execution/benchmark/MatchingEngineBenchmark.java</testExclude>

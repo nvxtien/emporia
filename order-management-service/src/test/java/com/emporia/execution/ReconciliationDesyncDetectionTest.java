@@ -16,86 +16,90 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.*;
 
+/**
+ * The endpoint's own job is comparing two sets, so these tests speak the
+ * venue-agnostic seam and compile into both artifacts. Translating an
+ * order-management id into a venue's own identifier scheme is the gateway's
+ * job and is tested with the gateway.
+ */
 class ReconciliationDesyncDetectionTest {
 
     @Test
     void detectsDeliberatelyDesyncedMissingOrdersOnVenue() {
-        // Step 1: Create a live order view in OMS
         OrderView liveOrder = createOrder(OrderStatus.LIVE);
+        ExecutionVenueGateway gateway = gatewayReturning(VenueOpenOrders.of(Set.of(), List.of()));
 
-        TradingDataClient tradingDataClient = mock(TradingDataClient.class);
-        ExecutionRecoveryView recoveryView = new ExecutionRecoveryView(List.of(liveOrder), List.of());
-        when(tradingDataClient.recoverable()).thenReturn(recoveryView);
+        ReconciliationEndpoint.Report report =
+                new ReconciliationEndpoint(tradingDataWith(liveOrder), gateway).reconcile();
 
-        ExchangeCoreExecutionVenueGateway venueGateway = mock(ExchangeCoreExecutionVenueGateway.class);
-        long clientId = ExchangeCoreExecutionVenueGateway.clientId(liveOrder);
-
-        // Step 2: Simulate venue state where venue does NOT have the order (empty set)
-        when(venueGateway.openOrderIds(clientId)).thenReturn(CompletableFuture.completedFuture(Set.of()));
-
-        ReconciliationEndpoint endpoint = new ReconciliationEndpoint(tradingDataClient, venueGateway);
-
-        // Step 3: Run reconciliation audit
-        ReconciliationEndpoint.Report report = endpoint.reconcile();
-
-        // Step 4: Verify that reconciliation endpoint detects the deliberate mismatch
+        assertTrue(report.supported());
         assertEquals(1, report.ordersChecked());
         assertEquals(1, report.missingCount());
-        assertFalse(report.missingOrders().isEmpty(), "Reconciliation must detect missing desynced order!");
         assertEquals(liveOrder.id() + " (LIVE)", report.missingOrders().get(0));
     }
 
     @Test
     void detectsGhostOrdersOnVenueThatDoNotExistInOms() {
         OrderView liveOrder = createOrder(OrderStatus.LIVE);
+        ExecutionVenueGateway gateway = gatewayReturning(
+                VenueOpenOrders.of(Set.of(liveOrder.id()), List.of("core-order-999888777 (client 42)")));
 
-        TradingDataClient tradingDataClient = mock(TradingDataClient.class);
-        ExecutionRecoveryView recoveryView = new ExecutionRecoveryView(List.of(liveOrder), List.of());
-        when(tradingDataClient.recoverable()).thenReturn(recoveryView);
+        ReconciliationEndpoint.Report report =
+                new ReconciliationEndpoint(tradingDataWith(liveOrder), gateway).reconcile();
 
-        ExchangeCoreExecutionVenueGateway venueGateway = mock(ExchangeCoreExecutionVenueGateway.class);
-        long clientId = ExchangeCoreExecutionVenueGateway.clientId(liveOrder);
-        long expectedCoreId = ExchangeCoreExecutionVenueGateway.coreOrderId(liveOrder);
-        long ghostCoreId = 999888777L;
-
-        // Venue has expected order AND an extra ghost order
-        when(venueGateway.openOrderIds(clientId)).thenReturn(CompletableFuture.completedFuture(Set.of(expectedCoreId, ghostCoreId)));
-
-        ReconciliationEndpoint endpoint = new ReconciliationEndpoint(tradingDataClient, venueGateway);
-
-        ReconciliationEndpoint.Report report = endpoint.reconcile();
-
-        assertEquals(1, report.ordersChecked());
         assertEquals(0, report.missingCount());
         assertEquals(1, report.ghostCount(), "Reverse reconciliation must catch ghost orders on venue!");
-        assertEquals("ghost-core-order-" + ghostCoreId, report.ghostOrders().get(0));
+        assertEquals("core-order-999888777 (client 42)", report.ghostOrders().get(0));
     }
 
     @Test
     void reportsZeroMissingOrdersWhenVenueAndOmsMatch() {
         OrderView liveOrder = createOrder(OrderStatus.LIVE);
+        ExecutionVenueGateway gateway = gatewayReturning(VenueOpenOrders.of(Set.of(liveOrder.id()), List.of()));
 
-        TradingDataClient tradingDataClient = mock(TradingDataClient.class);
-        ExecutionRecoveryView recoveryView = new ExecutionRecoveryView(List.of(liveOrder), List.of());
-        when(tradingDataClient.recoverable()).thenReturn(recoveryView);
-
-        ExchangeCoreExecutionVenueGateway venueGateway = mock(ExchangeCoreExecutionVenueGateway.class);
-        long clientId = ExchangeCoreExecutionVenueGateway.clientId(liveOrder);
-        long coreOrderId = ExchangeCoreExecutionVenueGateway.coreOrderId(liveOrder);
-
-        // Simulate venue state where venue HAS the expected order ID
-        when(venueGateway.openOrderIds(clientId)).thenReturn(CompletableFuture.completedFuture(Set.of(coreOrderId)));
-
-        ReconciliationEndpoint endpoint = new ReconciliationEndpoint(tradingDataClient, venueGateway);
-
-        ReconciliationEndpoint.Report report = endpoint.reconcile();
+        ReconciliationEndpoint.Report report =
+                new ReconciliationEndpoint(tradingDataWith(liveOrder), gateway).reconcile();
 
         assertEquals(1, report.ordersChecked());
         assertEquals(0, report.missingCount());
         assertEquals(0, report.ghostCount());
         assertTrue(report.missingOrders().isEmpty());
+    }
+
+    /**
+     * The failure this guards is the loudest one available: a venue that cannot
+     * answer must not have its silence read as "every live order is missing".
+     * That is why {@code supported} is a field rather than an empty answer.
+     */
+    @Test
+    void aVenueThatCannotAnswerIsNotReportedAsHavingLostEveryOrder() {
+        OrderView liveOrder = createOrder(OrderStatus.LIVE);
+        ExecutionVenueGateway gateway = gatewayReturning(VenueOpenOrders.unsupported());
+
+        ReconciliationEndpoint.Report report =
+                new ReconciliationEndpoint(tradingDataWith(liveOrder), gateway).reconcile();
+
+        assertFalse(report.supported(), "an unanswerable report must say so");
+        assertEquals(1, report.ordersChecked());
+        assertEquals(0, report.missingCount(), "silence is not evidence of loss");
+        assertEquals(0, report.ghostCount());
+    }
+
+    private static ExecutionVenueGateway gatewayReturning(VenueOpenOrders answer) {
+        ExecutionVenueGateway gateway = mock(ExecutionVenueGateway.class);
+        when(gateway.venueMode()).thenReturn("test-venue");
+        when(gateway.openOrders(anyList())).thenReturn(CompletableFuture.completedFuture(answer));
+        return gateway;
+    }
+
+    private static TradingDataClient tradingDataWith(OrderView... orders) {
+        TradingDataClient tradingDataClient = mock(TradingDataClient.class);
+        when(tradingDataClient.recoverable())
+                .thenReturn(new ExecutionRecoveryView(List.of(orders), List.of()));
+        return tradingDataClient;
     }
 
     private static OrderView createOrder(OrderStatus status) {

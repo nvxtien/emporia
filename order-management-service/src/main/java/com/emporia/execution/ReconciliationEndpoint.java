@@ -4,50 +4,52 @@ import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderView;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.actuate.endpoint.annotation.ReadOperation;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 /**
- * Order-level reconciliation between order-management's record of live
- * orders and the exchange-core matching engine's own resting-order index.
+ * Order-level reconciliation between order-management's record of live orders
+ * and whatever the configured venue says it is actually holding.
  *
- * <p>Detects one specific class of drift: an order order-management believes
- * is LIVE or PARTIALLY_FILLED that the venue has no record of. That is the
- * same condition that otherwise only surfaces as "unknown lifecycle order" on
- * the next command sent for that order (see {@link ExchangeCoreLifecycleRebuilder})
- * - this endpoint finds it by inspection instead of waiting for that command
- * to fail.
+ * <p>Two directions, both from one answer:
+ * <ul>
+ *   <li><b>Missing</b> - order-management believes an order is live and the
+ *       venue has no record of it. Otherwise this surfaces only when the next
+ *       command for that order fails.</li>
+ *   <li><b>Ghost</b> - the venue is holding something order-management did not
+ *       ask about, and has no identity for.</li>
+ * </ul>
  *
- * <p>One-directional by design: it checks every order-management order
- * against the venue, not every venue order against order-management. The
- * reverse direction would need to enumerate every symbol's whole resting
- * book, which the venue's per-client report API does not offer cheaply, and
- * no code path in this system creates a venue order without first writing an
- * order-management row - so this direction covers the drift that is
- * actually reachable.
+ * <h2>Why this is venue-agnostic now, and why that mattered</h2>
+ * <p>This used to take {@code ExchangeCoreExecutionVenueGateway} as a
+ * constructor argument and do the identifier translation itself. It imported
+ * nothing from {@code exchange.core2} - the coupling was the type - but that was
+ * enough to have it compiled out of the agency artifact entirely.
  *
- * <p>Conditional on the same property as the gateway it needs. Without it this
- * endpoint asked for a bean that only exists in exchange-core mode, so the
- * application could not start on its own default of {@code simulated} - a
- * failure nothing had ever hit, because every launch script in the repository
- * passes {@code EXECUTION_VENUE_MODE=exchange-core} and so never took the
- * default path.
+ * <p>Which was exactly backwards. The agency artifact routes every order to
+ * somebody else's venue and holds no position of its own, so **its entire view
+ * of the world is derived from another party's records**. It is the build that
+ * most needs to check them, and it was the one shipping without any means to.
+ * Three of the trading systems surveyed - NautilusTrader, barter-rs and
+ * QuantConnect Lean - each got this wrong in their own way, and the shape of the
+ * mistake was the same every time: the reconciliation that existed did not cover
+ * the thing the system could not otherwise know.
+ *
+ * <p>So the translation moved behind {@link ExecutionVenueGateway#openOrders},
+ * where the venue's identifier scheme belongs, and this endpoint does the part
+ * that is the same for every venue: compare two sets.
  */
 @Component
-@ConditionalOnProperty(name = "emporia.execution.venue-mode", havingValue = "exchange-core")
 @Endpoint(id = "reconciliation")
 class ReconciliationEndpoint {
 
     private final TradingDataClient tradingData;
-    private final ExchangeCoreExecutionVenueGateway gateway;
+    private final ExecutionVenueGateway gateway;
 
-    ReconciliationEndpoint(TradingDataClient tradingData, ExchangeCoreExecutionVenueGateway gateway) {
+    ReconciliationEndpoint(TradingDataClient tradingData, ExecutionVenueGateway gateway) {
         this.tradingData = tradingData;
         this.gateway = gateway;
     }
@@ -58,37 +60,25 @@ class ReconciliationEndpoint {
                 .filter(order -> !isTerminal(order.status()))
                 .toList();
 
-        Map<Long, List<OrderView>> byClient = liveOrders.stream()
-                .collect(Collectors.groupingBy(ExchangeCoreExecutionVenueGateway::clientId));
-
-        List<String> missing = new ArrayList<>();
-        List<String> ghostOrders = new ArrayList<>();
-
-        for (Map.Entry<Long, List<OrderView>> entry : byClient.entrySet()) {
-            Long clientId = entry.getKey();
-            Set<Long> restingOnVenue = gateway.openOrderIds(clientId).join();
-            
-            // Direction 1: OMS -> Venue check
-            Set<Long> expectedCoreIds = entry.getValue().stream()
-                    .map(ExchangeCoreExecutionVenueGateway::coreOrderId)
-                    .collect(Collectors.toSet());
-
-            for (OrderView order : entry.getValue()) {
-                long expected = ExchangeCoreExecutionVenueGateway.coreOrderId(order);
-                if (!restingOnVenue.contains(expected)) {
-                    missing.add(order.id() + " (" + order.status() + ")");
-                }
-            }
-
-            // Direction 2: Reverse Venue -> OMS check (Ghost Order Detection)
-            for (Long restingCoreId : restingOnVenue) {
-                if (!expectedCoreIds.contains(restingCoreId)) {
-                    ghostOrders.add("ghost-core-order-" + restingCoreId);
-                }
-            }
+        VenueOpenOrders venueOrders = gateway.openOrders(liveOrders).join();
+        if (!venueOrders.supported()) {
+            // Not "nothing is missing". The venue was never asked, so the only
+            // honest answer is that this report cannot be produced - reporting
+            // zero here would read as a clean bill of health.
+            return Report.unavailable(gateway.venueMode(), liveOrders.size());
         }
 
-        return new Report(liveOrders.size(), byClient.size(), missing.size(), missing, ghostOrders.size(), ghostOrders);
+        Set<java.util.UUID> known = venueOrders.known();
+        List<String> missing = new ArrayList<>();
+        for (OrderView order : liveOrders) {
+            if (!known.contains(order.id())) {
+                missing.add(order.id() + " (" + order.status() + ")");
+            }
+        }
+        List<String> ghosts = venueOrders.unknownToCaller();
+
+        return new Report(true, gateway.venueMode(), liveOrders.size(),
+                missing.size(), missing, ghosts.size(), ghosts);
     }
 
     private static boolean isTerminal(OrderStatus status) {
@@ -98,12 +88,16 @@ class ReconciliationEndpoint {
     }
 
     public record Report(
+            boolean supported,
+            String venueMode,
             int ordersChecked,
-            int clientsChecked,
             int missingCount,
             List<String> missingOrders,
             int ghostCount,
             List<String> ghostOrders
     ) {
+        static Report unavailable(String venueMode, int ordersChecked) {
+            return new Report(false, venueMode, ordersChecked, 0, List.of(), 0, List.of());
+        }
     }
 }
