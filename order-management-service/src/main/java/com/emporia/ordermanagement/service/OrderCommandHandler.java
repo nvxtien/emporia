@@ -163,6 +163,13 @@ public class OrderCommandHandler {
                 && command.orderType() != null, 400, "Create command is incomplete");
         // Cache-backed duplicate order guard: avoids a DB SELECT on CREATE.
         require(!cache.existsById(command.orderId()), 409, "Order already exists");
+        // The live-order store is bounded by liveness, and this is what stops it
+        // growing without one. Refusing here is the same trade the ring makes
+        // when it fills: an admitted order this service cannot hold is worse
+        // than an order it declined to admit, because the client is told the
+        // first one succeeded.
+        require(!cache.atCapacity(), 429,
+                "The service is holding as many live orders as it can; retry once some complete");
         String deskId = desk(command);
         long priceScaled = checkOrderRiskScaled(command.orderType(), command.quantityScaled(),
                 command.listing().sizeIncrementScaled(), 0L,

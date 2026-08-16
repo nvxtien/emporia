@@ -100,13 +100,17 @@ public class OrderStateCache {
     // the path the index replaced.
     private final @Nullable RotatingDedupIndex dedup;
 
+    /** Live orders admitted before new ones are refused. See {@link #atCapacity()}. */
+    private final long liveOrderMax;
+
     public OrderStateCache(
             TradingOrderRepository orderRepository,
             ProcessedCommandRepository processedRepository,
             OrderMetrics metrics,
             @Nullable RotatingDedupIndex dedup,
-            @Value("${emporia.cache.order-max-size:100000}") long orderMaxSize,
+            @Value("${emporia.orders.live-max:1000000}") long liveOrderMax,
             @Value("${emporia.cache.processed-max-size:50000}") long processedMaxSize) {
+        this.liveOrderMax = liveOrderMax;
         this.orderRepository = orderRepository;
         this.processedRepository = processedRepository;
         this.dedup = dedup;
@@ -116,9 +120,19 @@ public class OrderStateCache {
         this.processedFromDb = metrics.registry().timer("emporia.oms.cache.lookup", "check", "processed", "source", "db");
         this.existsFromCache = metrics.registry().timer("emporia.oms.cache.lookup", "check", "exists", "source", "cache");
         this.existsFromDb = metrics.registry().timer("emporia.oms.cache.lookup", "check", "exists", "source", "db");
+        // No maximumSize and no expireAfterWrite: this is a live-order store, not
+        // a cache. Both of those evicted orders that were still live - the size
+        // bound silently (137,435 live orders were observed against a 100,000
+        // default) and the one-hour expiry on every order that rested longer
+        // than an hour. Each eviction turned a later lookup into a blocking
+        // database read on the single writer, and made any index over this map
+        // answer from whatever happened to survive.
+        //
+        // What bounds it now is liveness: put() removes an order when it
+        // reaches a terminal status, and liveOrderMax refuses new orders rather
+        // than dropping existing ones. Refusing is visible; evicting a live
+        // order is not.
         this.orders = Caffeine.newBuilder()
-                .maximumSize(orderMaxSize)
-                .expireAfterWrite(Duration.ofHours(1))
                 .recordStats()
                 .build();
         this.processed = Caffeine.newBuilder()
@@ -154,7 +168,9 @@ public class OrderStateCache {
             return cached.getDeskId().equals(deskId) ? Optional.of(cached) : Optional.empty();
         }
         Optional<TradingOrder> fromDb = orderRepository.findByIdAndDeskId(id, deskId);
-        fromDb.ifPresent(o -> orders.put(o.getId(), o));
+        // Only live orders are admitted: a terminal order loaded here is being
+        // read on an error path and must not take a slot in the live store.
+        fromDb.filter(o -> !isTerminal(o.getStatus())).ifPresent(o -> orders.put(o.getId(), o));
         return fromDb;
     }
 
@@ -198,8 +214,42 @@ public class OrderStateCache {
         // TradingOrder.recordRevision. Read-through population uses the cache
         // field directly and so does not reach this method.
         order.recordRevision();
-        orders.put(order.getId(), order);
+        if (isTerminal(order.getStatus())) {
+            // A finished order is not live, and this store holds live orders.
+            // Leaving it here is how the store filled with orders nothing would
+            // ever act on again. It stays answerable through the read-through
+            // fallback, which is what lets a cancel of a filled order say 409
+            // rather than 404.
+            orders.invalidate(order.getId());
+        } else {
+            orders.put(order.getId(), order);
+        }
+        // Remembered either way: the deduplication index is about identifiers
+        // ever seen, not about orders still live.
         if (dedup != null) dedup.remember(order.getId());
+    }
+
+    /** Orders currently live in memory. */
+    public long liveOrderCount() {
+        return orders.estimatedSize();
+    }
+
+    /**
+     * Whether the live-order store is full.
+     *
+     * <p>Refusing a new order is the correct answer here and evicting an
+     * existing one is not: an evicted live order is one this service can no
+     * longer see, answer for, or cancel, and nothing would say so. The ring
+     * already makes the same trade when it fills, and answers 429.
+     */
+    public boolean atCapacity() {
+        return liveOrderCount() >= liveOrderMax;
+    }
+
+    private static boolean isTerminal(com.emporia.events.TradingEvents.OrderStatus status) {
+        return status == com.emporia.events.TradingEvents.OrderStatus.FILLED
+                || status == com.emporia.events.TradingEvents.OrderStatus.CANCELLED
+                || status == com.emporia.events.TradingEvents.OrderStatus.REJECTED;
     }
 
     // ── ProcessedCommand ──────────────────────────────────────────────────────
