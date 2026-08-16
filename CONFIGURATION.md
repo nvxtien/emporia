@@ -410,21 +410,45 @@ what the log is genuinely good for. They do not survive the machine dying.
 The last row is the uncomfortable one, and it needs stating precisely because
 it is easy to get wrong in both directions.
 
-**Order reconciliation exists, in one direction.** The `reconciliation` actuator
-endpoint walks every order this service holds as LIVE or PARTIALLY_FILLED and
+**Order reconciliation walks both directions.** The `reconciliation` actuator
+endpoint takes every order this service holds as LIVE or PARTIALLY_FILLED and
 asks the venue whether it knows of it, so drift surfaces by inspection instead
-of as an "unknown lifecycle order" on the next command. Its javadoc explains why
-it does not walk the other way: enumerating every symbol's resting book is not
-something the venue's per-client report API offers cheaply, and "no code path in
-this system creates a venue order without first writing an order-management
-row".
+of as an "unknown lifecycle order" on the next command. It then walks back the
+other way, reporting orders resting at the venue that this service has no record
+of - `ReconciliationDesyncDetectionTest
+.detectsGhostOrdersOnVenueThatDoNotExistInOms` covers it.
 
-**That argument holds for code paths and not for durability failures**, which is
-exactly the gap above. `create` does write its row before dispatching - but the
-write is asynchronous, and if it never lands (the machine dies inside the 10 ms
-window, or a row the database refuses blocks the queue) the venue holds an order
-this service has no record of. Finding that needs the venue-to-service
-direction, and nothing walks it.
+*An earlier version of this section said nothing walked the venue-to-service
+direction, and gave the reason: enumerating every symbol's resting book is not
+something the venue's per-client report API offers cheaply. That reasoning was
+about enumerating by symbol; the endpoint sidesteps it by enumerating per client,
+using `ExchangeCoreVenue.openOrderIds(clientId)`. The text was not updated when
+that landed.*
+
+**What is still not covered is the client set.** The clients it asks about are
+derived from the orders this service holds:
+
+```java
+Map<Long, List<OrderView>> byClient = liveOrders.stream()
+        .collect(Collectors.groupingBy(...clientId));
+```
+
+So the venue is only queried for clients that already have a live order **here**.
+A client whose only live order is the lost one never appears, and their ghost is
+never found - which is exactly the durability failure above. `create` writes its
+row before dispatching, but the write is asynchronous; if it never lands because
+the machine died inside the 10 ms window, the venue holds an order this service
+has no record of, and if that was the client's only order, reconciliation cannot
+see it either.
+
+Closing it means sourcing the client set from something independent of live
+orders - the distinct owners in `trading_order` including terminal ones is
+enough, and needs no new service dependency.
+
+**The external-venue direction remains absent.** `FixExecutionVenueGateway` has
+no `openOrderIds` equivalent, so none of the above applies when Emporia routes
+out rather than internalises. It matters less there: the other venue keeps its
+own records, and an orphan is recoverable by asking them.
 
 **Position and balance reconciliation does not exist.**
 `emporia-reconciliation` has been deleted: its two services were never called
