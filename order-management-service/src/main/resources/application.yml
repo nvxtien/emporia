@@ -195,6 +195,37 @@ emporia.auth:
 # Leaving jurisdiction unset leaves the guard INACTIVE. That preserves every
 # deployment and development machine that predates it, and it buys no protection
 # at all - see CONFIGURATION.md.
+# Which listings Emporia is willing to quote a two-sided price on.
+#
+# The universe is where market-making risk is CHOSEN, so the three strategies
+# foreseen are three risk postures rather than three implementations:
+#
+#   manual            - a configured list. The only one implemented, and the one
+#                       to start from regardless: nobody runs market making for
+#                       the first time off a generated list.
+#   client-portfolio  - quote what clients actually trade. Safe for retail flow,
+#                       which is uninformed - that is why wholesalers pay for it
+#                       - and dangerous for institutional flow, which is not.
+#   liquidity         - quote where the reference market is deep and tight.
+#                       Needs a statistics accumulator that does not exist yet.
+#
+# This is a SLOW decision, re-evaluated per session and never per order. Quote
+# prices move in milliseconds; which instruments are quoted moves in days.
+#
+# Empty is a valid state and the default: quoting nothing is correct before
+# anyone has decided what to quote, and right for a deployment that only routes.
+# A malformed id refuses startup rather than silently shrinking the universe,
+# because Emporia would then stop quoting an instrument it was told to quote and
+# nothing would report it.
+emporia.quoting:
+  universe: ${EMPORIA_QUOTING_UNIVERSE:manual}
+  listings: ${EMPORIA_QUOTING_LISTINGS:}
+  # Layered over whichever strategy is active, including the generated ones that
+  # do not exist yet. It exists because the reasons to stop quoting one
+  # instrument - a suspension, news pending, a position that just lost money -
+  # arrive faster than any re-evaluation cycle and must take effect now.
+  excluded-listings: ${EMPORIA_QUOTING_EXCLUDED_LISTINGS:}
+
 emporia.compliance:
   jurisdiction: ${EMPORIA_COMPLIANCE_JURISDICTION:unspecified}
   internalisation-permitted: ${EMPORIA_COMPLIANCE_INTERNALISATION_PERMITTED:}
