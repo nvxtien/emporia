@@ -135,6 +135,25 @@ public class OrderCommandHandler {
         }
     }
 
+    /**
+     * Live children of an order, from memory when the live-order store holds
+     * every live order, and from the database until it does.
+     *
+     * <p>The fallback is not a nicety. An index over an incomplete store
+     * answers with the orders that happen to be in it, and a child missed here
+     * is a child left live after its parent was cancelled - silently.
+     */
+    private List<TradingOrder> liveChildrenOf(java.util.UUID parentId) {
+        return cache.liveChildrenOf(parentId)
+                .orElseGet(() -> orders.findByParentOrderIdAndStatusIn(parentId, CANCELLABLE));
+    }
+
+    /** Live orders on a desk, newest first, with the same fallback and for the same reason. */
+    private List<TradingOrder> liveOrdersOnDesk(String deskId) {
+        return cache.liveOrdersOnDesk(deskId)
+                .orElseGet(() -> orders.findByDeskIdAndStatusInOrderByCreatedAtDesc(deskId, CANCELLABLE));
+    }
+
     private static String commandTypeTag(OrderCommand command) {
         return command.commandType() == null ? "none"
                 : command.commandType().name().toLowerCase(Locale.ROOT);
@@ -240,7 +259,7 @@ public class OrderCommandHandler {
 
     private void requestChildCancellations(OrderCommand command, java.util.UUID parentId,
                                            List<OrderDomainEvent> domainEvents) {
-        for (TradingOrder child : orders.findByParentOrderIdAndStatusIn(parentId, CANCELLABLE)) {
+        for (TradingOrder child : liveChildrenOf(parentId)) {
             requestChildCancellations(command, child.getId(), domainEvents);
             if (child.getTargetStatus() == OrderStatus.CANCELLED) continue;
             child.requestCancel();
@@ -256,7 +275,7 @@ public class OrderCommandHandler {
 
     private ProcessingOutcome cancelAll(OrderCommand command) {
         List<OrderDomainEvent> domainEvents = new ArrayList<>();
-        for (TradingOrder order : orders.findByDeskIdAndStatusInOrderByCreatedAtDesc(desk(command), CANCELLABLE)) {
+        for (TradingOrder order : liveOrdersOnDesk(desk(command))) {
             if (order.getTargetStatus() == OrderStatus.CANCELLED) continue;
             order.requestCancel();
             cache.put(order);

@@ -150,6 +150,20 @@ public class ExecutionCommandHandler {
         if (order.getStatus() == OrderStatus.CANCELLED) metrics.orderCancelled();
     }
 
+    /**
+     * Whether an order still has live children, answered from the live-order
+     * store when it is complete and from the database until it is.
+     *
+     * <p>This runs on the execution dispatcher's threads rather than the single
+     * writer, so it never queued order intake behind it - but it is the same
+     * question the writer asks, and the same index answers it.
+     */
+    private boolean hasLiveChildren(java.util.UUID parentId) {
+        return !cache.liveChildrenOf(parentId)
+                .orElseGet(() -> orders.findByParentOrderIdAndStatusIn(parentId, ACTIVE))
+                .isEmpty();
+    }
+
     private void reject(TradingOrder order, ExecutionCommand command, List<OrderDomainEvent> result) {
         if (isTerminal(order)) return;
         order.reject(command.detail());
@@ -167,7 +181,7 @@ public class ExecutionCommandHandler {
         // The execution service sends an acknowledgement when its scheduler is
         // stopped; child venue acknowledgements then complete the parent.
         if (!"DMA".equalsIgnoreCase(order.getDestination())
-                && !orders.findByParentOrderIdAndStatusIn(order.getId(), ACTIVE).isEmpty()) {
+                && hasLiveChildren(order.getId())) {
             return;
         }
 
@@ -188,7 +202,7 @@ public class ExecutionCommandHandler {
             TradingOrder parent = cache.findByIdAndDeskId(currentId, command.deskId())
                     .orElseThrow(() -> new IllegalStateException("Parent order was not found on its desk"));
             if (parent.getTargetStatus() != OrderStatus.CANCELLED || isTerminal(parent)
-                    || !orders.findByParentOrderIdAndStatusIn(parent.getId(), ACTIVE).isEmpty()) {
+                    || hasLiveChildren(parent.getId())) {
                 return;
             }
             parent.confirmCancel();

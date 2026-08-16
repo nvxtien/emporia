@@ -13,8 +13,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -105,6 +109,21 @@ public class OrderStateCache {
 
     /** See {@link #isLiveSetComplete()}. Written once, by the startup load. */
     private volatile boolean liveSetComplete;
+
+    /**
+     * Live children by parent, and live orders by desk.
+     *
+     * <p>Both hold ids rather than orders, so the store above stays the single
+     * copy of any order's state. Both are maintained under the map's own bin
+     * lock via {@code compute}, because {@link #put} is called from the single
+     * writer <b>and</b> from the execution dispatcher's threads.
+     *
+     * <p>Neither is consulted unless {@link #isLiveSetComplete()} - an index
+     * over a partial store answers with what happens to be in it, which is the
+     * defect this whole store exists to remove.
+     */
+    private final Map<UUID, Set<UUID>> liveChildrenByParent = new ConcurrentHashMap<>();
+    private final Map<String, Set<UUID>> liveOrdersByDesk = new ConcurrentHashMap<>();
 
     public OrderStateCache(
             TradingOrderRepository orderRepository,
@@ -224,8 +243,10 @@ public class OrderStateCache {
             // fallback, which is what lets a cancel of a filled order say 409
             // rather than 404.
             orders.invalidate(order.getId());
+            unindex(order);
         } else {
             orders.put(order.getId(), order);
+            index(order);
         }
         // Remembered either way: the deduplication index is about identifiers
         // ever seen, not about orders still live.
@@ -261,7 +282,72 @@ public class OrderStateCache {
     void admitExisting(TradingOrder order) {
         if (!isTerminal(order.getStatus())) {
             orders.put(order.getId(), order);
+            index(order);
         }
+    }
+
+    private void index(TradingOrder order) {
+        UUID parentId = order.getParentOrderId();
+        if (parentId != null) {
+            liveChildrenByParent.compute(parentId, (key, ids) -> {
+                Set<UUID> set = ids == null ? ConcurrentHashMap.newKeySet() : ids;
+                set.add(order.getId());
+                return set;
+            });
+        }
+        String deskId = order.getDeskId();
+        if (deskId != null) {
+            liveOrdersByDesk.compute(deskId, (key, ids) -> {
+                Set<UUID> set = ids == null ? ConcurrentHashMap.newKeySet() : ids;
+                set.add(order.getId());
+                return set;
+            });
+        }
+    }
+
+    private void unindex(TradingOrder order) {
+        UUID parentId = order.getParentOrderId();
+        if (parentId != null) {
+            liveChildrenByParent.computeIfPresent(parentId, (key, ids) -> {
+                ids.remove(order.getId());
+                return ids.isEmpty() ? null : ids;
+            });
+        }
+        String deskId = order.getDeskId();
+        if (deskId != null) {
+            liveOrdersByDesk.computeIfPresent(deskId, (key, ids) -> {
+                ids.remove(order.getId());
+                return ids.isEmpty() ? null : ids;
+            });
+        }
+    }
+
+    /**
+     * Live children of {@code parentId}, or empty when this store cannot answer.
+     *
+     * <p>{@link Optional#empty()} means "ask the database", not "no children" -
+     * the two are indistinguishable to a caller that only gets a list, and
+     * confusing them would silently skip cancelling a parent's children.
+     */
+    public Optional<List<TradingOrder>> liveChildrenOf(UUID parentId) {
+        return resolve(liveChildrenByParent.get(parentId));
+    }
+
+    /** Live orders on {@code deskId}, newest first, or empty when this store cannot answer. */
+    public Optional<List<TradingOrder>> liveOrdersOnDesk(String deskId) {
+        return resolve(liveOrdersByDesk.get(deskId))
+                .map(found -> found.stream()
+                        .sorted(java.util.Comparator.comparing(TradingOrder::getCreatedAt).reversed())
+                        .toList());
+    }
+
+    private Optional<List<TradingOrder>> resolve(@Nullable Set<UUID> ids) {
+        if (!liveSetComplete) return Optional.empty();
+        if (ids == null) return Optional.of(List.of());
+        return Optional.of(ids.stream()
+                .map(orders::getIfPresent)
+                .filter(java.util.Objects::nonNull)
+                .toList());
     }
 
     /**

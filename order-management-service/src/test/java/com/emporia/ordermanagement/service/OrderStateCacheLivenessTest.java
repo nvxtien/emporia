@@ -11,10 +11,12 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.InstanceOfAssertFactories.LIST;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -87,6 +89,66 @@ class OrderStateCacheLivenessTest {
         assertThat(cache.liveOrderCount())
                 .as("the error path must not consume a live slot")
                 .isZero();
+    }
+
+    /**
+     * The index must say "ask the database" rather than "no children" while the
+     * store is incomplete. A caller handed an empty list cannot tell the two
+     * apart, and the difference is a child left live after its parent was
+     * cancelled.
+     */
+    @Test
+    void theIndexesRefuseToAnswerUntilTheLiveSetIsComplete() {
+        OrderStateCache cache = cacheHolding(100);
+        TradingOrder parent = liveOrder();
+        cache.put(parent);
+        cache.put(childOf(parent));
+
+        assertThat(cache.isLiveSetComplete()).isFalse();
+        assertThat(cache.liveChildrenOf(parent.getId()))
+                .as("an incomplete store must not answer a negative")
+                .isEmpty();
+        assertThat(cache.liveOrdersOnDesk("desk-a")).isEmpty();
+    }
+
+    @Test
+    void onceCompleteTheIndexesAnswerChildrenAndDeskFromMemory() {
+        OrderStateCache cache = cacheHolding(100);
+        TradingOrder parent = liveOrder();
+        TradingOrder child = childOf(parent);
+        cache.put(parent);
+        cache.put(child);
+        cache.markLiveSetComplete();
+
+        assertThat(cache.liveChildrenOf(parent.getId())).contains(List.of(child));
+        assertThat(cache.liveOrdersOnDesk("desk-a")).get().asInstanceOf(LIST).hasSize(2);
+        assertThat(cache.liveChildrenOf(UUID.randomUUID()))
+                .as("a parent with no children answers empty, not unknown")
+                .contains(List.of());
+    }
+
+    @Test
+    void aChildThatFinishesLeavesTheParentIndex() {
+        OrderStateCache cache = cacheHolding(100);
+        TradingOrder parent = liveOrder();
+        TradingOrder child = childOf(parent);
+        cache.put(parent);
+        cache.put(child);
+        cache.markLiveSetComplete();
+
+        child.cancel();
+        cache.put(child);
+
+        assertThat(cache.liveChildrenOf(parent.getId())).contains(List.of());
+        assertThat(cache.liveOrdersOnDesk("desk-a")).get().asInstanceOf(LIST).hasSize(1);
+    }
+
+    private static TradingOrder childOf(TradingOrder parent) {
+        UUID childId = UUID.randomUUID();
+        return new TradingOrder(
+                childId, "liveness-test-user", "desk-a", listing(), OrderSide.BUY, OrderType.LIMIT,
+                new BigDecimal("5"), new BigDecimal("100.00"), "DMA", "liveness-test",
+                parent.getId(), parent.getId(), "{}");
     }
 
     private static TradingOrder liveOrder() {
