@@ -83,7 +83,7 @@ class RoutingExecutionVenueGatewayTest {
     }
 
     /**
-     * The {@code -Dvn} artifact is built without the internalising gateway, so
+     * The agency artifact, the default build, has no internalising gateway, so
      * the list simply has one fewer element - no special case, which is why the
      * mode is declared by each gateway rather than looked up by bean name.
      */

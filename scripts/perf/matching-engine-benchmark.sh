@@ -35,8 +35,10 @@ mkdir -p "$(dirname "$OUT")"
 
 echo "==> building the test classpath"
 cp_file="$(mktemp)"
-mvn -o -q dependency:build-classpath -Dmdep.outputFile="$cp_file" -Dmdep.includeScope=test
-mvn -o -q test-compile
+# -Dmatching: the benchmark drives exchange-core directly, so the agency
+# default excludes it from compilation altogether.
+mvn -o -q -Dmatching dependency:build-classpath -Dmdep.outputFile="$cp_file" -Dmdep.includeScope=test
+mvn -o -q -Dmatching test-compile
 
 echo "==> running: warmup=$WARMUP iterations=$ITERATIONS time=$RUNTIME modes=$MODES"
 java -cp "target/classes:target/test-classes:$(cat "$cp_file")" \

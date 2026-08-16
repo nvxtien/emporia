@@ -26,7 +26,7 @@ interface ExecutionVenueGateway {
      * something has to say which is which.
      *
      * <p>Also why this is a declaration and not a registry lookup: the
-     * {@code -Dvn} artifact is built without the internalising gateway
+     * agency artifact, the default build, carries no internalising gateway
      * altogether, and a list that is simply missing an element needs no special
      * case.
      */

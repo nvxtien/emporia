@@ -48,7 +48,7 @@ mkdir -p "$log_dir"
 (
   cd "$repo_root/order-management-service" && \
   DB_USERNAME="${DB_USERNAME:-$(whoami)}" DB_PASSWORD="${DB_PASSWORD:-admin123}" \
-  exec mvn spring-boot:run
+  exec mvn -Dmatching spring-boot:run
 ) >"$log_dir/order-management-service.log" 2>&1 &
 echo "$!" >"$pid_file"
 echo "    launcher pid $(cat "$pid_file")"

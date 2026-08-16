@@ -11,7 +11,7 @@ class InternalisationPolicyTest {
     /**
      * Both branches are exercised from either build. Whether the gateway is on
      * the classpath is a property of how the jar was built, so a test that read
-     * the real classpath could only ever see one of them - and under -Dvn the
+     * the real classpath could only ever see one of them - and under the agency build the
      * artifact check would fire first and mask everything else here.
      */
     private static InternalisationPolicy policyWithGateway(boolean present) {
@@ -61,7 +61,7 @@ class InternalisationPolicyTest {
     }
 
     /**
-     * The -Dvn artifact contains neither exchange-core nor the gateway, so
+     * The agency artifact contains neither exchange-core nor the gateway, so
      * asking it to internalise has to say which build it is rather than raise a
      * ClassNotFoundException three frames inside Spring. An obscure failure
      * invites a workaround.
@@ -70,7 +70,7 @@ class InternalisationPolicyTest {
     void anArtifactWithoutTheGatewayRefusesAnInternalisingVenueMode() {
         assertThatThrownBy(() -> policyWithGateway(false).internalisationDecision("US", "true", "exchange-core"))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("-Dvn build")
+                .hasMessageContaining("agency build")
                 .hasMessageContaining("venue-mode=fix");
     }
 

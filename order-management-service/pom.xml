@@ -201,20 +201,53 @@
             </build>
         </profile>
         <!--
-            The VN artifact. Activated by property (-Dvn) rather than -Pvn on
-            purpose: activeByDefault is switched off the moment any other -P is
-            passed, so a `-P postgres-it` build would silently drop exchange-core
-            and produce something that looks like a normal jar and is not.
-            Property activation composes instead of competing.
+            The AGENCY artifact, and it is the DEFAULT. It routes every order to
+            an external venue and cannot match one internally, because the
+            matching engine is not in it. Its counterpart is the MATCHING
+            profile above, selected with -Dmatching.
 
-            `vn` is a FLAG, not a boolean: Maven activates on the property being
-            DEFINED, whatever its value, so -Dvn=false also selects this build.
-            Omit the flag for the standard artifact; do not write -Dvn=false.
-            Making it value-sensitive was considered and is worse - -Dvn=false
-            would then match neither profile, dropping exchange-core without
-            excluding the sources that import it, and the result reads as a
-            broken build rather than a wrong flag. The finalName below is the
-            safety net instead: a mistake produces a jar with -vn- in its name.
+            The two are products, not deployment options. Equities (listed
+            stock) is agency: Emporia is the customer of a venue and never the
+            counterparty of its own client. Crypto is matching, and B2C - the
+            client is matched against Emporia's own capital, never against
+            another client. See docs/FOUR_USE_CASES.md.
+
+            Why agency is the default, and not matching: forgetting a flag must
+            not hand you the artifact that can trade the firm's own capital.
+            InternalisationPolicy states the principle - "the safe answer is the
+            one you get by not thinking about it, and the unsafe answer has to
+            be written down where an auditor can see it" - and a matching
+            default contradicted it. The two mistakes are not symmetric:
+            building matching and deploying it as equities produces a jar that
+            CAN internalise, caught only if a jurisdiction was declared, so it
+            fails silently; building agency and running it as crypto fails at
+            startup with a sentence naming the build. Default to the loud one.
+
+            Why this used to be called `vn`: the axis was built for one
+            jurisdiction, listed securities in Vietnam having to trade through
+            the Exchange. The mechanism it produced - an artifact that cannot
+            match internally - turned out to BE the equities product. Vietnam is
+            one deployment of this artifact, not the reason for it. Jurisdiction
+            is now purely runtime configuration
+            (emporia.compliance.jurisdiction), which is where
+            InternalisationPolicy already reads it and always did.
+
+            Activated by property (!matching / -Dmatching) rather than
+            activeByDefault or -P: activeByDefault is switched off the moment
+            any other -P is passed, so a `-P postgres-it` build would silently
+            change which artifact you get. Property activation composes instead
+            of competing.
+
+            `matching` is a FLAG, not a boolean: Maven activates on the property
+            being DEFINED, whatever its value, so -Dmatching=false also selects
+            the matching build. Omit the flag for agency; do not write
+            -Dmatching=false. Making it value-sensitive was considered and is
+            worse - -Dmatching=false would then match neither profile, dropping
+            exchange-core without excluding the sources that import it, and the
+            result reads as a broken build rather than a wrong flag. The
+            finalName below is the safety net instead: the agency jar carries
+            -agency- in its name, so the one that cannot internalise is the one
+            you can identify.
 
             Why an artifact and not just configuration: InternalisationPolicy
             already refuses to start a deployment that may not internalise, and
@@ -226,9 +259,9 @@
             the artifact rather than by trusting a property.
         -->
         <profile>
-            <id>with-exchange-core</id>
+            <id>matching</id>
             <activation>
-                <property><name>!vn</name></property>
+                <property><name>matching</name></property>
             </activation>
             <dependencies>
                 <dependency>
@@ -246,12 +279,12 @@
         </profile>
 
         <profile>
-            <id>vn</id>
+            <id>agency</id>
             <activation>
-                <property><name>vn</name></property>
+                <property><name>!matching</name></property>
             </activation>
             <build>
-                <finalName>${project.artifactId}-vn-${project.version}</finalName>
+                <finalName>${project.artifactId}-agency-${project.version}</finalName>
                 <plugins>
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>

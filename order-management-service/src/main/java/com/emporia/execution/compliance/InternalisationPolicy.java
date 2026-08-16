@@ -54,7 +54,7 @@ public class InternalisationPolicy {
      */
     private static final Set<String> INTERNALISING_VENUE_MODES = Set.of("exchange-core");
 
-    /** Absent from the {@code -Dvn} artifact by construction. */
+    /** Absent from the agency artifact, which is the default build, by construction. */
     private static final String INTERNALISING_GATEWAY =
             "com.emporia.execution.ExchangeCoreExecutionVenueGateway";
 
@@ -112,7 +112,7 @@ public class InternalisationPolicy {
      * Turns "this jar was built without exchange-core" into a sentence rather
      * than a {@code ClassNotFoundException} three frames inside Spring.
      *
-     * <p>The {@code -Dvn} build exists so that "this deployment cannot match
+     * <p>The agency build exists so that "this deployment cannot match
      * client orders internally" can be checked by hashing an artifact instead of
      * trusting a property, which is what an auditor can actually verify after
      * the fact. But an artifact that simply lacks a class fails obscurely, and
@@ -124,9 +124,10 @@ public class InternalisationPolicy {
         if (internalisingGatewayPresent()) return;
         throw new IllegalStateException(
                 "emporia.execution.venue-mode=" + venueMode + " needs the exchange-core gateway, and this "
-                        + "artifact was built without it (the -Dvn build, which packages neither exchange-core "
-                        + "nor the gateway so that the absence is verifiable in the jar). Either deploy the "
-                        + "standard artifact, or route to an external venue with venue-mode=fix.");
+                        + "artifact was built without it (the agency build, which is the default and packages "
+                        + "neither exchange-core nor the gateway, so that the absence is verifiable in the "
+                        + "jar). Either deploy the matching artifact, built with -Dmatching, or route to an "
+                        + "external venue with venue-mode=fix.");
     }
 
     /**
@@ -136,7 +137,7 @@ public class InternalisationPolicy {
      * answer is a property of the build: a test can only ever observe the branch
      * belonging to the build running it, so inlining the lookup made one of the
      * two branches untestable and - worse - made every other test in this class
-     * fail under {@code -Dvn}, where the guard fired first and masked the
+     * fail under the agency build, where the guard fired first and masked the
      * jurisdiction logic it was supposed to sit beside.
      */
     boolean internalisingGatewayPresent() {

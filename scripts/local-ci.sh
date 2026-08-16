@@ -17,8 +17,14 @@ if ! mvn -q -f pom.xml dependency:get \
     exit 1
 fi
 
-echo "==> Backend: compile, test, PMD (mvn clean verify)"
+# Both artifacts, because they compile different source sets. The agency
+# default excludes the matching engine and its tests; until this ran twice,
+# the 52 tests on the other side of that switch never ran in CI at all.
+echo "==> Backend, agency artifact (the default): compile, test, PMD"
 mvn -f pom.xml clean verify
+
+echo "==> Backend, matching artifact (-Dmatching): compile, test, PMD"
+mvn -f pom.xml clean verify -Dmatching
 
 echo "==> Frontend: install, lint, typecheck+build"
 (

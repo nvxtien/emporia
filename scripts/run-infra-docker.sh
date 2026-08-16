@@ -40,7 +40,9 @@ done
 # clean is required: the protobuf-maven-plugin has produced inconsistent
 # incremental builds against a stale target/ from an earlier run.
 echo "==> Building and installing reactor modules (mvn clean install ${MAVEN_TEST_SKIP_ARGS[*]})"
-mvn -q -f pom.xml clean install "${MAVEN_TEST_SKIP_ARGS[@]}"
+# -Dmatching: this stack runs EXECUTION_VENUE_MODE=exchange-core, which the
+# default agency artifact deliberately cannot serve.
+mvn -q -f pom.xml clean install -Dmatching "${MAVEN_TEST_SKIP_ARGS[@]}"
 
 # Ten minutes suits a browser session. A soak test mints once and cannot renew
 # - this client only offers authorization-code + PKCE - so a run longer than the
@@ -83,7 +85,7 @@ EXCHANGE_CORE_SNAPSHOT_INTERVAL=${EXCHANGE_CORE_SNAPSHOT_INTERVAL:-60s} \
 EXCHANGE_CORE_RETAINED_CHECKPOINTS=${EXCHANGE_CORE_RETAINED_CHECKPOINTS:-2} \
 EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES=${EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES:-0} \
 JAVA_TOOL_OPTIONS="-XX:+UseZGC -XX:+AlwaysPreTouch -XX:MaxDirectMemorySize=1024m --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED --add-exports=java.base/jdk.internal.ref=ALL-UNNAMED --add-exports=java.base/jdk.internal.util=ALL-UNNAMED --add-exports=java.base/sun.nio.ch=ALL-UNNAMED --add-exports=jdk.unsupported/sun.misc=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.locks=ALL-UNNAMED" \
-start_service order-management-service order-management-service mvn "${MAVEN_TEST_SKIP_ARGS[@]}" spring-boot:run
+start_service order-management-service order-management-service mvn -Dmatching "${MAVEN_TEST_SKIP_ARGS[@]}" spring-boot:run
 
 DB_URL=jdbc:postgresql://localhost:5438/emporia_portfolio \
 DB_PASSWORD=admin123 \

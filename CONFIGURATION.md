@@ -511,44 +511,78 @@ every deployment and development machine that predates it. State the cost
 plainly: an unspecified jurisdiction buys no protection at all. The guard only
 works for deployments that declare where they are.
 
-### The `-Dvn` artifact proves it at the jar, not the property
+### Two artifacts, `agency` and `matching`, and the jar proves which is which
 
-Configuration can be changed after an audit; a binary can be hashed. So there is
-a build that packages neither `exchange-core` nor the gateway that drives it:
+The build produces one of two artifacts, and they are different **products**
+rather than two configurations of one:
+
+| | `agency` (**default**) | `matching` (`-Dmatching`) |
+|---|---|---|
+| product | equities (listed stock) | crypto |
+| `exchange-core` | **absent** | packaged |
+| matches internally | **cannot** | yes - B2C, client against Emporia's own capital |
+| jar | `order-management-service-agency-<version>.jar` | `order-management-service-<version>.jar` |
+| tests | 309 | 361 |
 
 ```bash
-mvn package -Dvn        # -> order-management-service-vn-<version>.jar
+mvn package              # -> order-management-service-agency-<version>.jar
+mvn package -Dmatching   # -> order-management-service-<version>.jar
 ```
 
-Verified on the produced jar: zero `exchange-core` entries and zero
-`ExchangeCoreExecutionVenueGateway` / `ExchangeCoreLifecycleRebuilder` /
-`ReconciliationEndpoint` classes, with the FIX gateway intact so external-venue
-routing still works. 294 tests run in that build against 346 in the standard
-one; the difference is the excluded classes' own tests.
+Verified on the produced agency jar: **zero** `exchange/core2` entries and
+**zero** `ExchangeCore*` classes, with `FixExecutionVenueGateway` intact so
+external-venue routing still works. The 52-test difference is the excluded
+classes' own tests.
+
+**Why agency is the default.** Forgetting a flag must not hand you the artifact
+that can trade the firm's own capital. The principle is stated in
+`InternalisationPolicy` itself - *the safe answer is the one you get by not
+thinking about it, and the unsafe answer has to be written down where an auditor
+can see it* - and a `matching` default contradicted it. The two mistakes are not
+symmetric:
+
+| mistake | how it fails |
+|---|---|
+| build `matching`, deploy as equities | the jar **can** internalise. The startup guard catches it only if a jurisdiction was declared, and an unset jurisdiction leaves that guard inactive. **Silent.** |
+| build `agency`, run as crypto | startup fails with a sentence naming the build and telling you to pass `-Dmatching`. **Loud.** |
+
+**This axis used to be called `vn`.** It was built for one jurisdiction - listed
+securities in Vietnam must trade through the Exchange - but the mechanism it
+produced, an artifact that *cannot* match internally, turned out to be the
+equities product itself. Vietnam is one deployment of the agency artifact, not
+the reason for it. Jurisdiction stayed where it always was: runtime
+configuration read by `InternalisationPolicy`, never a build flag.
+
+Configuration can be changed after an audit; a binary can be hashed. That is
+what the artifact buys over the startup guard, and why both exist.
 
 Whether the gateway is on the classpath is a property of the build, so
 `InternalisationPolicy` exposes it as an overridable seam rather than reading
-the classpath inline. Inlining it made one branch untestable and, under `-Dvn`,
-made the artifact check fire ahead of every jurisdiction test in the same class
-and mask it.
+the classpath inline. Inlining it made one branch untestable and, under the
+agency build, made the artifact check fire ahead of every jurisdiction test in
+the same class and mask it.
 
-**The default build is the standard artifact.** `mvn package` with no flags
-produces `order-management-service-<version>.jar` containing exchange-core and
-the gateway; the VN build is opt-in.
+**Activated by property (`!matching` / `-Dmatching`), not by `activeByDefault`
+or `-P`.** Maven switches off an `activeByDefault` profile the moment any other
+`-P` is passed, so a `-P postgres-it` build would silently change which artifact
+you get. Property activation composes instead of competing.
+`mvn help:active-profiles` reports exactly one of `agency` or `matching` - never
+both, never neither.
 
-**Activated by property (`-Dvn`), not by `-P`.** Maven switches off an
-`activeByDefault` profile the moment any other `-P` is passed, so a
-`-P postgres-it` build would have silently dropped exchange-core and produced
-something that looks like a normal jar and is not. Property activation composes
-instead of competing.
+**`matching` is a flag, not a boolean.** Maven activates on the property being
+*defined*, whatever its value, so `-Dmatching=false` **also** produces the
+matching artifact. Omit the flag for agency; do not write `-Dmatching=false`.
+Making it value-sensitive is worse: `-Dmatching=false` would then match neither
+profile, dropping exchange-core without excluding the sources that import it,
+and the result reads as a broken build rather than a wrong flag. The `-agency-`
+in the artifact name is the safety net - the jar that cannot internalise is the
+one you can identify by name.
 
-**`vn` is a flag, not a boolean.** Maven activates on the property being
-*defined*, whatever its value, so `-Dvn=false` **also** produces the VN
-artifact. Omit the flag for the standard build. Making it value-sensitive is
-worse: `-Dvn=false` would then match neither profile, dropping exchange-core
-without excluding the sources that import it, and the result reads as a broken
-build rather than a wrong flag. The `-vn-` in the artifact name is the safety
-net - a mistake is visible in the output rather than inside the jar.
+**Five scripts pass `-Dmatching`** because they exercise the exchange-core path:
+`run-infra-docker.sh`, `perf/matching-engine-benchmark.sh`,
+`perf/reset-venue-state.sh`, `perf/first-request-check.sh`, and `local-ci.sh` -
+which now runs `clean verify` **twice**, once per artifact. Until it did, the 52
+tests excluded from the agency build never ran in CI at all.
 
 Asking that artifact for `venue-mode: exchange-core` fails with a sentence
 naming the build, not a `ClassNotFoundException` inside Spring. An obscure
