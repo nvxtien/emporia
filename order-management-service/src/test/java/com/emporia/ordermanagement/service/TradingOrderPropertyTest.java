@@ -336,14 +336,27 @@ class TradingOrderPropertyTest {
         ProcessingOutcome first = fixture.handler.handle(command);
         ProcessingOutcome duplicate = fixture.handler.handle(command);
 
-        // Idempotency is about what the caller is told: the same result and the
-        // same events. ProcessingOutcome.view is a carried reference to the
-        // object the payload was serialised from, so the caller need not parse
-        // it back; a duplicate is answered from the processed-command cache,
-        // which holds the payload and not the object, so it is legitimately
-        // absent there and the caller falls back to parsing.
+        // Idempotency is about what the caller is told, and the caller is
+        // OrderCommandController.viewOf, which answers from result() and
+        // view() and never reads events().
+        //
+        // A duplicate carries no events, deliberately: it produced none. The
+        // original invocation produced them and enqueueOutbox dispatched them
+        // then. Returning them a second time would make double dispatch a live
+        // possibility held off only by where a return statement happens to
+        // sit; returning nothing makes it structurally impossible. Loading
+        // them also cost a blocking database read on the single writer thread
+        // - a cost paid not by this command but by every command queued behind
+        // it.
+        //
+        // ProcessingOutcome.view is a carried reference to the object the
+        // payload was serialised from, so the caller need not parse it back; a
+        // duplicate is answered from the processed-command cache, which holds
+        // the payload and not the object, so it is legitimately absent there
+        // and the caller falls back to parsing.
         assertThat(duplicate.result()).isEqualTo(first.result());
-        assertThat(duplicate.events()).isEqualTo(first.events());
+        assertThat(first.events()).hasSize(1);
+        assertThat(duplicate.events()).isEmpty();
         assertThat(fixture.orderWriteCount()).isEqualTo(1);
         assertThat(fixture.eventCount()).isEqualTo(1);
         assertNumericInvariants(fixture.order(orderId).view());
@@ -770,7 +783,7 @@ class TradingOrderPropertyTest {
                 return null;
             }).when(asyncDbWriter).enqueue(org.mockito.Mockito.any(ProcessedCommand.class));
 
-            handler = new OrderCommandHandler(orders, events, processed, new ObjectMapper(),
+            handler = new OrderCommandHandler(orders, new ObjectMapper(),
                     io.micrometer.observation.ObservationRegistry.NOOP, metrics, cache, asyncDbWriter);
         }
 

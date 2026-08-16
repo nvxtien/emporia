@@ -284,7 +284,7 @@ public class OrderShadowComparisonService {
             OrderStateCache cache = new OrderStateCache(orders, processed, metrics, null, 1000, 1000);
             AsyncDbWriter asyncDbWriter = new InMemoryAsyncDbWriter(
                     orders, events, processed, storedOrders, eventsByCommand, processedCommands);
-            handler = new OrderCommandHandler(orders, events, processed, new ObjectMapper(), ObservationRegistry.NOOP,
+            handler = new OrderCommandHandler(orders, new ObjectMapper(), ObservationRegistry.NOOP,
                     metrics, cache, asyncDbWriter);
         }
 
@@ -292,9 +292,20 @@ public class OrderShadowComparisonService {
             try {
                 OrderCommand command = objectMapper.readValue(inputEvent.getPayload(), OrderCommand.class);
                 ProcessingOutcome outcome = handler.handle(command);
+                // A command the sandbox has already processed comes back with
+                // no events: handle() stopped loading them, because on the live
+                // path that was a database read on the single writer thread for
+                // a caller that discarded it. The events still exist - the
+                // sandbox recorded them when it first processed the command -
+                // so the comparison reads them from its own record rather than
+                // making the hot path fetch them on its behalf.
+                List<OrderDomainEvent> replayedEvents = outcome.events().isEmpty()
+                        ? eventsByCommand.getOrDefault(command.commandId(), List.of())
+                                .stream().map(OrderEvent::domainEvent).toList()
+                        : outcome.events();
                 return new ShadowSnapshot(
                         normalize(outcome.result(), objectMapper),
-                        outcome.events().stream().map(event -> OrderShadowComparisonService.normalize(event, objectMapper)).toList()
+                        replayedEvents.stream().map(event -> OrderShadowComparisonService.normalize(event, objectMapper)).toList()
                 );
             } catch (Exception exception) {
                 throw new IllegalStateException("Could not shadow-replay command " + inputEvent.getCommandId(), exception);

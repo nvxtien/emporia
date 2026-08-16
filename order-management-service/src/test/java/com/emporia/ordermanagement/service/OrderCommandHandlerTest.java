@@ -57,7 +57,7 @@ class OrderCommandHandlerTest {
     private final AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
     private final ShardedOrderDispatcher dispatcher = mock(ShardedOrderDispatcher.class);
     private final OrderCommandHandler handler =
-            new OrderCommandHandler(orders, events, processed, new ObjectMapper(), observations, metrics, cache, asyncDbWriter, dispatcher);
+            new OrderCommandHandler(orders, new ObjectMapper(), observations, metrics, cache, asyncDbWriter, dispatcher);
 
     /**
      * Wiring a meter handler turns observations into timers, so they can be
@@ -555,7 +555,7 @@ class OrderCommandHandlerTest {
         OrderStateCache indexed = new OrderStateCache(orders, processed, metrics, dedup, 1000, 1000);
         dedup.publishHistory(new CommandDedupIndex(1_000, 0.001));
         OrderCommandHandler indexedHandler = new OrderCommandHandler(
-                orders, events, processed, new ObjectMapper(), observations, metrics, indexed, asyncDbWriter, dispatcher);
+                orders, new ObjectMapper(), observations, metrics, indexed, asyncDbWriter, dispatcher);
         assertThat(indexed.isReady()).isTrue();
 
         OrderCommand command = createCommand(UUID.randomUUID());
@@ -579,7 +579,7 @@ class OrderCommandHandlerTest {
         OrderStateCache indexed = new OrderStateCache(orders, processed, metrics, dedup, 1000, 1000);
         dedup.publishHistory(new CommandDedupIndex(1_000, 0.001));
         OrderCommandHandler indexedHandler = new OrderCommandHandler(
-                orders, events, processed, new ObjectMapper(), observations, metrics, indexed, asyncDbWriter, dispatcher);
+                orders, new ObjectMapper(), observations, metrics, indexed, asyncDbWriter, dispatcher);
 
         UUID orderId = UUID.randomUUID();
         indexedHandler.handle(createCommand(orderId));

@@ -11,8 +11,6 @@ import com.emporia.ordermanagement.dto.ProcessingOutcome;
 import com.emporia.ordermanagement.model.OrderEvent;
 import com.emporia.ordermanagement.model.ProcessedCommand;
 import com.emporia.ordermanagement.model.TradingOrder;
-import com.emporia.ordermanagement.repository.OrderEventRepository;
-import com.emporia.ordermanagement.repository.ProcessedCommandRepository;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
 import io.micrometer.observation.Observation;
 import io.micrometer.observation.ObservationRegistry;
@@ -31,8 +29,18 @@ import static com.emporia.events.TradingEvents.SCHEMA_VERSION;
 @Service
 public class OrderCommandHandler {
     private static final List<OrderStatus> CANCELLABLE = List.of(OrderStatus.LIVE, OrderStatus.PARTIALLY_FILLED);
+    /**
+     * The last repository left on the single writer thread, and only two call
+     * sites use it: the child-cancellation walk and CANCEL_ALL. Both are
+     * blocking reads on a thread where a blocking call is paid for by every
+     * command queued behind it. See {@code docs/HOT_PATH_JPA_PLAN.md}.
+     *
+     * <p>The event and processed-command repositories used to be here too. The
+     * first was read once, on the duplicate path, for a caller that discarded
+     * the result; the second was accepted as a constructor argument and never
+     * assigned to anything. Neither is missed.
+     */
     private final TradingOrderRepository orders;
-    private final OrderEventRepository events;
     private final ObjectMapper objectMapper;
     private final ObservationRegistry observations;
     private final OrderMetrics metrics;
@@ -40,20 +48,18 @@ public class OrderCommandHandler {
     private final AsyncDbWriter asyncDbWriter;
     private final com.emporia.execution.ShardedOrderDispatcher shardedOrderDispatcher;
 
-    public OrderCommandHandler(TradingOrderRepository orders, OrderEventRepository events,
-                        ProcessedCommandRepository processed, ObjectMapper objectMapper,
+    public OrderCommandHandler(TradingOrderRepository orders, ObjectMapper objectMapper,
                         ObservationRegistry observations, OrderMetrics metrics, OrderStateCache cache,
                         AsyncDbWriter asyncDbWriter) {
-        this(orders, events, processed, objectMapper, observations, metrics, cache, asyncDbWriter, null);
+        this(orders, objectMapper, observations, metrics, cache, asyncDbWriter, null);
     }
 
     @org.springframework.beans.factory.annotation.Autowired
-    public OrderCommandHandler(TradingOrderRepository orders, OrderEventRepository events,
-                        ProcessedCommandRepository processed, ObjectMapper objectMapper,
+    public OrderCommandHandler(TradingOrderRepository orders, ObjectMapper objectMapper,
                         ObservationRegistry observations, OrderMetrics metrics, OrderStateCache cache,
                         AsyncDbWriter asyncDbWriter,
                         com.emporia.execution.ShardedOrderDispatcher shardedOrderDispatcher) {
-        this.orders = orders; this.events = events;
+        this.orders = orders;
         this.objectMapper = objectMapper;
         this.observations = observations; this.metrics = metrics; this.cache = cache;
         this.asyncDbWriter = asyncDbWriter;
@@ -77,8 +83,22 @@ public class OrderCommandHandler {
             ProcessedCommand cached = cache.findProcessedById(command.commandId()).orElse(null);
             if (cached != null) {
                 outcome = "duplicate";
-                return new ProcessingOutcome(cached.result(), events.findByCommandIdOrderByOccurredAtAsc(command.commandId())
-                        .stream().map(OrderEvent::domainEvent).toList());
+                // No events, deliberately. This used to load the original
+                // command's events from the database - a blocking JPA read on
+                // the single writer thread - for a caller that never reads
+                // them: OrderCommandController.viewOf answers from result() and
+                // view(), and this path returns before enqueueOutbox, so
+                // nothing dispatches them either.
+                //
+                // On a single-writer path the cost of a blocking call is not
+                // paid by the command that makes it. It is paid by every
+                // command queued behind it, which is why a query that is
+                // merely wasteful elsewhere is a stall here.
+                //
+                // The one consumer that does read these events,
+                // OrderShadowComparisonService, replays into a sandbox that
+                // already records them in memory and reads them from there.
+                return new ProcessingOutcome(cached.result(), List.of());
             }
 
             try {
