@@ -47,7 +47,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 @Component
-@ConditionalOnProperty(name = "emporia.execution.venue-mode", havingValue = "fix")
 class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(FixExecutionVenueGateway.class);
 
@@ -57,10 +56,26 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
     private final Map<String, UUID> clientOrderIds = new ConcurrentHashMap<>();
     private final ExecutionCommandPublisher commands;
     private final AtomicBoolean running = new AtomicBoolean();
+    /** Whether this gateway is the one emporia.execution.venue-mode selects. */
+    private final boolean selected;
 
     FixExecutionVenueGateway(String definitions, ExecutionCommandPublisher commands,
                              FixSessionStateStore sessionState, FixMessageLogStore messageLog) {
-        this(definitions, commands, sessionState, messageLog, false, "", "", "", "");
+        // The test seam behaves as the selected venue, which is what every
+        // existing test assumes and asserts.
+        this(definitions, commands, sessionState, messageLog, false, "", "", "", "", "fix");
+    }
+
+    /**
+     * Pre-existing nine-argument form, kept so the TLS test compiles unchanged.
+     * Behaves as the selected venue, which is what that test asserts.
+     */
+    FixExecutionVenueGateway(String definitions, ExecutionCommandPublisher commands,
+                             FixSessionStateStore sessionState, FixMessageLogStore messageLog,
+                             boolean tlsEnabled, String trustStorePath, String trustStorePassword,
+                             String keyStorePath, String keyStorePassword) {
+        this(definitions, commands, sessionState, messageLog, tlsEnabled, trustStorePath,
+                trustStorePassword, keyStorePath, keyStorePassword, "fix");
     }
 
     @Autowired
@@ -71,7 +86,10 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
                              @Value("${emporia.execution.fix-tls-truststore-path:}") String trustStorePath,
                              @Value("${emporia.execution.fix-tls-truststore-password:}") String trustStorePassword,
                              @Value("${emporia.execution.fix-tls-keystore-path:}") String keyStorePath,
-                             @Value("${emporia.execution.fix-tls-keystore-password:}") String keyStorePassword) {
+                             @Value("${emporia.execution.fix-tls-keystore-password:}") String keyStorePassword,
+                             @Value("${emporia.execution.venue-mode:exchange-core}") String configuredVenueMode) {
+        this.selected = "fix".equals(configuredVenueMode == null ? ""
+                : configuredVenueMode.strip().toLowerCase(java.util.Locale.ROOT));
         this.commands = commands;
         SSLSocketFactory tlsSocketFactory = tlsEnabled
                 ? buildTlsSocketFactory(trustStorePath, trustStorePassword, keyStorePath, keyStorePassword)
@@ -124,6 +142,11 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
         } catch (Exception exception) {
             throw new IllegalStateException("Unable to initialize FIX TLS configuration", exception);
         }
+    }
+
+    @Override
+    public String venueMode() {
+        return "fix";
     }
 
     @Override
@@ -231,8 +254,19 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
     public void start() {
         if (!running.compareAndSet(false, true)) return;
         if (sessions.isEmpty()) {
-            running.set(false);
-            throw new IllegalStateException("FIX execution mode requires FIX_EXECUTION_VENUES");
+            if (selected) {
+                running.set(false);
+                throw new IllegalStateException(
+                        "emporia.execution.venue-mode=fix requires FIX_EXECUTION_VENUES");
+            }
+            // The gateways stopped excluding each other, so this bean now exists
+            // in deployments that route elsewhere. With nothing configured it has
+            // nothing to connect to and stays inert, rather than failing a startup
+            // that has no use for it. Deleting the throw outright would have lost
+            // the protection above, where fix IS the selected venue and an empty
+            // venue list means orders reach nowhere at all.
+            log.info("FIX venue gateway idle: no FIX_EXECUTION_VENUES and venue-mode is not fix");
+            return;
         }
         sessions.values().forEach(FixSession::start);
     }

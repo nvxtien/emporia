@@ -74,7 +74,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 @Component
-@ConditionalOnProperty(name = "emporia.execution.venue-mode", havingValue = "exchange-core")
 public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle, HealthIndicator {
     private static final Logger log = LoggerFactory.getLogger(ExchangeCoreExecutionVenueGateway.class);
     private static final String ACCOUNTING_FULL_EQUITY = "full-equity-risk";
@@ -433,6 +432,11 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             }
         }
         return false;
+    }
+
+    @Override
+    public String venueMode() {
+        return "exchange-core";
     }
 
     @Override
