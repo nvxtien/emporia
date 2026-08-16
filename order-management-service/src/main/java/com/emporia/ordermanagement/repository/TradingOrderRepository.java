@@ -30,5 +30,13 @@ public interface TradingOrderRepository extends JpaRepository<TradingOrder, UUID
     long countByParentOrderId(UUID parentOrderId);
     long countByStatus(OrderStatus status);
     long countByStatusIn(Collection<OrderStatus> statuses);
+
+    /**
+     * Every order in these statuses, a page at a time. Used once at startup to
+     * fill the live-order store before the service accepts traffic; paged so a
+     * large live set does not have to be materialised in one list.
+     */
+    org.springframework.data.domain.Page<TradingOrder> findByStatusIn(
+            Collection<OrderStatus> statuses, org.springframework.data.domain.Pageable pageable);
     long countByTargetStatusAndStatusIn(OrderStatus targetStatus, Collection<OrderStatus> statuses);
 }

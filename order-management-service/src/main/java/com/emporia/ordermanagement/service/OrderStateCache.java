@@ -103,6 +103,9 @@ public class OrderStateCache {
     /** Live orders admitted before new ones are refused. See {@link #atCapacity()}. */
     private final long liveOrderMax;
 
+    /** See {@link #isLiveSetComplete()}. Written once, by the startup load. */
+    private volatile boolean liveSetComplete;
+
     public OrderStateCache(
             TradingOrderRepository orderRepository,
             ProcessedCommandRepository processedRepository,
@@ -232,6 +235,42 @@ public class OrderStateCache {
     /** Orders currently live in memory. */
     public long liveOrderCount() {
         return orders.estimatedSize();
+    }
+
+    /**
+     * Whether the live-order store holds <b>every</b> live order, not merely the
+     * ones this process has seen since it started.
+     *
+     * <p>Nothing may answer a question negatively from this store until it is
+     * true. An index over a partially loaded store reports the orders that
+     * happened to be in it, which is the same defect the bounded cache had and
+     * the reason this store exists.
+     */
+    public boolean isLiveSetComplete() {
+        return liveSetComplete;
+    }
+
+    /**
+     * Admits an order loaded from the database during startup.
+     *
+     * <p>Deliberately not {@link #put}: that stamps a revision, and replaying
+     * existing rows into memory is not a state change. Terminal orders are
+     * skipped rather than rejected, so the caller may hand over whatever the
+     * query returned.
+     */
+    void admitExisting(TradingOrder order) {
+        if (!isTerminal(order.getStatus())) {
+            orders.put(order.getId(), order);
+        }
+    }
+
+    /**
+     * Declares the startup load complete. Called only after every live order has
+     * been admitted - never after a partial load, for the reason on
+     * {@link #isLiveSetComplete()}.
+     */
+    void markLiveSetComplete() {
+        this.liveSetComplete = true;
     }
 
     /**
