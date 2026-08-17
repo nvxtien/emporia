@@ -768,15 +768,17 @@ measurement above shows an ordinary hard kill reaches that state. Ghosts never
 refuse: a service that will not start until someone clears 61,829 of them by
 hand is worse than one that says so loudly.
 
-## The venue's journal does not recover process death, and the two logs disagree
+## A hard kill under load loses acknowledged orders from the matching engine
 
-- **Where**: `exchange-core` `DiskSerializationProcessor`,
-  `EXCHANGE_CORE_SNAPSHOT_INTERVAL`, measured 2026-08-17
+- **Where**: the path from `DisruptorOrderPipeline` through
+  `ShardedOrderDispatcher` to `exchange-core`, measured 2026-08-17.
+  **Mechanism not yet established** - see below, and note that two earlier
+  explanations in this section were wrong.
 
 The section above is about order-management's own write-ahead log and is
-correct: it survives `kill -9`. **The matching engine's journal does not**, so
-`kill -9` leaves the two sides of one process disagreeing about which orders
-exist - order-management fully recovered, the venue quietly short.
+correct: it survives `kill -9`. The two halves of this one process do not agree
+after one, so a hard kill leaves order-management fully recovered and the venue
+quietly short.
 
 **Reproduced deliberately.** Run load so the window exists only in the journal
 (the checkpoint id must not move), then kill without a shutdown checkpoint:
@@ -789,30 +791,69 @@ AFTER    checked=99,152  missing=2,416  ghosts=61,829   checkpoint=959
 ```
 
 **2,416 orders order-management holds as LIVE are absent from the matching
-engine.** They are durable in PostgreSQL, they were answered 201, and they will
-never fill. Ghosts did not move, so cancellation is not involved - the losses are
-submissions.
+engine.** They were acknowledged 201, they are durable in PostgreSQL, and they
+will never fill. Ghosts did not move, so cancellation is not involved - the
+losses are submissions.
 
-**Why a kill perforates rather than truncates.** Journalling is a Disruptor stage
-running *in parallel* with risk and matching, not in front of them, so the
-journal is not a prefix of what the engine did. A hard kill leaves holes, and
-recovery reports them and carries on:
+**It is a function of rate, not of volume, and that is the one thing here
+established by changing a variable rather than by reading code.** Same 3,000
+orders, same journal-only window, same `kill -9`; only the rate differs:
+
+| offered rate | orders | lost |
+|---:|---:|---:|
+| 300/sec | 3,001 | **1,589** |
+| **150/sec** | **3,000** | **0** |
+
+At 150/sec everything reaches disk before the kill. At 300/sec - **the knee this
+document already records** - something falls behind, and the kill catches
+whatever has. At 600/sec k6 cannot complete the run at all.
+
+So this is not an independent durability defect to be fixed in the engine. It is
+what running at or past the knee looks like when the process dies, and the
+remedy starts with not running there.
+
+**The loss is a contiguous tail, and the "sequence gap" warnings are not
+evidence of it.** Both of those were got wrong here first, so both are stated
+with what was measured.
+
+Timestamps of the 1,589 orders lost in one run, against the load window that
+produced them:
 
 ```
-WARN DiskSerializationProcessor : Sequence gap 0->20 (20)
-WARN DiskSerializationProcessor : Sequence gap 28->37 (9)
-855 gaps, 1,740 commands skipped, largest 20, and zero ERROR lines
+whole load window   16:20:15.308  ->  16:20:28.744   (13.4 s)
+orders lost         16:20:21.222  ->  16:20:28.744   ( 7.5 s)
 ```
 
-The engine then opens for trading on a book it knows was rebuilt from an
-incomplete journal. **Whether that should be a warning rather than a refusal to
-start is the open question**, and it is in the forked dependency, so it is
-answerable.
+Everything lost sits at the end, finishing at the very last order submitted. A
+perforated journal would lose orders scattered through the window; **a tail means
+something was still in a buffer when the process died** - and 7.5 seconds of it
+is far more than one Disruptor batch.
 
-*Some of those gaps may be benign* - read-only commands are not journalled and
-would leave legitimate holes. The gap count is evidence of the mechanism, not a
-measurement of the loss. The loss is measured separately: `missing` went 0 →
-2,416.
+`DiskSerializationProcessor.writeToJournal` returns early for any command whose
+`OrderCommandType.isMutate()` is false, so **read-only commands consume a
+sequence number and are never journalled**. The gaps replay reports are that, by
+design. 855 gaps in one recovery is not 855 lost commands, and citing them as the
+mechanism - as an earlier version of this section did - was reading a normal log
+line as a defect.
+
+**Three explanations were proposed and all three were wrong**, each inferred from
+the shape of the code and each killed by the next measurement. They are recorded
+because the next person will reach for them too:
+
+| proposed | refuted by |
+|---|---|
+| the parallel journal stage perforates the journal | it flushes at end of batch; and the loss is a contiguous tail, not scattered |
+| the `Sequence gap` warnings are the mechanism | `writeToJournal` returns early unless `isMutate()`, so read-only commands legitimately leave holes |
+| the 256 KB journal write buffer bounds the loss | a fixed buffer holds the same bytes at any rate; 150/sec lost nothing |
+
+`ShardedOrderDispatcher` was measured directly and does not account for it
+either: under 300/sec its queue peaks at **505 events** - about 1.7 seconds of
+work - and drains to zero. That is real backlog, and far too small for a 7.5
+second tail. The gauge for it (`emporia.oms.dispatcher.queue.depth`) did not
+exist before this investigation; the queue is unbounded and sat between "the
+client has a 201" and "the venue has the order" with nothing observing it.
+
+The loss itself is measured and reproducible three times: 2,416.
 
 **Two things made this hard to see, and both are now fixed.**
 
