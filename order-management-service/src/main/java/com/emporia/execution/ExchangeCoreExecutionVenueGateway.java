@@ -7,6 +7,7 @@ import com.emporia.events.TradingEvents.ListingSnapshot;
 import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.events.TradingEvents.OrderView;
+import com.emporia.ordermanagement.service.LiveDirectOrders;
 import com.emporia.events.math.FixedPointMath;
 import exchange.core2.core.common.CoreSymbolSpecification;
 import exchange.core2.core.common.CoreWaitStrategy;
@@ -58,6 +59,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
@@ -116,6 +118,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     private final boolean fullEquityRisk;
     /** Order-management, the source of truth the lifecycle projection is rebuilt from. */
     private final TradingDataClient recoverySource;
+    private final LiveDirectOrders liveDirectOrders;
     private final ExchangeCoreLifecycleRebuilder lifecycleRebuilder;
     /** How far past its own price a sweep may execute, in basis points. */
     private final BigDecimal slippageBps;
@@ -132,6 +135,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             ServiceAccessTokenProvider tokenProvider,
             @Qualifier("executionDataSource") Optional<DataSource> dataSource,
             TradingDataClient recoverySource,
+            LiveDirectOrders liveDirectOrders,
             @Value("${emporia.execution.exchange-core.exchange-id}") String exchangeId,
             @Value("${emporia.execution.exchange-core.storage-directory}") Path storage,
             @Value("${emporia.execution.exchange-core.symbol-partitions}") int partitions,
@@ -151,10 +155,10 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             MeterRegistry meters,
             Environment environment)
             throws IOException {
-        this(commands, tokenProvider, dataSource, recoverySource, exchangeId, storage, partitions,
-                accountingMode, portfolioUrl, portfolioTimeout, retainedCheckpoints,
-                minFreeStorageBytes, slippageBps, waitStrategyName, journaling, meters,
-                activeProfiles(environment));
+        this(commands, tokenProvider, dataSource, recoverySource, liveDirectOrders, exchangeId,
+                storage, partitions, accountingMode, portfolioUrl, portfolioTimeout,
+                retainedCheckpoints, minFreeStorageBytes, slippageBps, waitStrategyName, journaling,
+                meters, activeProfiles(environment));
     }
 
     public ExchangeCoreExecutionVenueGateway(
@@ -173,8 +177,8 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             BigDecimal slippageBps,
             MeterRegistry meters)
             throws IOException {
-        this(commands, tokenProvider, dataSource, recoverySource, exchangeId, storage, partitions,
-                accountingMode, portfolioUrl, portfolioTimeout, retainedCheckpoints,
+        this(commands, tokenProvider, dataSource, recoverySource, null, exchangeId, storage,
+                partitions, accountingMode, portfolioUrl, portfolioTimeout, retainedCheckpoints,
                 minFreeStorageBytes, slippageBps, "busy-spin", true, meters, Set.of());
     }
 
@@ -183,6 +187,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             ServiceAccessTokenProvider tokenProvider,
             @Qualifier("executionDataSource") Optional<DataSource> dataSource,
             TradingDataClient recoverySource,
+            LiveDirectOrders liveDirectOrders,
             String exchangeId,
             Path storage,
             int partitions,
@@ -211,6 +216,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
                         .build()))
                 .fullEquityRisk(ACCOUNTING_FULL_EQUITY.equalsIgnoreCase(accountingMode))
                 .recoverySource(recoverySource)
+                .liveDirectOrders(liveDirectOrders)
                 .slippageBps(slippageBps)
                 .meterRegistry(meters)
                 .buildSpec());
@@ -378,6 +384,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         this.venue = spec.venue();
         this.fullEquityRisk = spec.fullEquityRisk();
         this.recoverySource = spec.recoverySource();
+        this.liveDirectOrders = spec.liveDirectOrders();
         this.slippageBps = spec.slippageBps();
         this.meters = spec.meters();
         if (spec.slippageBps().signum() < 0) {
@@ -550,9 +557,24 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
      */
     @Override
     public void start() {
-        if (recoverySource != null) {
-            venue.recoverLifecycle(
-                    lifecycleRebuilder.rebuild(recoverySource.recoverable().directOrders()));
+        // Read the live set in process rather than over HTTP. TradingDataClient
+        // calls this same application through the gateway, which cannot answer
+        // until the web server is listening - and the web server starts at
+        // Integer.MAX_VALUE - 2048, *after* this bean. The HTTP path therefore
+        // required this to start late, which in turn meant the venue only
+        // recovered after the port had been open for seconds. Reading the same
+        // rows directly removes that ordering constraint entirely.
+        //
+        // recoverySource remains the fallback for the constructors that supply
+        // it and no local source, which is every test that builds this by hand.
+        List<OrderView> live = null;
+        if (liveDirectOrders != null) {
+            live = liveDirectOrders.current();
+        } else if (recoverySource != null) {
+            live = recoverySource.recoverable().directOrders();
+        }
+        if (live != null) {
+            venue.recoverLifecycle(lifecycleRebuilder.rebuild(live));
         }
         running.set(true);
     }
@@ -565,10 +587,18 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
      * commands (a message listener, a scheduled poller) would otherwise sit at
      * the default phase, where the ordering that makes recovery correct is
      * incidental rather than guaranteed.
+     *
+     * <p><b>And before the web server</b>, which starts at
+     * {@code Integer.MAX_VALUE - 2048} - measured from the framework, not
+     * assumed. At the previous {@code - 1024} this bean started *after* the port
+     * was already accepting connections, so for a few seconds of every start the
+     * service was reachable while the venue had not yet recovered its lifecycle.
+     * That was only possible because recovery went over HTTP to this same
+     * process; see {@link #start()}.
      */
     @Override
     public int getPhase() {
-        return Integer.MAX_VALUE - 1024;
+        return Integer.MAX_VALUE - 3072;
     }
 
     @Override
@@ -1104,6 +1134,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             ExchangeCoreVenue venue,
             boolean fullEquityRisk,
             TradingDataClient recoverySource,
+            LiveDirectOrders liveDirectOrders,
             BigDecimal slippageBps,
             MeterRegistry meters) {
         private GatewaySpec {
@@ -1123,6 +1154,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         private final ExchangeCoreVenue venue;
         private boolean fullEquityRisk;
         private TradingDataClient recoverySource;
+        private LiveDirectOrders liveDirectOrders;
         private BigDecimal slippageBps = DEFAULT_SLIPPAGE_BPS;
         private MeterRegistry meters = new SimpleMeterRegistry();
 
@@ -1141,6 +1173,11 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             return this;
         }
 
+        GatewayBuilder liveDirectOrders(LiveDirectOrders liveDirectOrders) {
+            this.liveDirectOrders = liveDirectOrders;
+            return this;
+        }
+
         GatewayBuilder slippageBps(BigDecimal slippageBps) {
             this.slippageBps = Objects.requireNonNull(slippageBps, "slippageBps");
             return this;
@@ -1156,7 +1193,8 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         }
 
         private GatewaySpec buildSpec() {
-            return new GatewaySpec(commands, venue, fullEquityRisk, recoverySource, slippageBps, meters);
+            return new GatewaySpec(commands, venue, fullEquityRisk, recoverySource,
+                    liveDirectOrders, slippageBps, meters);
         }
     }
 
