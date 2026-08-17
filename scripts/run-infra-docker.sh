@@ -39,7 +39,7 @@ done
 
 # clean is required: the protobuf-maven-plugin has produced inconsistent
 # incremental builds against a stale target/ from an earlier run.
-echo "==> Building and installing reactor modules (mvn clean install ${MAVEN_TEST_SKIP_ARGS[*]})"
+echo "==> Building and installing reactor modules (mvn clean install -Dmatching ${MAVEN_TEST_SKIP_ARGS[*]})"
 # -Dmatching: this stack runs EXECUTION_VENUE_MODE=exchange-core, which the
 # default agency artifact deliberately cannot serve.
 mvn -q -f pom.xml clean install -Dmatching "${MAVEN_TEST_SKIP_ARGS[@]}"

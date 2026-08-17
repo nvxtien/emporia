@@ -109,7 +109,146 @@ retail.
 Verified at 120/s through the gateway after the change: 5,344 accepted, **0%**
 business rejections, versus ~39% 429s before.
 
-## Order path capacity: the knee is between 200 and 250 orders/sec
+## The live-order store is bounded by the heap, and the bound is derived not guessed
+
+- **Where**: `OrderStateCache`, `LiveOrderStoreWarmup`, measured 2026-08-17
+
+`OrderStateCache` holds every live order rather than a bounded cache of them, so
+the parent-to-children and desk-to-orders indexes can answer without a database
+query. What stops it growing is `emporia.orders.live-max`, and reaching it
+**refuses a new order with 429** rather than evicting one already held - an
+evicted live order is one the service can no longer see, answer for or cancel,
+and nothing would say so.
+
+**The default is derived from the heap, from two measured points rather than a
+round number.** On a 4 GB heap, 188,666 live orders ran and 333,379 died with
+`OutOfMemoryError` during the startup load. At a 20 KB budget per live order the
+derived cap is 209,715 - inside the range that worked, below the one that did
+not:
+
+```
+Live-order store capacity derived from the heap: 209715 orders
+  (4096 MB max heap at 20 KB budget per live order)
+```
+
+The 20 KB is a **system budget, not an object size**: the same order is also in
+exchange-core's book, in this store's two indexes and in the deduplication
+index, all sharing one heap.
+
+**Nothing sets `-Xmx`, deliberately.** The JVM takes a quarter of physical RAM
+and the cap follows it, so a bigger host raises the ceiling with no
+configuration. Pinning a heap size would break that.
+
+**Hitting the cap during the startup load leaves the set incomplete and says
+so**, rather than marking a set it could not finish:
+
+```
+Live-order store hit its capacity after 138774 order(s);
+  the live set is INCOMPLETE and lookups stay on Postgres.
+```
+
+That is the designed degraded mode: the indexes refuse to answer, every lookup
+falls back to the database, and behaviour is exactly what it was before the
+store existed. Slower, and correct.
+
+**The load walks by key, not by offset, and the difference is large.** An offset
+page has to order the whole live set before it can skip into it, so every page
+paid for a full sort - at 189,000 live orders `EXPLAIN` showed an external merge
+spilling **31 MB to disk and 1,435 ms for a single page**, repeated 38 times.
+Keyset paging index-scans the primary key from where the last page stopped: no
+sort, 240 ms per page, cost flat as pages advance.
+
+| live orders | paging | load time | per order |
+|---:|---|---:|---:|
+| 188,666 | offset | 43,495 ms | 0.231 ms |
+| 333,379 | **keyset** | **35,523 ms** | **0.107 ms** |
+
+A set 1.77x larger loaded **faster**, which is what replacing a quadratic cost
+with a linear one looks like.
+
+**The load runs in `@PostConstruct`, before the port opens**, so it blocks
+startup by that much. `DedupIndexWarmup` can load after the application is ready
+because its filter only ever answers "never seen" and a command arriving mid-load
+still falls through to the database. This one cannot: a fill could update an
+order in memory while the loader still held the older row, and writing that row
+over the newer one would lose the fill.
+
+## p99 is not measurable on a developer machine, and four conclusions died proving it
+
+- **Where**: six runs of `scripts/perf/order-path-capacity.sh` plus a controlled
+  snapshot experiment, measured 2026-08-17
+
+Across six runs at 200/s that differed in **one** deliberate variable, and two
+more that differed in none:
+
+| variable | p50 | p99 |
+|---|---:|---:|
+| snapshot every 60 s (3 runs) | 3.52 - 3.90 ms | **55 - 862 ms** |
+| snapshot every 600 s (3 runs) | 3.41 - 3.84 ms | **600 - 1,465 ms** |
+
+**p50 varied by 14%. p99 varied by 15.8x within one arm**, and the arm with no
+snapshot in the measurement window was *worse*. Nothing causal can be read from
+that, which is the point.
+
+**Four mechanisms were proposed and each was refuted by the next measurement**:
+unaccounted time inside `handle()` (the ring stall diagnostic reported **0 ms
+CPU** during the stall - the writer was not busy, it was not scheduled); lock
+contention on a desk index (the build without that index stalled identically);
+p99 scaling with book size (105,000 resting orders produced 23 ms); and the
+synchronous exchange-core snapshot (the table above).
+
+The only unrefuted evidence is direct rather than correlational, from JFR:
+
+```
+Ring queue wait 53 ms: writer idle 53 ms before this event,
+                       using 0 ms CPU across that gap
+```
+
+The writer is **3.2% utilised** - 1.9 s of work across a 60 s run - and the tail
+appears when the operating system does not run it. This machine hosts 14 JVMs,
+six Postgres containers, Prometheus, Grafana, Tempo, an OTel collector, a Vite
+dev server, **and k6 itself**. That last one is the trap LMAX names explicitly:
+*separate load generation from measurement*.
+
+**So: quote p50, and treat any p99 from this machine as unusable.** A real tail
+number needs k6 on a separate host. Until then a controlled A/B is still valid -
+noise hits both arms - but an absolute latency figure is not.
+
+## Order path capacity: the knee is 300 orders/sec
+
+- **Where**: `scripts/perf/run-baseline.sh probe`, measured 2026-08-17 against
+  ~200,000 resting orders. Supersedes the 200-250 estimate below.
+
+`run-baseline.sh` detects the knee itself rather than leaving it to be read off
+a table:
+
+| offered | accepted | p50 | p99 |
+|---:|---:|---:|---:|
+| 200/s | 12,001 | 4 ms | 32 ms |
+| 250/s | 15,000 | 4 ms | 33 ms |
+| 300/s | 18,001 | **5 ms** | 42 ms |
+| 400/s | 23,993 | **6 ms** | 181 ms - **degraded** |
+
+**p50 is the signal that matters here**, because it is a median over 18,000+
+samples rather than a tail. It sits flat at 3.4-3.9 ms through 250/s and then
+moves: 5.12 ms at 300/s, 6.95 at 400/s, 7.07 at 500/s, 8.51 at 600/s. A median
+that moves means the queue is no longer empty between commands.
+
+400/s is also the first rate all night to report a **non-zero infrastructure
+failure rate** (0.03%) and to accept less than it was offered - two signals
+independent of p99, which is what makes the knee credible when p99 alone is not.
+
+**The ceiling is above 600/s and was not found.** 35,964 of 36,000 were accepted
+at 600/s with zero rejections; the 36 missing look like k6 not issuing them
+rather than the service refusing, which means measurements above 600/s describe
+the load generator.
+
+**Why this differs from the 200-250 estimate below.** That one rested on p99
+degrading at 250/s (148 ms and 124 ms). Tonight 250/s measured 33 ms with a book
+sixteen times deeper. The earlier reading was not careless - it was a
+conclusion drawn from a metric this machine cannot measure.
+
+## Superseded: order path capacity: the knee is between 200 and 250 orders/sec
 
 - **Where**: `scripts/perf/order-path-capacity.sh`, measured 2026-08-16 after
   Kafka removal, the execution-service merge and the branch-A decision

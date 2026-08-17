@@ -4,6 +4,8 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import io.micrometer.core.instrument.binder.cache.CaffeineCacheMetrics;
 import io.micrometer.core.instrument.Timer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.jspecify.annotations.Nullable;
 import com.emporia.ordermanagement.model.ProcessedCommand;
 import com.emporia.ordermanagement.model.TradingOrder;
@@ -72,6 +74,8 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class OrderStateCache {
 
+    private static final Logger log = LoggerFactory.getLogger(OrderStateCache.class);
+
     /**
      * How long a repeated {@code Idempotency-Key} is honoured as a retry rather
      * than treated as a new request. This is a promise made to callers, and the
@@ -130,9 +134,9 @@ public class OrderStateCache {
             ProcessedCommandRepository processedRepository,
             OrderMetrics metrics,
             @Nullable RotatingDedupIndex dedup,
-            @Value("${emporia.orders.live-max:1000000}") long liveOrderMax,
+            @Value("${emporia.orders.live-max:-1}") long liveOrderMax,
             @Value("${emporia.cache.processed-max-size:50000}") long processedMaxSize) {
-        this.liveOrderMax = liveOrderMax;
+        this.liveOrderMax = liveOrderMax > 0 ? liveOrderMax : deriveLiveOrderMax();
         this.orderRepository = orderRepository;
         this.processedRepository = processedRepository;
         this.dedup = dedup;
@@ -279,11 +283,21 @@ public class OrderStateCache {
      * skipped rather than rejected, so the caller may hand over whatever the
      * query returned.
      */
-    void admitExisting(TradingOrder order) {
-        if (!isTerminal(order.getStatus())) {
-            orders.put(order.getId(), order);
-            index(order);
+    boolean admitExisting(TradingOrder order) {
+        if (isTerminal(order.getStatus())) {
+            return true;
         }
+        // The cap has to bite here too, and it did not before: it was checked
+        // only where new orders are created, which is the path that admits one
+        // order at a time. The startup load admits hundreds of thousands at
+        // once and asked nobody, so it ran the heap out - the exact failure the
+        // cap exists to prevent, entering through the door it was not watching.
+        if (atCapacity()) {
+            return false;
+        }
+        orders.put(order.getId(), order);
+        index(order);
+        return true;
     }
 
     private void index(TradingOrder order) {
@@ -357,6 +371,33 @@ public class OrderStateCache {
      */
     void markLiveSetComplete() {
         this.liveSetComplete = true;
+    }
+
+    /**
+     * Heap budget assumed for one live order, across every structure that holds
+     * it. Deliberately not the size of a {@code TradingOrder}: the same order is
+     * also resting in exchange-core's book, in this store's two indexes, and in
+     * the deduplication index, and all of them share one heap.
+     *
+     * <p>Calibrated, not guessed, from two runs on a 4 GB default heap:
+     * 188,666 live orders ran; 333,379 died with
+     * {@code OutOfMemoryError: Java heap space} during the startup load. 20 KB
+     * puts the derived cap at roughly 200,000 on that heap - inside the range
+     * that worked and well below the one that did not.
+     *
+     * <p>It is a budget, not a measurement of any object. Re-derive it if the
+     * order model grows or exchange-core's per-order footprint changes.
+     */
+    private static final long LIVE_ORDER_HEAP_BUDGET_BYTES = 20L * 1024L;
+
+    private static long deriveLiveOrderMax() {
+        long max = Runtime.getRuntime().maxMemory() / LIVE_ORDER_HEAP_BUDGET_BYTES;
+        log.info("Live-order store capacity derived from the heap: {} orders "
+                        + "({} MB max heap at {} KB budget per live order). "
+                        + "Override with emporia.orders.live-max.",
+                max, Runtime.getRuntime().maxMemory() / (1024 * 1024),
+                LIVE_ORDER_HEAP_BUDGET_BYTES / 1024);
+        return max;
     }
 
     /**

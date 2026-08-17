@@ -7,12 +7,11 @@ import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Fills {@link OrderStateCache} with every live order before the service takes
@@ -44,6 +43,9 @@ public class LiveOrderStoreWarmup {
 
     private static final List<OrderStatus> LIVE = List.of(OrderStatus.LIVE, OrderStatus.PARTIALLY_FILLED);
 
+    /** Lowest possible UUID, so the first page starts before every row. */
+    private static final UUID ZERO_UUID = new UUID(0L, 0L);
+
     private final OrderStateCache cache;
     private final TradingOrderRepository orders;
     private final int pageSize;
@@ -60,18 +62,34 @@ public class LiveOrderStoreWarmup {
         long startedAt = System.nanoTime();
         long loaded = 0;
         try {
-            // Sorted by id so successive pages do not overlap. Nothing is
-            // writing concurrently - the port is not open yet - so a plain
-            // offset page is sound here in a way it would not be later.
-            Page<TradingOrder> page = orders.findByStatusIn(
-                    LIVE, PageRequest.of(0, pageSize, Sort.by("id")));
+            // Walked by key, not by offset. An offset page has to establish an
+            // order over the whole live set before it can skip into it, so
+            // every page paid for a full sort - at 189,000 live orders that was
+            // an external merge spilling 31 MB to disk and 1,435 ms per page,
+            // and the total grew with the square of the set. Keyset paging
+            // index-scans the primary key from where the last page stopped, so
+            // each page costs the same and the total is linear.
+            UUID after = ZERO_UUID;
             while (true) {
-                for (TradingOrder order : page.getContent()) {
-                    cache.admitExisting(order);
+                List<TradingOrder> batch = orders.findByStatusInAndIdGreaterThanOrderByIdAsc(
+                        LIVE, after, PageRequest.ofSize(pageSize));
+                if (batch.isEmpty()) break;
+                for (TradingOrder order : batch) {
+                    if (!cache.admitExisting(order)) {
+                        // Stop, and deliberately do not mark the set complete.
+                        // A store that filled before it finished loading holds
+                        // some live orders and not others, which is precisely
+                        // the state nothing may answer a negative from.
+                        log.error("Live-order store hit its capacity after {} order(s); the live set is "
+                                        + "INCOMPLETE and lookups stay on Postgres. Raise "
+                                        + "emporia.orders.live-max or the heap, or reduce the live set.",
+                                loaded);
+                        return;
+                    }
                     loaded++;
                 }
-                if (!page.hasNext()) break;
-                page = orders.findByStatusIn(LIVE, page.nextPageable());
+                after = batch.get(batch.size() - 1).getId();
+                if (batch.size() < pageSize) break;
             }
             cache.markLiveSetComplete();
             log.info("Live-order store ready: {} order(s) loaded in {} ms. Lookups for live orders "

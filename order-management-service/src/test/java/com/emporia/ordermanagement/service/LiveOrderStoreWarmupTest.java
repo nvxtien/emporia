@@ -8,9 +8,6 @@ import com.emporia.ordermanagement.repository.ProcessedCommandRepository;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageImpl;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 
 import java.math.BigDecimal;
@@ -33,12 +30,9 @@ class LiveOrderStoreWarmupTest {
 
     @Test
     void loadsEveryLiveOrderAcrossPagesAndThenDeclaresTheSetComplete() {
-        List<TradingOrder> first = List.of(liveOrder(), liveOrder());
-        List<TradingOrder> second = List.of(liveOrder());
-        Pageable page0 = PageRequest.of(0, 2);
-        when(orders.findByStatusIn(anyCollection(), any(Pageable.class)))
-                .thenReturn(new PageImpl<>(first, page0, 3))
-                .thenReturn(new PageImpl<>(second, page0.next(), 3));
+        when(orders.findByStatusInAndIdGreaterThanOrderByIdAsc(anyCollection(), any(UUID.class), any(Pageable.class)))
+                .thenReturn(List.of(liveOrder(), liveOrder()))
+                .thenReturn(List.of(liveOrder()));
 
         new LiveOrderStoreWarmup(cache, orders, 2).load();
 
@@ -54,7 +48,7 @@ class LiveOrderStoreWarmupTest {
      */
     @Test
     void aFailedLoadLeavesTheSetIncompleteRatherThanMarkingItComplete() {
-        when(orders.findByStatusIn(anyCollection(), any(Pageable.class)))
+        when(orders.findByStatusInAndIdGreaterThanOrderByIdAsc(anyCollection(), any(UUID.class), any(Pageable.class)))
                 .thenThrow(new IllegalStateException("database unavailable"));
 
         new LiveOrderStoreWarmup(cache, orders, 2).load();
@@ -66,15 +60,36 @@ class LiveOrderStoreWarmupTest {
 
     @Test
     void aPartialLoadThatFailsMidwayIsStillNotMarkedComplete() {
-        Page<TradingOrder> firstPage = new PageImpl<>(List.of(liveOrder()), PageRequest.of(0, 1), 2);
-        when(orders.findByStatusIn(anyCollection(), any(Pageable.class)))
-                .thenReturn(firstPage)
+        when(orders.findByStatusInAndIdGreaterThanOrderByIdAsc(anyCollection(), any(UUID.class), any(Pageable.class)))
+                .thenReturn(List.of(liveOrder()))
                 .thenThrow(new IllegalStateException("connection lost mid-load"));
 
         new LiveOrderStoreWarmup(cache, orders, 1).load();
 
         assertThat(cache.liveOrderCount()).isEqualTo(1);
         assertThat(cache.isLiveSetComplete()).isFalse();
+    }
+
+    /**
+     * The gap that let a 4 GB heap die: the cap was enforced where new orders
+     * are created, one at a time, and not where the startup load admits
+     * hundreds of thousands at once. Hitting it must stop the load and leave
+     * the set marked incomplete.
+     */
+    @Test
+    void hittingTheCapDuringTheLoadStopsAndLeavesTheSetIncomplete() {
+        OrderStateCache small = new OrderStateCache(orders, processed, metrics, null, 2, 1000);
+        when(orders.findByStatusInAndIdGreaterThanOrderByIdAsc(anyCollection(), any(UUID.class), any(Pageable.class)))
+                .thenReturn(List.of(liveOrder(), liveOrder(), liveOrder(), liveOrder()));
+
+        new LiveOrderStoreWarmup(small, orders, 4).load();
+
+        assertThat(small.liveOrderCount())
+                .as("nothing beyond the cap may be admitted")
+                .isEqualTo(2);
+        assertThat(small.isLiveSetComplete())
+                .as("a store that filled before it finished loading is not a complete set")
+                .isFalse();
     }
 
     private static TradingOrder liveOrder() {
