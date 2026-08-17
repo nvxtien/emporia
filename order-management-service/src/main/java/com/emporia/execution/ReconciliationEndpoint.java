@@ -56,7 +56,19 @@ class ReconciliationEndpoint {
 
     @ReadOperation
     public Report reconcile() {
-        List<OrderView> liveOrders = tradingData.recoverable().directOrders().stream()
+        return reconcile(tradingData.recoverable().directOrders());
+    }
+
+    /**
+     * The comparison, separated from where the live set came from.
+     *
+     * <p>The actuator path above fetches it over HTTP from this same process,
+     * which means it can only run once the port is open. The startup guard has
+     * the same orders in hand already and must run <em>before</em> the port
+     * opens, so it calls this directly. One comparison, two sources.
+     */
+    Report reconcile(List<OrderView> candidates) {
+        List<OrderView> liveOrders = candidates.stream()
                 .filter(order -> !isTerminal(order.status()))
                 .toList();
 
