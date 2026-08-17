@@ -82,14 +82,27 @@ print(d["missingCount"])' \
 }
 
 submit_order() {
-    local token="$1" label="$2" listing="${3:-1}"
+    local token="$1" label="$2" listing="${3:-1}" parent="${4:-}"
+    local parent_field=""
+    [ -n "$parent" ] && parent_field=",\"parentOrderId\":\"${parent}\""
     curl -fsS -X POST "${GATEWAY_URL}/api/orders" \
         -H "Authorization: Bearer ${token}" \
         -H "Content-Type: application/json" \
         -H "Idempotency-Key: crash-recovery-${label}-$(date +%s%N)" \
         -d "{\"listingId\":${listing},\"side\":\"BUY\",\"type\":\"LIMIT\",
-             \"quantity\":\"1\",\"limitPrice\":\"100.00\",\"destination\":\"DMA\"}" \
+             \"quantity\":\"1\",\"limitPrice\":\"100.00\",\"destination\":\"DMA\"${parent_field}}" \
         | python3 -c 'import sys, json; print(json.load(sys.stdin)["id"])'
+}
+
+# Orders that failed with "unknown lifecycle order" since this run began.
+#
+# This used to grep the service log, and the message is not written there - it is
+# recorded against the order in order_event. The guard has therefore never fired,
+# through the whole period in which every child order was answering exactly that
+# after a restart. Scoped by time because the table still holds the history.
+lifecycle_failures_since() {
+    psql_q "select count(*) from emporia_order_data.order_event
+            where message like '%unknown lifecycle order%' and occurred_at >= '$1';"
 }
 
 order_status() { psql_q "select order_status from emporia_order_data.trading_order where id = '$1';"; }
@@ -107,6 +120,7 @@ command -v k6 >/dev/null 2>&1 \
 
 token="$(mint_token)"
 
+test_started_at="$(psql_q "select now();" | tr -d '\r')"
 echo "==> Baseline reconciliation"
 missing_before="$(reconcile_missing)"
 echo "    venue is missing ${missing_before} order(s) before the test"
@@ -123,6 +137,14 @@ sleep "$((interval + 10))"
 echo "==> Submitting order B (journal only, after the snapshot)"
 order_b="$(submit_order "$token" b)"
 echo "    ${order_b}"
+
+# A child of B, because the lifecycle projection is rebuilt from
+# order-management and used to be rebuilt from top-level orders only. Every
+# child then answered "unknown lifecycle order" to any operation after a
+# restart, and no stage of this check touched a child, so nothing noticed.
+echo "==> Submitting order C, a child of B"
+order_c="$(submit_order "$token" c 1 "$order_b")"
+echo "    ${order_c}"
 sleep 3
 
 [ "$(order_status "$order_a")" = "LIVE" ] || fail "order A is not LIVE before the kill"
@@ -134,7 +156,7 @@ echo "==> ${LOAD_DURATION} of load at ${LOAD_RATE}/sec, journal-only"
 checkpoint_file="$repo_root/order-management-service/.local-run/exchange-core-simulation/emporia-exchange-core.latest"
 cp_before="$(grep -o '[0-9]*' "$checkpoint_file" 2>/dev/null | head -1 || echo unknown)"
 EMPORIA_TOKEN="$token" k6 run --quiet \
-    -e "RATE=${LOAD_RATE}" -e "DURATION=${LOAD_DURATION}" \
+    -e "RATE=${LOAD_RATE}" -e "DURATION=${LOAD_DURATION}" -e "CHILD_SHARE=0.3" \
     "$repo_root/scripts/perf/order-load.js" 2>&1 | grep -E "accepted|rejections" | sed 's/^ */    /'
 cp_after="$(grep -o '[0-9]*' "$checkpoint_file" 2>/dev/null | head -1 || echo unknown)"
 if [ "$cp_before" != "$cp_after" ]; then
@@ -187,6 +209,25 @@ restored="$(grep -c "Rebuilt venue lifecycle from order-management" \
 # Cancelling is the real proof. It requires the venue to resolve order B in its
 # lifecycle, which is precisely what failed before the rebuild existed - the
 # book held the order but the lifecycle raised "unknown lifecycle order".
+# The child first. Cancelling B would cascade to C and prove nothing about
+# whether the venue could resolve C in its own right.
+echo "==> Cancelling child order C, which the venue must resolve on its own"
+token="$(mint_token)"
+curl -fsS -X POST "${GATEWAY_URL}/api/orders/${order_c}/cancel" \
+    -H "Authorization: Bearer ${token}" \
+    -H "Idempotency-Key: crash-recovery-cancel-c-$(date +%s%N)" >/dev/null \
+    || fail "cancel of child order C was rejected outright"
+status_c="$(order_status "$order_c")"
+for _ in $(seq 1 15); do
+    [ "$status_c" = "CANCELLED" ] && break
+    sleep 2
+    status_c="$(order_status "$order_c")"
+done
+[ "$status_c" = "CANCELLED" ] \
+    || fail "child order C is ${status_c}, not CANCELLED. The venue holds children in
+  their own right, so the lifecycle projection has to be rebuilt with them - see
+  LiveDirectOrders.current()."
+
 echo "==> Cancelling order B, which requires the venue to resolve it"
 token="$(mint_token)"
 curl -fsS -X POST "${GATEWAY_URL}/api/orders/${order_b}/cancel" \
@@ -209,9 +250,12 @@ done
   order accepted after the last snapshot, which is the failure this checks for.
   Look for 'unknown lifecycle order' in .local-run/logs/order-management-service.log."
 
-if grep -q "unknown lifecycle order" "$repo_root/.local-run/logs/order-management-service.log"; then
-    fail "recovery logged 'unknown lifecycle order' - the engine and the lifecycle disagree"
-fi
+failures="$(lifecycle_failures_since "$test_started_at")"
+[ "${failures:-0}" -eq 0 ] \
+    || fail "${failures} order(s) failed with 'unknown lifecycle order' since this run began -
+  the engine holds orders the lifecycle projection cannot resolve. Query:
+    select * from emporia_order_data.order_event
+     where message like '%unknown lifecycle order%' and occurred_at >= '${test_started_at}';"
 
 # The assertion the two-order version could not make. Everything above proves
 # the lifecycle rebuild works; this proves the engine still holds what clients
@@ -228,6 +272,7 @@ echo "    missing before ${missing_before}, after ${missing_after}, delta ${lost
   continues. See CONFIGURATION.md, \"The venue's journal does not recover process
   death\"."
 
-echo "==> PASS: order B survived kill -9 and the venue can act on it"
+echo "==> PASS: orders survived kill -9 and the venue can act on them"
 echo "    order A ${order_a} -> $(order_status "$order_a")"
 echo "    order B ${order_b} -> ${status_b}"
+echo "    child C ${order_c} -> ${status_c}"
