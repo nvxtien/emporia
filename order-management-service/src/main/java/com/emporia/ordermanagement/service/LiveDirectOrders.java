@@ -37,16 +37,35 @@ public class LiveDirectOrders {
         this.orders = orders;
     }
 
-    /** Live top-level DMA orders, oldest first. */
+    /**
+     * Every live order the venue is holding: DMA, oldest first, <b>children
+     * included</b>.
+     *
+     * <p>This used to return top-level orders only, and both callers inherited
+     * the gap. The venue's lifecycle projection was rebuilt without any child
+     * order, so after every restart each one answered
+     * {@code unknown lifecycle order} to any operation - 2,340 live children
+     * were in that state when it was found, uncancellable. And the startup
+     * reconciliation, comparing this set against the venue's book, counted those
+     * same children as orders the venue held and order-management did not.
+     *
+     * <p>A strategy's children rest at the venue in their own right and carry
+     * their own venue order ids. "Which strategies are running" and "what is the
+     * venue holding" are different questions; {@link #parents()} answers the
+     * first.
+     */
     @Transactional(readOnly = true)
     public List<OrderView> current() {
-        return parents().stream()
+        return orders.findByStatusInOrderByCreatedAtAsc(ACTIVE).stream()
                 .filter(LiveDirectOrders::isDirect)
                 .map(TradingOrder::view)
                 .toList();
     }
 
-    /** Live top-level orders of every destination, for callers that split them. */
+    /**
+     * Live <b>top-level</b> orders of every destination, for callers that split
+     * them into direct orders and running strategies.
+     */
     @Transactional(readOnly = true)
     public List<TradingOrder> parents() {
         return orders.findByStatusInAndParentOrderIdIsNullOrderByCreatedAtAsc(ACTIVE);

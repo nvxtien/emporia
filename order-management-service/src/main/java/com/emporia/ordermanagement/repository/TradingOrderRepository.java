@@ -20,6 +20,14 @@ public interface TradingOrderRepository extends JpaRepository<TradingOrder, UUID
     List<TradingOrder> findByParentOrderIdAndStatusIn(UUID parentOrderId, Collection<OrderStatus> statuses);
     List<TradingOrder> findByParentOrderIdOrderByCreatedAtAsc(UUID parentOrderId);
     List<TradingOrder> findByStatusInAndParentOrderIdIsNullOrderByCreatedAtAsc(Collection<OrderStatus> statuses);
+
+    /**
+     * Every live order, children included. The parent-only finder above answers
+     * "which strategies are running"; this answers "what is the venue holding",
+     * and those are not the same question - a strategy's children rest at the
+     * venue in their own right and carry their own venue order ids.
+     */
+    List<TradingOrder> findByStatusInOrderByCreatedAtAsc(Collection<OrderStatus> statuses);
     List<TradingOrder> findByParentOrderIdIsNullAndDestinationInOrderByUpdatedAtDesc(
             Collection<String> destinations,
             Pageable pageable);
