@@ -142,12 +142,19 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             @Value("${emporia.execution.exchange-core.min-free-storage-bytes:0}") long minFreeStorageBytes,
             @Value("${emporia.execution.sor.slippage-bps:10}") BigDecimal slippageBps,
             @Value("${emporia.execution.exchange-core.wait-strategy:busy-spin}") String waitStrategyName,
+            // Was read from configuration by nobody: the value below was a literal
+            // `true`, so this property has never done anything, while
+            // run-infra-docker.sh set it to false and the production runbook gated
+            // a staged rollout on it. Defaults to true because that is what the
+            // engine has actually been doing.
+            @Value("${emporia.execution.exchange-core.journaling:true}") boolean journaling,
             MeterRegistry meters,
             Environment environment)
             throws IOException {
         this(commands, tokenProvider, dataSource, recoverySource, exchangeId, storage, partitions,
                 accountingMode, portfolioUrl, portfolioTimeout, retainedCheckpoints,
-                minFreeStorageBytes, slippageBps, waitStrategyName, meters, activeProfiles(environment));
+                minFreeStorageBytes, slippageBps, waitStrategyName, journaling, meters,
+                activeProfiles(environment));
     }
 
     public ExchangeCoreExecutionVenueGateway(
@@ -168,7 +175,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             throws IOException {
         this(commands, tokenProvider, dataSource, recoverySource, exchangeId, storage, partitions,
                 accountingMode, portfolioUrl, portfolioTimeout, retainedCheckpoints,
-                minFreeStorageBytes, slippageBps, "busy-spin", meters, Set.of());
+                minFreeStorageBytes, slippageBps, "busy-spin", true, meters, Set.of());
     }
 
     private ExchangeCoreExecutionVenueGateway(
@@ -186,6 +193,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             long minFreeStorageBytes,
             BigDecimal slippageBps,
             String waitStrategyName,
+            boolean journaling,
             MeterRegistry meters,
             Set<String> activeProfiles)
             throws IOException {
@@ -198,6 +206,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
                         .retainedCheckpoints(retainedCheckpoints)
                         .minFreeStorageBytes(minFreeStorageBytes)
                         .waitStrategy(parseWaitStrategy(waitStrategyName))
+                        .journaling(journaling)
                         .activeProfiles(activeProfiles)
                         .build()))
                 .fullEquityRisk(ACCOUNTING_FULL_EQUITY.equalsIgnoreCase(accountingMode))
@@ -205,9 +214,11 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
                 .slippageBps(slippageBps)
                 .meterRegistry(meters)
                 .buildSpec());
-        log.info("Exchange-core venue started with accounting-mode={} journaling=true retained-checkpoints={} "
+        // journaling={} rather than a literal. The literal is what made
+        // crash-recovery-check.sh's `grep journaling=true` guard unfalsifiable.
+        log.info("Exchange-core venue started with accounting-mode={} journaling={} retained-checkpoints={} "
                         + "min-free-storage-bytes={} slippage-bps={}",
-                accountingMode, retainedCheckpoints, minFreeStorageBytes, slippageBps);
+                accountingMode, journaling, retainedCheckpoints, minFreeStorageBytes, slippageBps);
     }
 
     private static ProductionSimulationAccounting buildAccounting(
@@ -1157,7 +1168,8 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             int retainedCheckpoints,
             long minFreeStorageBytes,
             Set<String> activeProfiles,
-            CoreWaitStrategy waitStrategy) {
+            CoreWaitStrategy waitStrategy,
+            boolean journaling) {
         private ProductionVenueSpec {
             exchangeId = Objects.requireNonNull(exchangeId, "exchangeId");
             storage = Objects.requireNonNull(storage, "storage");
@@ -1180,6 +1192,12 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         private long minFreeStorageBytes;
         private Set<String> activeProfiles = Set.of();
         private CoreWaitStrategy waitStrategy = CoreWaitStrategy.BUSY_SPIN;
+        private boolean journaling = true;
+
+        private ProductionVenueSpecBuilder journaling(boolean journaling) {
+            this.journaling = journaling;
+            return this;
+        }
 
         private ProductionVenueSpecBuilder exchangeId(String exchangeId) {
             this.exchangeId = exchangeId;
@@ -1223,7 +1241,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
 
         private ProductionVenueSpec build() {
             return new ProductionVenueSpec(exchangeId, storage, partitions, accounting,
-                    retainedCheckpoints, minFreeStorageBytes, activeProfiles, waitStrategy);
+                    retainedCheckpoints, minFreeStorageBytes, activeProfiles, waitStrategy, journaling);
         }
     }
 
@@ -1306,7 +1324,8 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
                     .build();
             ProductionSimulationConfiguration configuration =
                     new ProductionSimulationConfiguration(
-                            spec.exchangeId(), spec.storage(), spec.partitions(), perfConfig, true);
+                            spec.exchangeId(), spec.storage(), spec.partitions(), perfConfig,
+                            spec.journaling());
             checkpointStore = new ExchangeCoreCheckpointStore(configuration.storageDirectory());
             ExchangeCoreCheckpointStore.LatestCheckpoint latest =
                     checkpointStore.load().orElse(null);

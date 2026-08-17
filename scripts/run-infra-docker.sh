@@ -80,7 +80,11 @@ DB_PASSWORD=admin123 \
 EXECUTION_VENUE_MODE=${EXECUTION_VENUE_MODE:-exchange-core} \
 EXCHANGE_CORE_ACCOUNTING_MODE=${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk} \
 EXCHANGE_CORE_PORTFOLIO_URL=${EXCHANGE_CORE_PORTFOLIO_URL:-http://localhost:8088} \
-EXCHANGE_CORE_JOURNALING=${EXCHANGE_CORE_JOURNALING:-false} \
+# Default true, not false. The property used to be bound to nothing and the
+# engine journalled regardless, so false here never took effect; now that it
+# does, true is what preserves the behaviour every measurement in
+# CONFIGURATION.md was taken under.
+EXCHANGE_CORE_JOURNALING=${EXCHANGE_CORE_JOURNALING:-true} \
 EXCHANGE_CORE_SNAPSHOT_INTERVAL=${EXCHANGE_CORE_SNAPSHOT_INTERVAL:-60s} \
 EXCHANGE_CORE_RETAINED_CHECKPOINTS=${EXCHANGE_CORE_RETAINED_CHECKPOINTS:-2} \
 EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES=${EXCHANGE_CORE_MIN_FREE_STORAGE_BYTES:-0} \
@@ -116,7 +120,7 @@ cat <<EOF
 ==> Infrastructure-only Docker stack is up
     Frontend:         http://localhost:3001  (sign in: admin / admin123)
     Gateway:          http://localhost:8082
-    Execution venue:  ${EXECUTION_VENUE_MODE:-exchange-core} (accounting: ${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk}, journaling: ${EXCHANGE_CORE_JOURNALING:-false})
+    Execution venue:  ${EXECUTION_VENUE_MODE:-exchange-core} (accounting: ${EXCHANGE_CORE_ACCOUNTING_MODE:-full-equity-risk}, journaling: ${EXCHANGE_CORE_JOURNALING:-true})
     Market data:      ${MARKET_DATA_PROVIDER:-simulated}
     Traces/metrics:   http://localhost:3300  (Grafana: Tempo + Prometheus)
     Postgres:         docker compose ps
