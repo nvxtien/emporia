@@ -151,6 +151,35 @@ That is the designed degraded mode: the indexes refuse to answer, every lookup
 falls back to the database, and behaviour is exactly what it was before the
 store existed. Slower, and correct.
 
+**But "slower, and correct" understates what a full store does to intake, and
+that is worth stating plainly.** The startup load stops *at* `liveOrderMax`, so
+a book larger than the cap leaves `atCapacity()` true before the port opens -
+and `create()` refuses on exactly that condition. The service then declines
+**every** new order, not merely the ones that would have overflowed:
+
+```
+HTTP 429 {"status":429,"error":"Too Many Requests","path":"/orders"}
+```
+
+Confirmed 2026-08-17 with 404,820 live orders against a 209,715 cap: a k6 run at
+20 orders/sec recorded **0 accepted, 100% business rejections** and aborted on
+its own guard in 15 seconds. The incomplete live set and the refusal to accept
+anything are the same condition seen from two sides, and only the first is
+logged.
+
+**Read the body, not just the status.** The gateway's rate limiter also answers
+429, with body `gateway_rate_limited: too many order commands` and an
+`X-RateLimit-Reason` header. A 429 carrying `"path":"/orders"` and neither of
+those is the store, and the two have opposite fixes - raise the tier for the
+first, shrink the book for the second.
+
+**Only orders leaving clears it.** `cancel()` deliberately does not check
+`atCapacity()`, so cancellation still works when submission does not - which is
+the property that makes the state recoverable at all. Cancelling 180 orders
+dropped the store below the cap and the next submit returned 201. There is no
+operator switch; the book has to shrink, whether by cancellation through the API
+or by `scripts/perf/reset-venue-state.sh`.
+
 **The load walks by key, not by offset, and the difference is large.** An offset
 page has to order the whole live set before it can skip into it, so every page
 paid for a full sort - at 189,000 live orders `EXPLAIN` showed an external merge
@@ -172,6 +201,49 @@ because its filter only ever answers "never seen" and a command arriving mid-loa
 still falls through to the database. This one cannot: a fill could update an
 order in memory while the loader still held the older row, and writing that row
 over the newer one would lose the fill.
+
+## A health check cannot tell your service from the one already on that port
+
+- **Where**: `scripts/lib/run-common.sh`, `wait_http_health`, found 2026-08-17
+
+`run-infra-docker.sh` starts each service, then polls its actuator URL until
+something answers. When a previous stack is still running, the service just
+started **fails to bind, the old one answers the poll, and the launcher prints
+its success banner**. Every measurement afterwards is against whatever code that
+older process loaded, which is not necessarily what is checked out now.
+
+Observed with all eight services at once: each log held
+
+```
+APPLICATION FAILED TO START
+Description: Web server failed to start. Port 8086 was already in use.
+```
+
+while `:8086` was served by a process started eleven hours earlier, and the
+launcher reported the stack up.
+
+**Checking that the started process is still alive does not catch this.** The
+failed JVM does not exit: exchange-core starts non-daemon threads during context
+refresh, before the web server binds, so the process lingers after the context
+fails - alive, holding a couple of hundred MB, answering nothing. That is what a
+"process not responding" in Activity Monitor usually is here.
+
+`wait_http_health` now resolves the pid listening on the URL's port and requires
+it to descend from the pid this run recorded, failing with
+
+```
+order-management-service is NOT the process this script started.
+  :8086 is held by pid 90120 (started Mon Aug 17 04:20:20 2026)
+  this run started pid 69052 - it most likely failed to bind
+```
+
+**Two things follow for cleanup.** `scripts/stop-services.sh` reads
+`.local-run/pids/`, which after such a run names the processes that died rather
+than the ones still serving - so it kills the corpses and leaves the stack up.
+Stop by port instead. And when the ownership check cannot run - no port in the
+URL, no pid recorded, no `lsof` - it says so on stderr rather than passing
+quietly, because a check that silently succeeds when it cannot run is the same
+trap it exists to close.
 
 ## p99 is not measurable on a developer machine, and four conclusions died proving it
 
@@ -611,6 +683,117 @@ commit with a durable acknowledgement. It never loses an acknowledged order and
 adds the force interval to every submit. The exposure above is accepted
 deliberately instead; revisit this if the requirement becomes "an acknowledged
 order survives machine loss".
+
+## The venue's journal does not recover process death, and the two logs disagree
+
+- **Where**: `exchange-core` `DiskSerializationProcessor`,
+  `EXCHANGE_CORE_SNAPSHOT_INTERVAL`, measured 2026-08-17
+
+The section above is about order-management's own write-ahead log and is
+correct: it survives `kill -9`. **The matching engine's journal does not**, so
+`kill -9` leaves the two sides of one process disagreeing about which orders
+exist - order-management fully recovered, the venue quietly short.
+
+**Reproduced deliberately.** Run load so the window exists only in the journal
+(the checkpoint id must not move), then kill without a shutdown checkpoint:
+
+```
+BEFORE   checked=96,425  missing=0      ghosts=61,829   checkpoint=959
+load     3,000 accepted, 1,465 cancels; checkpoint still 959
+kill -9
+AFTER    checked=99,152  missing=2,416  ghosts=61,829   checkpoint=959
+```
+
+**2,416 orders order-management holds as LIVE are absent from the matching
+engine.** They are durable in PostgreSQL, they were answered 201, and they will
+never fill. Ghosts did not move, so cancellation is not involved - the losses are
+submissions.
+
+**Why a kill perforates rather than truncates.** Journalling is a Disruptor stage
+running *in parallel* with risk and matching, not in front of them, so the
+journal is not a prefix of what the engine did. A hard kill leaves holes, and
+recovery reports them and carries on:
+
+```
+WARN DiskSerializationProcessor : Sequence gap 0->20 (20)
+WARN DiskSerializationProcessor : Sequence gap 28->37 (9)
+855 gaps, 1,740 commands skipped, largest 20, and zero ERROR lines
+```
+
+The engine then opens for trading on a book it knows was rebuilt from an
+incomplete journal. **Whether that should be a warning rather than a refusal to
+start is the open question**, and it is in the forked dependency, so it is
+answerable.
+
+*Some of those gaps may be benign* - read-only commands are not journalled and
+would leave legitimate holes. The gap count is evidence of the mechanism, not a
+measurement of the loss. The loss is measured separately: `missing` went 0 →
+2,416.
+
+**Two things made this hard to see, and both are now fixed.**
+
+`emporia.execution.exchange-core.journaling` was bound to **nothing**: the
+gateway passed a literal `true` to `ProductionSimulationConfiguration`, so the
+property had never done anything. `run-infra-docker.sh` set it to `false` and
+printed `journaling: false` in its banner while the engine journalled anyway, and
+`EXCHANGE_CORE_PRODUCTION_RUNBOOK.md` gated a staged production rollout on it -
+*"Keep `EXCHANGE_CORE_JOURNALING=false` until `crash-recovery-check.sh` passes"* -
+a gate that could not be opened or closed.
+
+The log line was worse than useless, because something depended on it:
+
+```java
+log.info("... accounting-mode={} journaling=true retained-checkpoints={} ...")   // was
+grep -q "journaling=true" .../order-management-service.log || fail "...proves nothing"
+```
+
+`journaling=true` was **hardcoded in the format string**, and
+`crash-recovery-check.sh` verifies journaling by grepping for it. The check could
+never fail, in either direction. Its own failure message says *"or this proves
+nothing"*.
+
+The property is now read (`@Value(...journaling:true)`), threaded to the engine,
+and printed as a value, so the grep is falsifiable and the runbook's gate is
+real. **The default is `true` everywhere**, including in `run-infra-docker.sh`,
+because that is what the engine was already doing and what every measurement in
+this document was taken under.
+
+**The acceptance check could not fail, and now can.** `crash-recovery-check.sh`
+exercised **two** resting orders. At that rate each command is its own Disruptor
+batch and flushes promptly, so the journal never perforates and the test passed
+every time. It now runs a load stage and asserts on a reconciliation *delta*, so
+it works against an already-drifted book:
+
+```
+missing before 1479, after 2792, delta 1313
+FAIL: the venue lost 1313 order(s) that order-management still holds as LIVE.
+```
+
+**It passed every one of its original assertions first** - journaling enabled,
+lifecycle rebuilt, order B cancellable after recovery, no `unknown lifecycle
+order`. The two-order version would have printed `PASS` on a run that had just
+lost 1,313 acknowledged orders. It was not testing the wrong thing; it was
+testing a different mechanism, correctly, and that mechanism was fine.
+
+Two further defects in the check itself, both found by running it:
+
+- It restarted with a plain `mvn spring-boot:run`. `agency` is the default
+  profile (`!matching`) and carries no exchange-core dependency at all, so the
+  restart brought up a build with no matching engine. The profile rename made
+  that true silently - nothing failed until the script was next run.
+- `DB_URL` defaulted to `localhost:5432/emporia`, which is not where any
+  per-service database lives.
+
+`k6` is now required rather than optional: without the load stage the check
+cannot reproduce what it exists for, and a check that cannot fail is worse than
+no check. Two independent runs have now measured the same loss - 2,416 of 3,000
+and 1,313 of 3,001.
+
+**Nothing surfaces any of this.** Order-management is internally consistent, the
+client has a 201, and the only component that compares the two sides is
+`ReconciliationEndpoint` - an actuator endpoint with no caller outside tests.
+Reaching it takes an operator who already suspects the problem.
+
 
 ## Internalisation is a declaration about the entity, and it can refuse startup
 
