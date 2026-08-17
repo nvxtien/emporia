@@ -35,6 +35,58 @@ start_service() {
     echo "    pid=$pid log=$log_dir/$name.log"
 }
 
+# is_descendant <ancestor pid> <pid>
+# True when <pid> is <ancestor pid> or was forked from it. Used to tell a
+# service this script started from a stranger already holding its port.
+is_descendant() {
+    local ancestor="$1" pid="$2" hops=0
+    while [ -n "$pid" ] && [ "$pid" != "0" ] && [ "$pid" != "1" ]; do
+        [ "$pid" = "$ancestor" ] && return 0
+        pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
+        hops=$((hops + 1)); [ "$hops" -gt 24 ] && break
+    done
+    return 1
+}
+
+# verify_port_owner <name> <url>
+# A health check only proves *something* answers that port. When a previous run
+# is still listening, the service just started fails to bind - and on this stack
+# it does not even exit, because exchange-core's non-daemon threads outlive the
+# failed context - so the launcher polls the old process, sees it answer, and
+# reports a stack that it did not actually start. Every measurement afterwards
+# is against unknown code. Confirm the listener descends from the pid recorded
+# for this service.
+verify_port_owner() {
+    local name="$1" url="$2"
+    local port owner expected
+    # Every skip below is announced. A check that silently passes when it
+    # cannot run is the same trap as the health check it exists to backstop.
+    port="$(printf '%s' "$url" | sed -n 's|.*://[^:/]*:\([0-9][0-9]*\).*|\1|p')"
+    if [ -z "$port" ]; then
+        echo "    (cannot read a port from $url; ownership unverified)" >&2; return 0
+    fi
+    expected="$(cat "$pid_dir/$name.pid" 2>/dev/null)"
+    if [ -z "$expected" ]; then
+        echo "    (no pid recorded for $name; ownership unverified)" >&2; return 0
+    fi
+    if ! command -v lsof >/dev/null 2>&1; then
+        echo "    (lsof not on PATH; ownership unverified)" >&2; return 0
+    fi
+    owner="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1)"
+    if [ -z "$owner" ]; then
+        echo "    $name answered on :$port but nothing is listening there" >&2
+        return 1
+    fi
+    if ! is_descendant "$expected" "$owner"; then
+        echo "    $name is NOT the process this script started." >&2
+        echo "      :$port is held by pid $owner (started $(ps -o lstart= -p "$owner" 2>/dev/null | xargs))" >&2
+        echo "      this run started pid $expected - it most likely failed to bind; see $log_dir/$name.log" >&2
+        echo "      stop the old stack first (scripts/stop-services.sh, or by port) and re-run." >&2
+        return 1
+    fi
+    return 0
+}
+
 # wait_http_health <name> <url> [timeout seconds, default 90]
 wait_http_health() {
     local name="$1" url="$2" timeout="${3:-90}" waited=0
@@ -49,6 +101,10 @@ wait_http_health() {
         sleep 2
         waited=$((waited + 2))
     done
+    if ! verify_port_owner "$name" "$url"; then
+        echo
+        return 1
+    fi
     echo " up"
 }
 
