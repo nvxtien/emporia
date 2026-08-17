@@ -684,6 +684,49 @@ adds the force interval to every submit. The exposure above is accepted
 deliberately instead; revisit this if the requirement becomes "an acknowledged
 order survives machine loss".
 
+## The web server starts at MAX_VALUE - 2048, and the venue used to start after it
+
+- **Where**: `ExchangeCoreExecutionVenueGateway.getPhase()`,
+  `StartupReconciliationGuard`, measured 2026-08-17
+
+Spring Boot's `WebServerStartStopLifecycle` returns **2147481599**, which is
+`Integer.MAX_VALUE - 2048`. Read out of the framework, not assumed - the first
+attempt at a pre-traffic check assumed `MAX_VALUE - 1`, put itself at
+`MAX_VALUE - 512`, and ran **twenty-four seconds after the port opened** while
+its own unit test asserted it would not.
+
+Lower phase starts first, so the venue gateway at `MAX_VALUE - 1024` was also
+starting *after* the port. Every restart had a window in which the service
+accepted connections while the matching engine had not yet rebuilt its lifecycle
+projection. Nobody chose that: the phase was picked relative to default-phase
+beans, which it is correctly above, and the web server was never in the
+comparison.
+
+**Why it could not simply be moved.** `start()` rebuilt the projection from
+`TradingDataClient.recoverable()` - an HTTP call to *this same process*. Anything
+that needs the port cannot run before the port, so the venue was pinned after it,
+and any check needing the venue was pinned after that. The gateway now reads the
+same rows in process through `LiveDirectOrders`, and the ordering constraint
+disappears with the HTTP hop.
+
+```
+MAX_VALUE - 3072   venue gateway starts, lifecycle rebuilt   22:38:00
+MAX_VALUE - 2560   startup reconciliation                    22:38:18
+MAX_VALUE - 2048   Tomcat binds :8086                        22:38:19
+```
+
+`LiveDirectOrders` exists so the two callers that need "orders the venue is
+answerable for" - the recovery endpoint and the startup check - cannot drift
+apart. A guard whose query differs from the one that fed the venue would report
+disagreements it had invented itself.
+
+**The startup check warns by default rather than refusing.** Missing orders are
+a correctness failure and `startup-policy=refuse` is available, but refusing
+makes the service un-startable exactly when somebody is recovering it, and the
+measurement above shows an ordinary hard kill reaches that state. Ghosts never
+refuse: a service that will not start until someone clears 61,829 of them by
+hand is worse than one that says so loudly.
+
 ## The venue's journal does not recover process death, and the two logs disagree
 
 - **Where**: `exchange-core` `DiskSerializationProcessor`,
