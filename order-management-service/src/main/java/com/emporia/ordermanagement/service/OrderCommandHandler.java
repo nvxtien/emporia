@@ -144,14 +144,12 @@ public class OrderCommandHandler {
      * is a child left live after its parent was cancelled - silently.
      */
     private List<TradingOrder> liveChildrenOf(java.util.UUID parentId) {
-        return cache.liveChildrenOf(parentId)
-                .orElseGet(() -> orders.findByParentOrderIdAndStatusIn(parentId, CANCELLABLE));
+        return cache.liveChildrenOf(parentId, () -> orders.findByParentOrderIdAndStatusIn(parentId, CANCELLABLE));
     }
 
     /** Live orders on a desk, newest first, with the same fallback and for the same reason. */
     private List<TradingOrder> liveOrdersOnDesk(String deskId) {
-        return cache.liveOrdersOnDesk(deskId)
-                .orElseGet(() -> orders.findByDeskIdAndStatusInOrderByCreatedAtDesc(deskId, CANCELLABLE));
+        return cache.liveOrdersOnDesk(deskId, () -> orders.findByDeskIdAndStatusInOrderByCreatedAtDesc(deskId, CANCELLABLE));
     }
 
     private static String commandTypeTag(OrderCommand command) {

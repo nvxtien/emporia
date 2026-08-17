@@ -159,8 +159,7 @@ public class ExecutionCommandHandler {
      * question the writer asks, and the same index answers it.
      */
     private boolean hasLiveChildren(java.util.UUID parentId) {
-        return !cache.liveChildrenOf(parentId)
-                .orElseGet(() -> orders.findByParentOrderIdAndStatusIn(parentId, ACTIVE))
+        return !cache.liveChildrenOf(parentId, () -> orders.findByParentOrderIdAndStatusIn(parentId, ACTIVE))
                 .isEmpty();
     }
 

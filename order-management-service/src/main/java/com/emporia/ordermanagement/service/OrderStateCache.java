@@ -22,6 +22,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 /**
  * In-process write-through cache for {@link TradingOrder} and
@@ -63,10 +64,14 @@ import java.util.concurrent.TimeUnit;
  * {@code 67eaecf} and no Kafka listener remains in this service, so that basis
  * had not existed for some time.
  *
- * <h2>Eviction</h2>
+ * <h2>Bounds</h2>
  * <ul>
- *   <li>{@code trading-orders}: 100,000 entries, expire 1 h after last write.
- *       A desk with 10,000 live orders at any moment fits comfortably.</li>
+ *   <li>{@code trading-orders}: no Caffeine size cap and no write-age expiry.
+ *       It is a live-order store: terminal orders leave it, and live orders stay
+ *       until they do.</li>
+ *   <li>{@code liveOrderMax}: new live orders are refused with 429 when the
+ *       store is full. The default is derived from heap size and can be
+ *       overridden with {@code emporia.orders.live-max}.</li>
  *   <li>{@code processed-commands}: 50,000 entries, expire 24 h after write.
  *       Dedup window matches the Idempotency-Key TTL expected by callers.</li>
  * </ul>
@@ -99,6 +104,14 @@ public class OrderStateCache {
     private final Timer existsFromCache;
     private final Timer existsFromDb;
     private final Timer existsFromIndex;
+    // HOT_PATH_JPA_PLAN.md task 1.2: whether CANCEL/CANCEL_ALL's child and desk
+    // lookups actually answer from the index was previously only inferable
+    // from isLiveSetComplete() plus absence of contrary evidence, never
+    // measured directly.
+    private final Timer cancelChildrenFromIndex;
+    private final Timer cancelChildrenFromDb;
+    private final Timer cancelDeskFromIndex;
+    private final Timer cancelDeskFromDb;
     // Owns every filter, including the rotation that stops them growing for as
     // long as the process runs, and every filter it holds has a single writer.
     //
@@ -146,6 +159,10 @@ public class OrderStateCache {
         this.processedFromDb = metrics.registry().timer("emporia.oms.cache.lookup", "check", "processed", "source", "db");
         this.existsFromCache = metrics.registry().timer("emporia.oms.cache.lookup", "check", "exists", "source", "cache");
         this.existsFromDb = metrics.registry().timer("emporia.oms.cache.lookup", "check", "exists", "source", "db");
+        this.cancelChildrenFromIndex = metrics.registry().timer("emporia.oms.cache.lookup", "check", "cancel_children", "source", "index");
+        this.cancelChildrenFromDb = metrics.registry().timer("emporia.oms.cache.lookup", "check", "cancel_children", "source", "db");
+        this.cancelDeskFromIndex = metrics.registry().timer("emporia.oms.cache.lookup", "check", "cancel_desk", "source", "index");
+        this.cancelDeskFromDb = metrics.registry().timer("emporia.oms.cache.lookup", "check", "cancel_desk", "source", "db");
         // No maximumSize and no expireAfterWrite: this is a live-order store, not
         // a cache. Both of those evicted orders that were still live - the size
         // bound silently (137,435 live orders were observed against a 100,000
@@ -353,6 +370,37 @@ public class OrderStateCache {
                 .map(found -> found.stream()
                         .sorted(java.util.Comparator.comparing(TradingOrder::getCreatedAt).reversed())
                         .toList());
+    }
+
+    /**
+     * Live children of {@code parentId}, timed and tagged by whether the
+     * answer came from the index or {@code dbFallback} - the measurement
+     * HOT_PATH_JPA_PLAN.md task 1.2 asks for, so a run can show the fallback
+     * did not fire rather than assume it from {@link #isLiveSetComplete()}.
+     */
+    public List<TradingOrder> liveChildrenOf(UUID parentId, Supplier<List<TradingOrder>> dbFallback) {
+        long started = System.nanoTime();
+        Optional<List<TradingOrder>> fromIndex = liveChildrenOf(parentId);
+        if (fromIndex.isPresent()) {
+            cancelChildrenFromIndex.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
+            return fromIndex.get();
+        }
+        List<TradingOrder> fromDb = dbFallback.get();
+        cancelChildrenFromDb.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
+        return fromDb;
+    }
+
+    /** Live orders on {@code deskId}, newest first, with the same timing as {@link #liveChildrenOf(UUID, Supplier)}. */
+    public List<TradingOrder> liveOrdersOnDesk(String deskId, Supplier<List<TradingOrder>> dbFallback) {
+        long started = System.nanoTime();
+        Optional<List<TradingOrder>> fromIndex = liveOrdersOnDesk(deskId);
+        if (fromIndex.isPresent()) {
+            cancelDeskFromIndex.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
+            return fromIndex.get();
+        }
+        List<TradingOrder> fromDb = dbFallback.get();
+        cancelDeskFromDb.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
+        return fromDb;
     }
 
     private Optional<List<TradingOrder>> resolve(@Nullable Set<UUID> ids) {
