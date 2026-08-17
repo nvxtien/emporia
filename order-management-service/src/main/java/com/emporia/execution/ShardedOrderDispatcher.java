@@ -38,6 +38,10 @@ public class ShardedOrderDispatcher {
     private final ExecutionEventConsumer eventConsumer;
     private final OrderStreamService streams;
 
+    // PMD's CloseResource can't see that these pools outlive the constructor
+    // and are closed in shutdown() (already suppressed there), so it flags the
+    // creation site here too.
+    @SuppressWarnings("PMD.CloseResource")
     public ShardedOrderDispatcher(
             @Value("${emporia.execution.dispatcher.shards:8}") int numShards,
             @Lazy ExecutionEventConsumer eventConsumer,
@@ -80,6 +84,7 @@ public class ShardedOrderDispatcher {
     }
 
     /** Events accepted by order-management and not yet handed to the venue. */
+    @SuppressWarnings("PMD.CloseResource")
     public int queueDepth() {
         int depth = 0;
         for (ThreadPoolExecutor pool : queues) {
