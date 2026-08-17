@@ -32,6 +32,17 @@ ORDERS_URL="${GATEWAY_URL}/api/orders"
 # of every request but stops being the ceiling. See CONFIGURATION.md.
 BENCH_TIER="${BENCH_TIER:-INSTITUTIONAL}"
 AUTH_ADMIN_URL="${AUTH_ADMIN_URL:-http://localhost:9000}"
+# Cancellation load (HOT_PATH_JPA_PLAN Phase 0). Zero by default, so an
+# ordinary capacity sweep is exactly the submit-only sweep it has always been.
+#
+# Cancels are added to the submit stream rather than substituted into it, so
+# the offered rate below stays the submit rate and the *request* rate the
+# gateway's limiter sees is rate * (1 + CANCEL_SHARE). The institutional tier
+# (5000/s) leaves ample room for that at every rate this script sweeps.
+CANCEL_SHARE="${CANCEL_SHARE:-0}"
+CHILD_SHARE="${CHILD_SHARE:-0}"
+OPEN_ORDERS="${OPEN_ORDERS:-200}"
+CANCEL_ALL_EVERY="${CANCEL_ALL_EVERY:-0}"
 RUN_LABEL="${ORDER_PATH_RUN_LABEL:-jdk21-hardened}"
 OUT_DIR="${ORDER_PATH_OUT_DIR:-$repo_root/.local-run/order-path-capacity/$(date +%Y%m%d-%H%M%S)-${RUN_LABEL}}"
 FINAL_DRAIN_SECONDS="${FINAL_DRAIN_SECONDS:-30}"
@@ -42,6 +53,20 @@ Usage: scripts/perf/order-path-capacity.sh [--dry-run]
 
 Environment:
   ORDER_PATH_RATES       Space-separated offered rates. Default: "5 10 20 40 60"
+  CANCEL_SHARE           Fraction of iterations that also cancel an earlier order,
+                         0..1. Default: 0. Cancels are added to the submit stream,
+                         so the offered rate stays the submit rate. The cancel-heavy
+                         profile is CANCEL_SHARE=0.5 CHILD_SHARE=0.3.
+  CHILD_SHARE            Fraction of submits that attach to an open order as its
+                         child, 0..1. Default: 0. Gives cancellation a real tree to
+                         walk instead of a flat list. Cannot be combined with
+                         CANCEL_ALL_EVERY - the script refuses that in setup().
+  OPEN_ORDERS            Per-VU tracking depth, which is also how long an order
+                         rests before being cancelled. Default: 200
+  CANCEL_ALL_EVERY       Every Nth iteration of a VU issues POST /orders/cancel-all,
+                         the only caller of the desk index. Default: 0 (off). It
+                         cancels every live order on the desk, so it invalidates
+                         every other VU's bookkeeping - run it as its own profile.
   BENCH_TIER             Tier the benchmark users are promoted to so the gateway's
                          order rate limiter is not the ceiling. Default: INSTITUTIONAL
                          (5000/s). This is a persistent change to those accounts.
@@ -278,6 +303,19 @@ headers = [
     ("p50_ms", "p50"),
     ("p95_ms", "p95"),
     ("p99_ms", "p99"),
+]
+# Six more columns on every submit-only run would be six columns of zeros, so
+# they appear only when the sweep actually cancelled something.
+if any(float(row.get("cancels_accepted") or 0) > 0 for row in rows):
+    headers += [
+        ("cancels_accepted", "Cancels"),
+        ("cancel_conflict_rate", "Cancel races"),
+        ("cancel_p50_ms", "Cancel p50"),
+        ("cancel_p95_ms", "Cancel p95"),
+        ("cancel_p99_ms", "Cancel p99"),
+        ("children_created", "Children"),
+    ]
+headers += [
     ("checkpoint_age_seconds", "Checkpoint age"),
     ("checkpoint_files", "Checkpoint files"),
     ("partial_checkpoint_files", "Partial files"),
@@ -287,11 +325,15 @@ def fmt(row, key):
     value = row.get(key, "")
     if key == "rate":
         return f"{value}/s"
-    if key in {"infra_failure_rate", "business_rejection_rate"}:
-        return f"{float(value) * 100:.0f}%"
-    if key in {"p50_ms", "p95_ms", "p99_ms"}:
+    if key in {"infra_failure_rate", "business_rejection_rate", "cancel_conflict_rate"}:
+        # Two decimals, not zero: the first non-zero infra failure rate ever
+        # measured at the knee was 0.03%, which rounds to "0%" and was one of
+        # the two signals that located it.
+        return f"{float(value) * 100:.2f}%"
+    if key in {"p50_ms", "p95_ms", "p99_ms", "cancel_p50_ms", "cancel_p95_ms", "cancel_p99_ms"}:
         return f"{float(value):.2f} ms"
-    if key in {"accepted", "checkpoint_age_seconds", "checkpoint_files", "partial_checkpoint_files"}:
+    if key in {"accepted", "cancels_accepted", "children_created", "checkpoint_age_seconds",
+               "checkpoint_files", "partial_checkpoint_files"}:
         return f"{float(value):,.0f}"
     return value
 
@@ -317,6 +359,10 @@ run_k6_step() {
             -e "QUANTITY=${QUANTITY}" \
             -e "LIMIT_PRICE=${LIMIT_PRICE}" \
             -e "MIX_SIDES=${MIX_SIDES:-false}" \
+            -e "CANCEL_SHARE=${CANCEL_SHARE}" \
+            -e "CHILD_SHARE=${CHILD_SHARE}" \
+            -e "OPEN_ORDERS=${OPEN_ORDERS}" \
+            -e "CANCEL_ALL_EVERY=${CANCEL_ALL_EVERY}" \
             "$repo_root/scripts/perf/order-load.js" >"$log" 2>&1
 }
 
@@ -382,7 +428,7 @@ fi
 capture_execution_health "before"
 
 cat >"${OUT_DIR}/summary.csv" <<'EOF'
-rate,status,accepted,business_rejection_rate,infra_failure_rate,p50_ms,p95_ms,p99_ms,checkpoint_age_seconds,checkpoint_files,partial_checkpoint_files,checkpoint_storage_bytes,checkpoint_usable_storage_bytes,checkpoint_failures_since_last_success,checkpoint_status_available
+rate,status,accepted,business_rejection_rate,infra_failure_rate,p50_ms,p95_ms,p99_ms,cancels_accepted,cancel_conflict_rate,cancel_p50_ms,cancel_p95_ms,cancel_p99_ms,children_created,checkpoint_age_seconds,checkpoint_files,partial_checkpoint_files,checkpoint_storage_bytes,checkpoint_usable_storage_bytes,checkpoint_failures_since_last_success,checkpoint_status_available
 EOF
 
 overall_status=0
@@ -402,7 +448,7 @@ for rate in $RATES; do
     capture_execution_health "rate-${rate}"
     checkpoint_fields="$(capture_checkpoint_csv_fields "rate-${rate}")"
 
-    printf '%s,%s,%s,%s,%s,%.2f,%.2f,%.2f,%s\n' \
+    printf '%s,%s,%s,%s,%s,%.2f,%.2f,%.2f,%s,%s,%.2f,%.2f,%.2f,%s,%s\n' \
         "$rate" \
         "$status" \
         "$(k6_field "$summary" orders_accepted)" \
@@ -411,6 +457,12 @@ for rate in $RATES; do
         "$(k6_field "$summary" submit_latency_p50)" \
         "$(k6_field "$summary" submit_latency_p95)" \
         "$(k6_field "$summary" submit_latency_p99)" \
+        "$(k6_field "$summary" cancels_accepted)" \
+        "$(k6_field "$summary" cancel_conflict_rate)" \
+        "$(k6_field "$summary" cancel_latency_p50)" \
+        "$(k6_field "$summary" cancel_latency_p95)" \
+        "$(k6_field "$summary" cancel_latency_p99)" \
+        "$(k6_field "$summary" children_created)" \
         "$checkpoint_fields" >>"${OUT_DIR}/summary.csv"
 
     echo "     checkpoint fields ${checkpoint_fields}"
@@ -436,6 +488,7 @@ capture_execution_health "after"
     echo "Run directory: ${OUT_DIR}"
     echo "Gateway URL: ${GATEWAY_URL}"
     echo "Workload: scripts/perf/order-load.js via k6, quantity=${QUANTITY}, limitPrice=${LIMIT_PRICE}, ${PROBE_STEP} per rate"
+    echo "Cancellation: share=${CANCEL_SHARE}, child share=${CHILD_SHARE}, tracking depth=${OPEN_ORDERS}, cancel-all every=${CANCEL_ALL_EVERY}"
     echo "Exchange-core journaling: ${EXCHANGE_CORE_JOURNALING:-true}, snapshot interval: ${EXCHANGE_CORE_SNAPSHOT_INTERVAL:-60s}"
     echo "Runtime: $(java -version 2>&1 | head -1)"
     echo
