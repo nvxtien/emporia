@@ -3,6 +3,7 @@ package com.emporia.execution;
 import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.ordermanagement.service.OrderStreamService;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -22,7 +23,7 @@ class ShardedOrderDispatcherTest {
     void routesDispatchedEventsToAShardWorker() throws Exception {
         ExecutionEventConsumer consumer = mock(ExecutionEventConsumer.class);
         OrderStreamService streams = mock(OrderStreamService.class);
-        ShardedOrderDispatcher dispatcher = new ShardedOrderDispatcher(4, consumer, streams);
+        ShardedOrderDispatcher dispatcher = new ShardedOrderDispatcher(4, consumer, streams, new SimpleMeterRegistry());
 
         assertThat(dispatcher.getNumShards()).isEqualTo(4);
 
@@ -53,7 +54,7 @@ class ShardedOrderDispatcherTest {
     void defaultsToEightShardsWhenNotConfigured() {
         ExecutionEventConsumer consumer = mock(ExecutionEventConsumer.class);
         OrderStreamService streams = mock(OrderStreamService.class);
-        ShardedOrderDispatcher dispatcher = new ShardedOrderDispatcher(8, consumer, streams);
+        ShardedOrderDispatcher dispatcher = new ShardedOrderDispatcher(8, consumer, streams, new SimpleMeterRegistry());
 
         assertThat(dispatcher.getNumShards()).isEqualTo(8);
 
