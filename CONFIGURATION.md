@@ -684,6 +684,47 @@ adds the force interval to every submit. The exposure above is accepted
 deliberately instead; revisit this if the requirement becomes "an acknowledged
 order survives machine loss".
 
+## The venue's lifecycle projection was rebuilt without child orders
+
+- **Where**: `LiveDirectOrders.current()`, `ExchangeCoreLifecycleRebuilder`,
+  found 2026-08-17
+
+`recoverLifecycle` rebuilds the venue's projection from order-management at
+startup, and the set it was given came from a query filtered to
+`parentOrderIdIsNull`. A strategy's children rest at the venue in their own
+right and carry their own venue order ids, so after **every restart** each child
+answered every operation with:
+
+```
+REJECTED | Exchange-core cancel failed:
+           IllegalArgumentException: unknown lifecycle order 8550933061802935392
+```
+
+2,340 live children were in that state when it was found - accepted, resting,
+and uncancellable. `order_event` held **59,489** such failures.
+
+**The same blind spot inflated the ghost count.** Startup reconciliation compares
+this set against the venue's book, so those children counted as orders the venue
+held and order-management did not. Correcting the set moved the count by exactly
+the number of live children:
+
+| | before | after |
+|---|---:|---:|
+| ghosts | 61,829 | 59,489 |
+| live children | 2,340 | 2,340 |
+
+A tool that cancelled "ghosts" would therefore have destroyed 2,340 live client
+orders. **The ghost figure is only as trustworthy as the set it is subtracted
+from**, which is the argument against building a purge before this was fixed.
+
+**Two reasons the acceptance check never caught it.** It greps the service log
+for `unknown lifecycle order`, and the message is not written there - it is
+recorded against the order in `order_event`, so the guard could not fire. And
+every stage of it used top-level DMA orders, so no child was ever exercised.
+Both are corrected: the check now creates a child in the journal-only window and
+cancels it before its parent, and queries `order_event` scoped to the run's own
+start time, since the table still holds the history.
+
 ## The web server starts at MAX_VALUE - 2048, and the venue used to start after it
 
 - **Where**: `ExchangeCoreExecutionVenueGateway.getPhase()`,
