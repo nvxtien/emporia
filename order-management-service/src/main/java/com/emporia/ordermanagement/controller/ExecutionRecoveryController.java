@@ -6,6 +6,7 @@ import com.emporia.events.TradingEvents.OrderView;
 import com.emporia.events.TradingEvents.StrategyStateView;
 import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
+import com.emporia.ordermanagement.service.LiveDirectOrders;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
@@ -36,8 +37,10 @@ class ExecutionRecoveryController {
             Set.of("ROLE_ADMIN", "ROLE_EXECUTION_SERVICE");
 
     private final TradingOrderRepository orders;
+    private final LiveDirectOrders liveDirectOrders;
 
-    ExecutionRecoveryController(TradingOrderRepository orders) {
+    ExecutionRecoveryController(TradingOrderRepository orders, LiveDirectOrders liveDirectOrders) {
+        this.liveDirectOrders = liveDirectOrders;
         this.orders = orders;
     }
 
@@ -45,14 +48,15 @@ class ExecutionRecoveryController {
     @Transactional(readOnly = true)
     ExecutionRecoveryView recoverable(@AuthenticationPrincipal Jwt jwt) {
         requireRecoveryAccess(jwt);
-        List<TradingOrder> parents =
-                orders.findByStatusInAndParentOrderIdIsNullOrderByCreatedAtAsc(ACTIVE);
+        // Shared with the startup reconciliation guard, so the two cannot
+        // disagree about which orders the venue is answerable for.
+        List<TradingOrder> parents = liveDirectOrders.parents();
         List<OrderView> direct = parents.stream()
-                .filter(order -> "DMA".equalsIgnoreCase(order.getDestination()))
+                .filter(LiveDirectOrders::isDirect)
                 .map(TradingOrder::view)
                 .toList();
         List<StrategyStateView> strategies = parents.stream()
-                .filter(order -> !"DMA".equalsIgnoreCase(order.getDestination()))
+                .filter(order -> !LiveDirectOrders.isDirect(order))
                 .map(this::state)
                 .toList();
         return new ExecutionRecoveryView(direct, strategies);

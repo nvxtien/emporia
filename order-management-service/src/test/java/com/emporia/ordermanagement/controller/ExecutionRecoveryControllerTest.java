@@ -22,6 +22,8 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import com.emporia.ordermanagement.service.LiveDirectOrders;
+
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -29,7 +31,11 @@ import static org.mockito.Mockito.when;
 class ExecutionRecoveryControllerTest {
 
     private final TradingOrderRepository orders = mock(TradingOrderRepository.class);
-    private final ExecutionRecoveryController controller = new ExecutionRecoveryController(orders);
+    // The real LiveDirectOrders over the same mock, not a second mock: the point
+    // of that class is that the controller and the startup guard share one
+    // definition of the live set, and a mock here would stop testing it.
+    private final ExecutionRecoveryController controller =
+            new ExecutionRecoveryController(orders, new LiveDirectOrders(orders));
 
     // -------------------------------------------------------------------------
     // GET /internal/execution/recoverable
