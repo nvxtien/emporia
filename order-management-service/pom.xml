@@ -151,6 +151,43 @@
                     </execution>
                 </executions>
             </plugin>
+            <!--
+                Resolves the mockito-core jar path into a property so surefire
+                below can load it as a real -javaagent, instead of Mockito's
+                inline mock maker self-attaching to the running JVM. Newer JDKs
+                progressively restrict dynamic self-attach (warned on this
+                build's JDK 25, outright fails as "Could not self-attach to
+                current VM" on this project's pinned JDK 21 - the self-attach
+                path was never reliable, this build just hadn't hit a JDK where
+                it fails yet).
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>resolve-mockito-agent</id>
+                        <phase>initialize</phase>
+                        <goals>
+                            <goal>properties</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!--
+                        @{argLine}, not ${argLine}: jacoco's prepare-agent sets
+                        this property at a point in the build where only the
+                        @{} token (resolved by surefire itself, not eagerly by
+                        Maven property substitution) picks up jacoco's actual
+                        computed value instead of an empty string.
+                    -->
+                    <argLine>@{argLine} -javaagent:${org.mockito:mockito-core:jar}</argLine>
+                </configuration>
+            </plugin>
         </plugins>
     </build>
     <profiles>
