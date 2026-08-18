@@ -422,7 +422,10 @@ public class DisruptorOrderPipeline {
      *         itself - blocking there would deadlock waiting for ring
      *         capacity that only the writer thread's own progress reclaims
      */
+    @SuppressWarnings("PMD.CompareObjectsWithEquals")
     public CompletableFuture<Void> submitExecutionCommand(ExecutionCommand command) {
+        // Identity, not value equality - Thread never overrides equals(), so
+        // == is what actually asks "is this literally the writer thread".
         if (Thread.currentThread() == writerThread) {
             throw new IllegalStateException(
                     "submitExecutionCommand must not be called from the OMS writer thread: "
