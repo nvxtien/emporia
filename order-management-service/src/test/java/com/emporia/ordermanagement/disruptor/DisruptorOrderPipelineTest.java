@@ -2,11 +2,14 @@ package com.emporia.ordermanagement.disruptor;
 
 import com.emporia.ha.LeaderElectionService;
 import com.emporia.events.TradingEvents.CommandType;
+import com.emporia.events.TradingEvents.ExecutionCommand;
+import com.emporia.events.TradingEvents.ExecutionCommandType;
 import com.emporia.events.TradingEvents.OrderCommand;
 import com.emporia.events.TradingEvents.OrderCommandResult;
 import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.ordermanagement.dto.ProcessingOutcome;
+import com.emporia.ordermanagement.service.ExecutionCommandHandler;
 import com.emporia.ordermanagement.service.OrderCommandHandler;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
@@ -24,6 +27,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static com.emporia.events.TradingEvents.SCHEMA_VERSION;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -40,7 +44,7 @@ class DisruptorOrderPipelineTest {
     @BeforeEach
     void setUp() {
         handler = mock(OrderCommandHandler.class);
-        pipeline = new DisruptorOrderPipeline(handler, new SimpleMeterRegistry(), disabledWal(), null, null, "yielding", 0, 0, 0, "", "");
+        pipeline = new DisruptorOrderPipeline(handler, null, new SimpleMeterRegistry(), disabledWal(), null, null, "yielding", 0, 0, 0, 0, "", "");
         pipeline.start();
     }
 
@@ -125,8 +129,8 @@ class DisruptorOrderPipelineTest {
         LeaderElectionService standby = mock(LeaderElectionService.class);
         when(standby.isPrimary()).thenReturn(false);
         DisruptorOrderPipeline secondary = new DisruptorOrderPipeline(
-                handler, new SimpleMeterRegistry(), disabledWal(), null, standby,
-                "yielding", 0, 0, 0, "", "");
+                handler, null, new SimpleMeterRegistry(), disabledWal(), null, standby,
+                "yielding", 0, 0, 0, 0, "", "");
         secondary.start();
         try {
             assertThatThrownBy(() -> secondary.submit(sampleCommand(UUID.randomUUID())).join())
@@ -143,8 +147,8 @@ class DisruptorOrderPipelineTest {
         LeaderElectionService primary = mock(LeaderElectionService.class);
         when(primary.isPrimary()).thenReturn(true);
         DisruptorOrderPipeline leader = new DisruptorOrderPipeline(
-                handler, new SimpleMeterRegistry(), disabledWal(), null, primary,
-                "yielding", 0, 0, 0, "", "");
+                handler, null, new SimpleMeterRegistry(), disabledWal(), null, primary,
+                "yielding", 0, 0, 0, 0, "", "");
         leader.start();
         try {
             // The mocked handler returns null, so assert the command reached it
@@ -162,12 +166,14 @@ class DisruptorOrderPipelineTest {
         CountDownLatch release = new CountDownLatch(1);
         DisruptorOrderPipeline constrained = new DisruptorOrderPipeline(
                 handler,
+                null,
                 new SimpleMeterRegistry(),
                 disabledWal(),
                 null,
                 null,
                 "yielding",
                 65_535,
+                0,
                 0,
                 0,
                 "",
@@ -204,6 +210,97 @@ class DisruptorOrderPipelineTest {
                 "DMA", "ref-1", null, java.util.Map.of());
     }
 
+    private static ExecutionCommand sampleExecutionCommand() {
+        return new ExecutionCommand(SCHEMA_VERSION, UUID.randomUUID(), ExecutionCommandType.FILL,
+                UUID.randomUUID(), "DESK-A", "exec-ref-1", new BigDecimal("100"),
+                new BigDecimal("150.00"), "exchange-core", Instant.now(), null);
+    }
+
+    /**
+     * LMAX_ARCHITECTURE_REWORK_PLAN.md task 4.3: execution commands dispatch
+     * to ExecutionCommandHandler through the same ring order commands use,
+     * not through ShardedOrderDispatcher's shard threads.
+     */
+    @Test
+    void routesExecutionCommandsToTheExecutionHandlerThroughTheSameRing() throws Exception {
+        ExecutionCommandHandler executionHandler = mock(ExecutionCommandHandler.class);
+        DisruptorOrderPipeline withExecution = new DisruptorOrderPipeline(
+                handler, executionHandler, new SimpleMeterRegistry(), disabledWal(), null, null,
+                "yielding", 0, 0, 0, 0, "", "");
+        withExecution.start();
+        try {
+            ExecutionCommand command = sampleExecutionCommand();
+            CompletableFuture<Void> future = withExecution.submitExecutionCommand(command);
+
+            future.get(5, TimeUnit.SECONDS);
+            verify(executionHandler).handle(command);
+        } finally {
+            withExecution.stop();
+        }
+    }
+
+    /**
+     * The bug this guards against: a fill already happened at the venue, the
+     * handler that records it in OMS throws, and the returned future was not
+     * wired up - the failure would be recorded on the ring slot and lost the
+     * moment the slot is reset for its next use, with no caller ever able to
+     * observe it. Silent state divergence from exchange-core, for real money.
+     */
+    @Test
+    void submitExecutionCommandFailsTheFutureWhenTheHandlerThrows() throws Exception {
+        ExecutionCommandHandler executionHandler = mock(ExecutionCommandHandler.class);
+        RuntimeException handlerFailure = new RuntimeException("could not record fill");
+        when(executionHandler.handle(any())).thenThrow(handlerFailure);
+        DisruptorOrderPipeline withExecution = new DisruptorOrderPipeline(
+                handler, executionHandler, new SimpleMeterRegistry(), disabledWal(), null, null,
+                "yielding", 0, 0, 0, 0, "", "");
+        withExecution.start();
+        try {
+            CompletableFuture<Void> future = withExecution.submitExecutionCommand(sampleExecutionCommand());
+
+            assertThatThrownBy(() -> future.get(5, TimeUnit.SECONDS))
+                    .hasCause(handlerFailure);
+        } finally {
+            withExecution.stop();
+        }
+    }
+
+    /**
+     * The guard in submitExecutionCommand's javadoc: blocking there would
+     * deadlock the writer thread against ring capacity only its own progress
+     * reclaims. Simulated by having the order-command handler itself - which
+     * runs on the writer thread - call submitExecutionCommand.
+     */
+    @Test
+    void submitExecutionCommandRefusesToRunOnTheWriterThread() throws Exception {
+        ExecutionCommandHandler executionHandler = mock(ExecutionCommandHandler.class);
+        DisruptorOrderPipeline withExecution = new DisruptorOrderPipeline(
+                handler, executionHandler, new SimpleMeterRegistry(), disabledWal(), null, null,
+                "yielding", 0, 0, 0, 0, "", "");
+        AtomicReference<Throwable> caughtOnWriterThread = new AtomicReference<>();
+        when(handler.handle(any())).thenAnswer(invocation -> {
+            try {
+                withExecution.submitExecutionCommand(sampleExecutionCommand());
+            } catch (Throwable thrown) {
+                caughtOnWriterThread.set(thrown);
+            }
+            OrderCommand cmd = invocation.getArgument(0);
+            return new ProcessingOutcome(
+                    new OrderCommandResult(SCHEMA_VERSION, cmd.commandId(), true, 201, "OK", "{}"),
+                    List.of());
+        });
+        withExecution.start();
+        try {
+            withExecution.submit(sampleCommand(UUID.randomUUID())).join();
+
+            assertThat(caughtOnWriterThread.get())
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("writer thread");
+        } finally {
+            withExecution.stop();
+        }
+    }
+
     @Test
     void recordsTheCommandBeforeApplyingIt() throws Exception {
         java.nio.file.Path walFile = java.nio.file.Files.createTempDirectory("wal-ahead")
@@ -216,8 +313,8 @@ class DisruptorOrderPipelineTest {
                 return null;
             });
             DisruptorOrderPipeline logging = new DisruptorOrderPipeline(
-                    recordingHandler, new SimpleMeterRegistry(), wal, null, null,
-                    "yielding", 0, 0, 0, "", "");
+                    recordingHandler, null, new SimpleMeterRegistry(), wal, null, null,
+                    "yielding", 0, 0, 0, 0, "", "");
             logging.start();
 
             logging.submit(sampleCommand(UUID.randomUUID())).join();
@@ -239,8 +336,8 @@ class DisruptorOrderPipelineTest {
             wal.append(new byte[1024 * 1024 - 8]);
             OrderCommandHandler neverCalled = mock(OrderCommandHandler.class);
             DisruptorOrderPipeline logging = new DisruptorOrderPipeline(
-                    neverCalled, new SimpleMeterRegistry(), wal, null, null,
-                    "yielding", 0, 0, 0, "", "");
+                    neverCalled, null, new SimpleMeterRegistry(), wal, null, null,
+                    "yielding", 0, 0, 0, 0, "", "");
             logging.start();
 
             // Accepting an order the system has no durable trace of, while
