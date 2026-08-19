@@ -40,7 +40,7 @@ import java.util.stream.Collectors;
  */
 @Component
 @Primary
-class RoutingExecutionVenueGateway implements ExecutionVenueGateway {
+class RoutingExecutionVenueGateway implements ExecutionVenueGateway, ExecutionVenueReadiness {
 
     private static final Logger log = LoggerFactory.getLogger(RoutingExecutionVenueGateway.class);
 
@@ -102,6 +102,11 @@ class RoutingExecutionVenueGateway implements ExecutionVenueGateway {
     @Override
     public void recover(OrderView order) {
         configured.recover(order);
+    }
+
+    @Override
+    public OrderIntakeReadiness orderIntakeReadiness() {
+        return configured.orderIntakeReadiness();
     }
 
     @Override

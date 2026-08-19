@@ -5,12 +5,15 @@ import com.emporia.execution.fix.FixSequenceState;
 import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.events.TradingEvents.OrderView;
+import com.emporia.ha.LeaderElectionService;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.SmartLifecycle;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
 import javax.net.ssl.KeyManagerFactory;
@@ -35,6 +38,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
@@ -55,15 +59,25 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
     private final Map<UUID, String> currentClientOrderIds = new ConcurrentHashMap<>();
     private final Map<String, UUID> clientOrderIds = new ConcurrentHashMap<>();
     private final ExecutionCommandPublisher commands;
+    /** Spring lifecycle state. Active FIX sessions are tracked separately. */
     private final AtomicBoolean running = new AtomicBoolean();
+    /** True only while this node is the HA primary and may process venue reports. */
+    private final AtomicBoolean activePrimary = new AtomicBoolean();
     /** Whether this gateway is the one emporia.execution.venue-mode selects. */
     private final boolean selected;
+    // Null when no leader election is wired, which connects as before - same
+    // convention as DisruptorOrderPipeline.leaderElection. Non-null and not
+    // primary: start() stays idle, since a standby's FIX session would
+    // otherwise receive unsolicited execution reports and apply them through
+    // the ring on an instance that must not be a writer
+    // (LMAX_ARCHITECTURE_REWORK_PLAN.md Phase 1 review finding).
+    private final @Nullable LeaderElectionService leaderElection;
 
     FixExecutionVenueGateway(String definitions, ExecutionCommandPublisher commands,
                              FixSessionStateStore sessionState, FixMessageLogStore messageLog) {
         // The test seam behaves as the selected venue, which is what every
         // existing test assumes and asserts.
-        this(definitions, commands, sessionState, messageLog, false, "", "", "", "", "fix");
+        this(definitions, commands, sessionState, messageLog, false, "", "", "", "", "fix", Optional.empty());
     }
 
     /**
@@ -75,7 +89,7 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
                              boolean tlsEnabled, String trustStorePath, String trustStorePassword,
                              String keyStorePath, String keyStorePassword) {
         this(definitions, commands, sessionState, messageLog, tlsEnabled, trustStorePath,
-                trustStorePassword, keyStorePath, keyStorePassword, "fix");
+                trustStorePassword, keyStorePath, keyStorePassword, "fix", Optional.empty());
     }
 
     @Autowired
@@ -87,10 +101,12 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
                              @Value("${emporia.execution.fix-tls-truststore-password:}") String trustStorePassword,
                              @Value("${emporia.execution.fix-tls-keystore-path:}") String keyStorePath,
                              @Value("${emporia.execution.fix-tls-keystore-password:}") String keyStorePassword,
-                             @Value("${emporia.execution.venue-mode:exchange-core}") String configuredVenueMode) {
+                             @Value("${emporia.execution.venue-mode:exchange-core}") String configuredVenueMode,
+                             Optional<LeaderElectionService> leaderElection) {
         this.selected = "fix".equals(configuredVenueMode == null ? ""
                 : configuredVenueMode.strip().toLowerCase(java.util.Locale.ROOT));
         this.commands = commands;
+        this.leaderElection = leaderElection.orElse(null);
         SSLSocketFactory tlsSocketFactory = tlsEnabled
                 ? buildTlsSocketFactory(trustStorePath, trustStorePassword, keyStorePath, keyStorePassword)
                 : null;
@@ -151,6 +167,7 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
 
     @Override
     public void submit(OrderView order) {
+        requireActivePrimary("submit");
         FixSession session = session(order);
         remember(order, order.id().toString());
         LinkedHashMap<Integer, String> fields = commonOrderFields(order, order.id().toString());
@@ -159,6 +176,7 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
 
     @Override
     public void modify(OrderView order) {
+        requireActivePrimary("modify");
         FixSession session = session(order);
         String original = currentClientOrderIds.getOrDefault(order.id(), order.id().toString());
         String replacement = order.id() + ":M:" + order.version();
@@ -170,6 +188,7 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
 
     @Override
     public void cancel(OrderView order) {
+        requireActivePrimary("cancel");
         FixSession session = session(order);
         String original = currentClientOrderIds.getOrDefault(order.id(), order.id().toString());
         String cancellation = order.id() + ":C:" + order.version();
@@ -185,10 +204,35 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
 
     @Override
     public void recover(OrderView order) {
+        requireActivePrimary("recover");
         // ClOrdID is the persisted Emporia order id for the original submit.
         // Rebuilding these maps allows later execution reports and cancel
         // requests to correlate without duplicating the NewOrderSingle.
         remember(order, order.id().toString());
+    }
+
+    @Override
+    public OrderIntakeReadiness orderIntakeReadiness() {
+        if (!running.get()) {
+            return OrderIntakeReadiness.notReady("execution_venue_not_running",
+                    "FIX venue is not running; retry shortly");
+        }
+        if (!selected) {
+            return OrderIntakeReadiness.ready();
+        }
+        if (leaderElection != null && !leaderElection.isPrimary()) {
+            return OrderIntakeReadiness.notReady("not_primary",
+                    "This instance is not the primary and does not accept orders");
+        }
+        if (leaderElection != null && !activePrimary.get()) {
+            return OrderIntakeReadiness.notReady("execution_venue_not_ready",
+                    "FIX venue is still connecting; retry shortly");
+        }
+        if (sessions.isEmpty()) {
+            return OrderIntakeReadiness.notReady("execution_venue_not_configured",
+                    "FIX venue has no configured sessions");
+        }
+        return OrderIntakeReadiness.ready();
     }
 
     private void remember(OrderView order, String clientOrderId) {
@@ -223,6 +267,7 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
 
     private void onMessage(String mic, Map<Integer, String> fields) {
         if (!"8".equals(fields.get(35))) return;
+        if (!mayProcessVenueReport(mic, fields)) return;
         UUID orderId = clientOrderIds.get(fields.get(11));
         if (orderId == null && fields.get(41) != null) orderId = clientOrderIds.get(fields.get(41));
         OrderView order = orderId == null ? null : orders.get(orderId);
@@ -233,7 +278,13 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
 
         String executionType = fields.get(150);
         String orderStatus = fields.get(39);
-        String executionReference = fields.getOrDefault(17, mic + "-" + fields.getOrDefault(11, order.id().toString()));
+        // Always mic-prefixed: FIX tag 17 (ExecID) is only unique within the
+        // counterparty's own session, not globally - the execution table's
+        // uniqueness constraint and ExecutionCommandHandler's dedup id both
+        // assume a globally unique reference (LMAX_ARCHITECTURE_REWORK_PLAN.md
+        // Phase 1 review finding), so two MICs reusing the same raw ExecID
+        // must not collide here.
+        String executionReference = mic + "-" + fields.getOrDefault(17, fields.getOrDefault(11, order.id().toString()));
         if (fields.get(32) != null && fields.get(31) != null) {
             java.math.BigDecimal lastQuantity = new java.math.BigDecimal(fields.get(32));
             java.math.BigDecimal lastPrice = new java.math.BigDecimal(fields.get(31));
@@ -253,8 +304,28 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
     @Override
     public void start() {
         if (!running.compareAndSet(false, true)) return;
+        if (leaderElection != null && !leaderElection.isPrimary()) {
+            log.info("FIX venue gateway started in STANDBY role; waiting for leadership before connecting sessions");
+            return;
+        }
+        promoteToPrimary("lifecycle start");
+    }
+
+    @EventListener
+    public void onLeadershipChange(LeaderElectionService.LeadershipChangeEvent event) {
+        if (leaderElection == null || !running.get()) return;
+        if (event.role() == LeaderElectionService.NodeRole.PRIMARY) {
+            promoteToPrimary("leadership promotion epoch " + event.epoch());
+        } else {
+            demoteToStandby("leadership demotion epoch " + event.epoch());
+        }
+    }
+
+    private synchronized void promoteToPrimary(String reason) {
+        if (!running.get() || activePrimary.get()) return;
         if (sessions.isEmpty()) {
             if (selected) {
+                activePrimary.set(false);
                 running.set(false);
                 throw new IllegalStateException(
                         "emporia.execution.venue-mode=fix requires FIX_EXECUTION_VENUES");
@@ -269,17 +340,48 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
             return;
         }
         sessions.values().forEach(FixSession::start);
+        activePrimary.set(true);
+        log.info("FIX venue gateway active as PRIMARY ({})", reason);
+    }
+
+    private synchronized void demoteToStandby(String reason) {
+        if (!activePrimary.compareAndSet(true, false)) return;
+        sessions.values().forEach(FixSession::stop);
+        log.warn("FIX venue gateway demoted to STANDBY ({}); sessions disconnected and venue reports blocked",
+                reason);
     }
 
     @Override
     public void stop() {
         running.set(false);
-        sessions.values().forEach(FixSession::stop);
+        demoteToStandby("lifecycle stop");
     }
 
     @Override
     public boolean isRunning() {
         return running.get();
+    }
+
+    /**
+     * Start before the web server so configured FIX sessions can connect, or
+     * fail closed, before HTTP order intake opens.
+     */
+    @Override
+    public int getPhase() {
+        return Integer.MAX_VALUE - 3072;
+    }
+
+    private void requireActivePrimary(String operation) {
+        if (leaderElection == null || activePrimary.get()) return;
+        throw new IllegalStateException("FIX venue gateway is not active PRIMARY; refusing "
+                + operation + " on this node");
+    }
+
+    private boolean mayProcessVenueReport(String mic, Map<Integer, String> fields) {
+        if (leaderElection == null || activePrimary.get()) return true;
+        log.warn("Suppressing FIX execution report from {} because this node is no longer PRIMARY: ClOrdID={} ExecID={}",
+                mic, fields.get(11), fields.get(17));
+        return false;
     }
 
     private static final class FixSession {
@@ -304,7 +406,7 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
         // ever touched from the single read-loop executor thread, so a plain
         // TreeMap (not a concurrent one) is safe.
         private final TreeMap<Integer, Map<Integer, String>> pendingMessages = new TreeMap<>();
-        private final ExecutorService executor;
+        private ExecutorService executor;
         private final SSLSocketFactory tlsSocketFactory;
         private volatile Socket socket;
         private volatile OutputStream output;
@@ -322,7 +424,11 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
             this.sequence = new FixSequenceState(mic, sessionState);
             this.messageLog = messageLog;
             this.tlsSocketFactory = tlsSocketFactory;
-            this.executor = Executors.newSingleThreadExecutor(runnable -> {
+            this.executor = newExecutor();
+        }
+
+        private ExecutorService newExecutor() {
+            return Executors.newSingleThreadExecutor(runnable -> {
                 Thread thread = new Thread(runnable, "fix-" + mic.toLowerCase(java.util.Locale.ROOT));
                 thread.setDaemon(true);
                 return thread;
@@ -340,14 +446,17 @@ class FixExecutionVenueGateway implements ExecutionVenueGateway, SmartLifecycle 
             return sslSocket;
         }
 
-        void start() {
+        synchronized void start() {
+            if (executor == null || executor.isShutdown() || executor.isTerminated()) {
+                executor = newExecutor();
+            }
             if (running.compareAndSet(false, true)) executor.submit(this::connectLoop);
         }
 
-        void stop() {
+        synchronized void stop() {
             if (running.compareAndSet(true, false)) sendLogoutAndAwaitAcknowledgement();
             close();
-            executor.shutdownNow();
+            if (executor != null) executor.shutdownNow();
         }
 
         // Sends a Logout and waits briefly for the counterparty's Logout reply

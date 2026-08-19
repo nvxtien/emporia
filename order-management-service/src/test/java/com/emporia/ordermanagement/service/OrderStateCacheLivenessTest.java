@@ -16,6 +16,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
 import static org.assertj.core.api.InstanceOfAssertFactories.LIST;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -141,6 +142,77 @@ class OrderStateCacheLivenessTest {
 
         assertThat(cache.liveChildrenOf(parent.getId())).contains(List.of());
         assertThat(cache.liveOrdersOnDesk("desk-a")).get().asInstanceOf(LIST).hasSize(1);
+    }
+
+    /**
+     * Without a ready dedup index (the shape every test above already uses,
+     * {@code dedup=null}), execution-reference dedup must fall through to the
+     * caller-supplied database check rather than guess - same fallback shape
+     * as {@link #readingATerminalOrderThroughTheFallbackDoesNotReadmitIt}.
+     */
+    @Test
+    void executionReferenceDedupFallsThroughToTheDatabaseWhenTheIndexIsNotReady() {
+        OrderStateCache cache = cacheHolding(100);
+
+        boolean exists = cache.existsExecutionReference("desk-a", "XNAS", "ref-1", () -> true);
+
+        assertThat(exists)
+                .as("no dedup index is wired, so the answer must come from dbFallback")
+                .isTrue();
+    }
+
+    /**
+     * LMAX_ARCHITECTURE_REWORK_PLAN.md task 5.2: this is the fix for
+     * ExecutionCommandHandler's own direct JPA read on every fill. A Bloom
+     * filter can confidently prove absence but never presence - the same
+     * asymmetry {@link #existsById} already lives with - so the win is on the
+     * common case: a genuinely new reference (every non-duplicate fill) is
+     * recognised from memory alone, with dbFallback never touched. A
+     * remembered reference cannot be confirmed from the filter by itself and
+     * correctly falls through for confirmation, exactly like existsById's own
+     * "maybe seen" branch.
+     */
+    @Test
+    void newExecutionReferenceIsRecognisedFromMemoryWithoutTheDatabase() {
+        RotatingDedupIndex dedup = new RotatingDedupIndex(java.time.Duration.ofHours(24), 2, 4_000, 0.001);
+        dedup.publishHistory(new CommandDedupIndex(1_000, 0.001));
+        OrderStateCache cache = new OrderStateCache(orders, processed, metrics, dedup, 100, 1000);
+
+        cache.rememberExecutionReference("desk-a", "XNAS", "ref-1");
+
+        boolean neverSeen = cache.existsExecutionReference("desk-a", "XNAS", "ref-2",
+                () -> fail("dbFallback must not run for a reference the index confidently reports as new"));
+        assertThat(neverSeen)
+                .as("a reference nothing ever remembered is definitely new, answered from the index alone")
+                .isFalse();
+
+        boolean remembered = cache.existsExecutionReference("desk-a", "XNAS", "ref-1", () -> true);
+        assertThat(remembered)
+                .as("a remembered reference cannot be confirmed by the filter alone - it falls through, "
+                        + "same as existsById's own false-positive handling")
+                .isTrue();
+    }
+
+    /**
+     * `deskId + venue + executionReference` is the key, not the bare reference -
+     * two different (desk, venue) pairs sharing a reference string must not be
+     * confused with each other, since nothing guarantees venue-supplied
+     * references are globally unique. Proven the same way as the test above:
+     * a key nothing ever remembered answers "new" from the index alone.
+     */
+    @Test
+    void executionReferenceDedupIsScopedByDeskAndVenueNotTheBareReference() {
+        RotatingDedupIndex dedup = new RotatingDedupIndex(java.time.Duration.ofHours(24), 2, 4_000, 0.001);
+        dedup.publishHistory(new CommandDedupIndex(1_000, 0.001));
+        OrderStateCache cache = new OrderStateCache(orders, processed, metrics, dedup, 100, 1000);
+
+        cache.rememberExecutionReference("desk-a", "XNAS", "shared-ref");
+
+        boolean differentVenue = cache.existsExecutionReference("desk-a", "ANOTHER-VENUE", "shared-ref",
+                () -> fail("a different venue's key was never remembered - it must answer from the index alone"));
+        assertThat(differentVenue)
+                .as("a different venue with the same bare reference must not read as a duplicate")
+                .isFalse();
     }
 
     private static TradingOrder childOf(TradingOrder parent) {

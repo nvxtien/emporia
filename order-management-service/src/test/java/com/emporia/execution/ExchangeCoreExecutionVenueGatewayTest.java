@@ -6,6 +6,7 @@ import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.events.TradingEvents.OrderView;
+import com.emporia.ha.LeaderElectionService;
 import exchange.core2.core.common.CoreSymbolSpecification;
 import exchange.core2.core.common.OrderAction;
 import exchange.core2.core.common.api.dma.DmaCancelOrder;
@@ -749,6 +750,83 @@ class ExchangeCoreExecutionVenueGatewayTest {
 
         assertThat(venue.checkpoints).isEqualTo(1);
         assertThat(venue.closed).isTrue();
+    }
+
+    @Test
+    void standbyAtBootStaysIdleUntilLeadershipPromotionArrives() {
+        LeaderElectionService leaderElection = org.mockito.Mockito.mock(LeaderElectionService.class);
+        when(leaderElection.isPrimary()).thenReturn(false);
+        ExchangeCoreExecutionVenueGateway standbyGateway =
+                ExchangeCoreExecutionVenueGateway.builder(commands, venue)
+                        .leaderElection(leaderElection)
+                        .build();
+
+        standbyGateway.start();
+        standbyGateway.snapshotPeriodically();
+
+        assertThat(venue.checkpoints).as("standby must not snapshot or open venue output").isZero();
+        assertThat(standbyGateway.orderIntakeReadiness().readyToAccept()).isFalse();
+        assertThat(standbyGateway.orderIntakeReadiness().reason()).isEqualTo("not_primary");
+        assertThatThrownBy(() -> standbyGateway.submit(order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not active PRIMARY");
+
+        venue.submitResponses.add(request -> successful(
+                SimulationOperation.SUBMIT_LIMIT, request.deliveryId(),
+                new DmaOrderResult(request.orderId(), CommandResultCode.SUCCESS, List.of(), 0, 0),
+                DmaOrderState.initial(request)));
+        standbyGateway.onLeadershipChange(new LeaderElectionService.LeadershipChangeEvent(
+                LeaderElectionService.NodeRole.PRIMARY, 2));
+        when(leaderElection.isPrimary()).thenReturn(true);
+        assertThat(standbyGateway.orderIntakeReadiness().readyToAccept()).isTrue();
+        standbyGateway.submit(order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25"));
+
+        assertThat(venue.submits).hasSize(1);
+    }
+
+    @Test
+    void leadershipDemotionBlocksFurtherVenueOperations() {
+        LeaderElectionService leaderElection = org.mockito.Mockito.mock(LeaderElectionService.class);
+        when(leaderElection.isPrimary()).thenReturn(true);
+        ExchangeCoreExecutionVenueGateway primaryGateway =
+                ExchangeCoreExecutionVenueGateway.builder(commands, venue)
+                        .leaderElection(leaderElection)
+                        .build();
+        primaryGateway.start();
+
+        primaryGateway.onLeadershipChange(new LeaderElectionService.LeadershipChangeEvent(
+                LeaderElectionService.NodeRole.STANDBY, 3));
+
+        assertThat(venue.checkpoints).as("demotion should checkpoint before standing down").isEqualTo(1);
+        when(leaderElection.isPrimary()).thenReturn(false);
+        assertThat(primaryGateway.orderIntakeReadiness().readyToAccept()).isFalse();
+        assertThat(primaryGateway.orderIntakeReadiness().reason()).isEqualTo("not_primary");
+        assertThatThrownBy(() -> primaryGateway.submit(order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25")))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not active PRIMARY");
+        primaryGateway.snapshotPeriodically();
+        assertThat(venue.checkpoints).as("standby snapshots stay stopped after demotion").isEqualTo(1);
+    }
+
+    @Test
+    void alreadyPrimaryAtBootStartsImmediately() {
+        LeaderElectionService leaderElection = org.mockito.Mockito.mock(LeaderElectionService.class);
+        when(leaderElection.isPrimary()).thenReturn(true);
+        ExchangeCoreExecutionVenueGateway primaryGateway =
+                ExchangeCoreExecutionVenueGateway.builder(commands, venue)
+                        .leaderElection(leaderElection)
+                        .build();
+        venue.submitResponses.add(request -> successful(
+                SimulationOperation.SUBMIT_LIMIT, request.deliveryId(),
+                new DmaOrderResult(request.orderId(), CommandResultCode.SUCCESS, List.of(), 0, 0),
+                DmaOrderState.initial(request)));
+
+        primaryGateway.start();
+
+        assertThat(primaryGateway.orderIntakeReadiness().readyToAccept()).isTrue();
+        primaryGateway.submit(order(OrderSide.BUY, OrderType.LIMIT, "10", "102.25"));
+
+        assertThat(venue.submits).hasSize(1);
     }
 
     private static ProductionSimulationResult successful(

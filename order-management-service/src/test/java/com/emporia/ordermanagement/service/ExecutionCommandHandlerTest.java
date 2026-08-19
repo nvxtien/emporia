@@ -68,7 +68,7 @@ class ExecutionCommandHandlerTest {
         assertThat(event.deskId()).isEqualTo("desk-a");
 
         ArgumentCaptor<Execution> persisted = ArgumentCaptor.forClass(Execution.class);
-        verify(executions).save(persisted.capture());
+        verify(asyncDbWriter).enqueue(persisted.capture());
         assertThat(persisted.getValue().getExecutionReference()).isEqualTo("venue-fill-1");
         assertThat(persisted.getValue().getVenue()).isEqualTo("XNAS");
         verify(asyncDbWriter).enqueue(order);
@@ -89,7 +89,7 @@ class ExecutionCommandHandlerTest {
         assertThat(order.getStatus()).isEqualTo(OrderStatus.REJECTED);
         assertThat(order.getErrorMessage()).isEqualTo("Venue is closed");
         assertThat(event.eventType()).isEqualTo("REJECTED");
-        verify(executions, never()).save(any());
+        verify(asyncDbWriter, never()).enqueue(any(Execution.class));
         verify(dispatcher, times(1)).dispatch(any(OrderDomainEvent.class));
     }
 
@@ -153,7 +153,7 @@ class ExecutionCommandHandlerTest {
         assertThat(parent.getTradedQuantity()).isEqualByComparingTo("4");
         assertThat(parent.getStatus()).isEqualTo(OrderStatus.PARTIALLY_FILLED);
         ArgumentCaptor<Execution> persisted = ArgumentCaptor.forClass(Execution.class);
-        verify(executions, org.mockito.Mockito.times(2)).save(persisted.capture());
+        verify(asyncDbWriter, org.mockito.Mockito.times(2)).enqueue(persisted.capture());
         assertThat(persisted.getAllValues()).extracting(Execution::getOrder)
                 .containsExactly(child, parent);
         verify(dispatcher, times(2)).dispatch(any(OrderDomainEvent.class));

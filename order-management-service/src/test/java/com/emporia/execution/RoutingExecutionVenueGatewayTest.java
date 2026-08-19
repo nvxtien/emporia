@@ -126,4 +126,21 @@ class RoutingExecutionVenueGatewayTest {
 
         assertThat(outer.forMode("exchange-core")).isSameAs(internal);
     }
+
+    @Test
+    void readinessComesFromTheConfiguredGatewayOnly() {
+        ExecutionVenueGateway internal = mock(ExecutionVenueGateway.class);
+        when(internal.venueMode()).thenReturn("exchange-core");
+        when(internal.orderIntakeReadiness()).thenReturn(OrderIntakeReadiness.notReady(
+                "execution_venue_not_ready", "Execution venue is still recovering; retry shortly"));
+        ExecutionVenueGateway external = mock(ExecutionVenueGateway.class);
+        when(external.venueMode()).thenReturn("fix");
+        when(external.orderIntakeReadiness()).thenReturn(OrderIntakeReadiness.ready());
+
+        RoutingExecutionVenueGateway router =
+                new RoutingExecutionVenueGateway(List.of(internal, external), "exchange-core");
+
+        assertThat(router.orderIntakeReadiness().reason()).isEqualTo("execution_venue_not_ready");
+        verify(external, never()).orderIntakeReadiness();
+    }
 }

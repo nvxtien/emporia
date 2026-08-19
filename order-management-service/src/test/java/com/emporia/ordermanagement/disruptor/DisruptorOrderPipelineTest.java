@@ -1,5 +1,6 @@
 package com.emporia.ordermanagement.disruptor;
 
+import com.emporia.execution.OrderIntakeReadiness;
 import com.emporia.ha.LeaderElectionService;
 import com.emporia.events.TradingEvents.CommandType;
 import com.emporia.events.TradingEvents.ExecutionCommand;
@@ -143,6 +144,24 @@ class DisruptorOrderPipelineTest {
     }
 
     @Test
+    void rejectsExecutionCommandsWhenNotPrimary() {
+        LeaderElectionService standby = mock(LeaderElectionService.class);
+        when(standby.isPrimary()).thenReturn(false);
+        ExecutionCommandHandler executionHandler = mock(ExecutionCommandHandler.class);
+        DisruptorOrderPipeline secondary = new DisruptorOrderPipeline(
+                handler, executionHandler, new SimpleMeterRegistry(), disabledWal(), null, standby,
+                "yielding", 0, 0, 0, 0, "", "");
+        secondary.start();
+        try {
+            assertThatThrownBy(() -> secondary.submitExecutionCommand(sampleExecutionCommand()))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("not the primary");
+        } finally {
+            secondary.stop();
+        }
+    }
+
+    @Test
     void acceptsCommandsWhenPrimary() {
         LeaderElectionService primary = mock(LeaderElectionService.class);
         when(primary.isPrimary()).thenReturn(true);
@@ -157,6 +176,29 @@ class DisruptorOrderPipelineTest {
             verify(handler).handle(any());
         } finally {
             leader.stop();
+        }
+    }
+
+    @Test
+    void rejectsOrderCommandsWhenExecutionVenueIsNotReady() {
+        DisruptorOrderPipeline waitingForVenue = new DisruptorOrderPipeline(
+                handler, null, new SimpleMeterRegistry(), disabledWal(), null, null,
+                "yielding", 0, 0, 0, 0, "", "");
+        waitingForVenue.setExecutionVenueReadinessForTest(() -> OrderIntakeReadiness.notReady(
+                "execution_venue_not_ready", "Execution venue is still recovering; retry shortly"));
+        waitingForVenue.start();
+        try {
+            assertThatThrownBy(() -> waitingForVenue.submit(sampleCommand(UUID.randomUUID())).join())
+                    .hasCauseInstanceOf(HotPathRejectedException.class)
+                    .cause()
+                    .isInstanceOfSatisfying(HotPathRejectedException.class, rejection -> {
+                        assertThat(rejection.status()).isEqualTo(503);
+                        assertThat(rejection.reason()).isEqualTo("execution_venue_not_ready");
+                    })
+                    .hasMessageContaining("still recovering");
+            verify(handler, org.mockito.Mockito.never()).handle(any());
+        } finally {
+            waitingForVenue.stop();
         }
     }
 

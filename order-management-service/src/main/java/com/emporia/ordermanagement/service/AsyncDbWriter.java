@@ -1,10 +1,12 @@
 package com.emporia.ordermanagement.service;
 
+import com.emporia.ordermanagement.model.Execution;
 import com.emporia.ordermanagement.model.OrderEvent;
 import com.emporia.events.TradingEvents.ListingSnapshot;
 import com.emporia.events.TradingEvents.OrderView;
 import com.emporia.ordermanagement.model.ProcessedCommand;
 import com.emporia.ordermanagement.model.TradingOrder;
+import com.emporia.ordermanagement.repository.ExecutionRepository;
 import com.emporia.ordermanagement.repository.OrderEventRepository;
 import com.emporia.ordermanagement.repository.ProcessedCommandRepository;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
@@ -46,11 +48,17 @@ public class AsyncDbWriter {
     private final OrderEventRepository events;
     private final ProcessedCommandRepository processed;
     private final com.emporia.ordermanagement.repository.OrderInputEventRepository inputEvents;
+    private final ExecutionRepository executions;
     private final JdbcTemplate jdbcTemplate;
     /** Rewound once its records are persisted; null when running without a log. */
     private static final Logger log = LoggerFactory.getLogger(AsyncDbWriter.class);
     private final Counter duplicateCommands;
     private final Counter duplicateOrders;
+    // LMAX_ARCHITECTURE_REWORK_PLAN.md task 5.2: same oracle as the other two -
+    // ExecutionCommandHandler's in-memory dedup should make this impossible,
+    // and ON CONFLICT DO NOTHING's affected-row count is what would prove it
+    // wrong. Should read zero forever.
+    private final Counter duplicateExecutions;
     private final Counter rejectedRows;
     private final MemoryMappedWalLogger wal;
 
@@ -85,17 +93,19 @@ public class AsyncDbWriter {
     private final ConcurrentLinkedDeque<OrderEvent> eventQueue = new ConcurrentLinkedDeque<>();
     private final ConcurrentLinkedDeque<ProcessedCommand> processedQueue = new ConcurrentLinkedDeque<>();
     private final ConcurrentLinkedDeque<com.emporia.ordermanagement.model.OrderInputEvent> inputEventQueue = new ConcurrentLinkedDeque<>();
+    private final ConcurrentLinkedDeque<Execution> executionQueue = new ConcurrentLinkedDeque<>();
 
     // Pre-allocated reusable batch buffers per thread / flush iteration
     private final PendingOrder[] orderBatchBuffer = new PendingOrder[BATCH_SIZE];
     private final OrderEvent[] eventBatchBuffer = new OrderEvent[BATCH_SIZE];
     private final ProcessedCommand[] processedBatchBuffer = new ProcessedCommand[BATCH_SIZE];
     private final com.emporia.ordermanagement.model.OrderInputEvent[] inputEventBatchBuffer = new com.emporia.ordermanagement.model.OrderInputEvent[BATCH_SIZE];
+    private final Execution[] executionBatchBuffer = new Execution[BATCH_SIZE];
 
     private final org.springframework.transaction.support.TransactionTemplate transactionTemplate;
 
     public AsyncDbWriter(TradingOrderRepository orders, OrderEventRepository events, ProcessedCommandRepository processed) {
-        this(orders, events, processed, null, null, null, null, null);
+        this(orders, events, processed, null, null, null, null, null, null);
     }
 
     // Marks the constructor Spring injects through. Without it there are two
@@ -111,22 +121,29 @@ public class AsyncDbWriter {
                          JdbcTemplate jdbcTemplate,
                          MemoryMappedWalLogger wal,
                          org.springframework.transaction.support.TransactionTemplate transactionTemplate,
-                         io.micrometer.core.instrument.@Nullable MeterRegistry meters) {
+                         io.micrometer.core.instrument.@Nullable MeterRegistry meters,
+                         @Nullable ExecutionRepository executions) {
         this.orders = orders;
         this.events = events;
         this.processed = processed;
         this.inputEvents = inputEvents;
+        this.executions = executions;
         this.jdbcTemplate = jdbcTemplate;
         this.wal = wal;
         this.transactionTemplate = transactionTemplate;
         io.micrometer.core.instrument.MeterRegistry registry = meters == null ? new SimpleMeterRegistry() : meters;
         this.duplicateCommands = registry.counter("emporia.oms.dedup.duplicate_reached_db");
         this.duplicateOrders = registry.counter("emporia.oms.dedup.duplicate_order_reached_db");
+        this.duplicateExecutions = registry.counter("emporia.oms.dedup.duplicate_execution_reached_db");
         this.rejectedRows = registry.counter("emporia.oms.writer.rejected_rows");
     }
 
     public void enqueue(TradingOrder order) {
         if (order != null) orderQueue.addLast(new PendingOrder(order, order.view()));
+    }
+
+    public void enqueue(Execution execution) {
+        if (execution != null) executionQueue.addLast(execution);
     }
 
     /**
@@ -221,6 +238,9 @@ public class AsyncDbWriter {
         salvageEach(Arrays.asList(inputEventBatchBuffer).subList(0, batch.inputEventCount),
                 this::writeInputEvents,
                 row -> "order input event " + row.getSequenceId());
+        salvageEach(Arrays.asList(executionBatchBuffer).subList(0, batch.executionCount),
+                this::writeExecutions,
+                row -> "execution " + row.getId() + " reference=" + row.getExecutionReference());
     }
 
     private <T> void salvageEach(List<T> rows, java.util.function.Consumer<List<T>> write,
@@ -265,7 +285,8 @@ public class AsyncDbWriter {
     private void reclaimWriteAheadLog() {
         if (wal == null || !wal.isEnabled()) return;
         if (!orderQueue.isEmpty() || !eventQueue.isEmpty()
-                || !processedQueue.isEmpty() || !inputEventQueue.isEmpty()) {
+                || !processedQueue.isEmpty() || !inputEventQueue.isEmpty()
+                || !executionQueue.isEmpty()) {
             return;
         }
         wal.compactToSafePoint();
@@ -281,7 +302,8 @@ public class AsyncDbWriter {
                 drain(orderQueue, orderBatchBuffer),
                 drain(eventQueue, eventBatchBuffer),
                 drain(processedQueue, processedBatchBuffer),
-                drain(inputEventQueue, inputEventBatchBuffer));
+                drain(inputEventQueue, inputEventBatchBuffer),
+                drain(executionQueue, executionBatchBuffer));
     }
 
     private <T> int drain(ConcurrentLinkedDeque<T> queue, T[] buffer) {
@@ -300,6 +322,7 @@ public class AsyncDbWriter {
         persistEvents(batch.eventCount);
         persistProcessed(batch.processedCount);
         persistInputEvents(batch.inputEventCount);
+        persistExecutions(batch.executionCount);
     }
 
     private void persistOrders(int count) {
@@ -595,25 +618,81 @@ public class AsyncDbWriter {
         });
     }
 
+    private void persistExecutions(int count) {
+        if (count > 0) writeExecutions(Arrays.asList(executionBatchBuffer).subList(0, count));
+    }
+
+    private void writeExecutions(List<Execution> batch) {
+        if (jdbcTemplate != null) {
+            flushExecutionsJdbc(batch);
+        } else if (executions != null) {
+            executions.saveAll(batch);
+        }
+    }
+
+    private void flushExecutionsJdbc(List<Execution> batch) {
+        String sql = """
+            INSERT INTO emporia_order_data.execution (
+                id, execution_reference, order_id, quantity, price, venue, executed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (id) DO NOTHING
+            """;
+        int[][] affected = jdbcTemplate.batchUpdate(sql, batch, batch.size(), (PreparedStatement ps, Execution x) -> {
+            ps.setObject(1, x.getId());
+            ps.setString(2, x.getExecutionReference());
+            ps.setObject(3, x.getOrder() == null ? null : x.getOrder().getId());
+            ps.setBigDecimal(4, x.getQuantity());
+            ps.setBigDecimal(5, x.getPrice());
+            ps.setString(6, x.getVenue());
+            ps.setTimestamp(7, x.getExecutedAt() == null ? null : Timestamp.from(x.getExecutedAt()));
+        });
+        reportAbsorbedExecutionDuplicates(affected, batch);
+    }
+
+    /**
+     * Reports executions the reference-dedup layer let through.
+     *
+     * <p>Counterpart of {@link #reportAbsorbedDuplicates} for execution
+     * references: {@code id} is deterministic from the reference
+     * ({@code ExecutionCommandHandler.deterministic}), so a conflict here means
+     * the same fill reached this insert twice, which
+     * {@code OrderStateCache.existsExecutionReference} was supposed to catch in
+     * memory before {@code applyFillAndRecord} was ever called.
+     *
+     * <p>This counter should read zero forever, same oracle as the other two.
+     */
+    private void reportAbsorbedExecutionDuplicates(int[][] affected, List<Execution> batch) {
+        forEachAbsorbed(affected, batch.size(), index -> {
+            Execution duplicate = batch.get(index);
+            duplicateExecutions.increment();
+            log.error("Duplicate execution reached the database: id={} reference={}. "
+                            + "The execution-reference dedup index did not recognise it as already applied.",
+                    duplicate.getId(), duplicate.getExecutionReference());
+        });
+    }
+
     private final class PendingFlushBatch {
         private final int orderCount;
         private final int eventCount;
         private final int processedCount;
         private final int inputEventCount;
+        private final int executionCount;
 
         private PendingFlushBatch(int orderCount, int eventCount, int processedCount,
-                                  int inputEventCount) {
+                                  int inputEventCount, int executionCount) {
             this.orderCount = orderCount;
             this.eventCount = eventCount;
             this.processedCount = processedCount;
             this.inputEventCount = inputEventCount;
+            this.executionCount = executionCount;
         }
 
         private boolean isEmpty() {
             return orderCount == 0
                     && eventCount == 0
                     && processedCount == 0
-                    && inputEventCount == 0;
+                    && inputEventCount == 0
+                    && executionCount == 0;
         }
 
         private void clearBuffers() {
@@ -621,6 +700,7 @@ public class AsyncDbWriter {
             Arrays.fill(eventBatchBuffer, 0, eventCount, null);
             Arrays.fill(processedBatchBuffer, 0, processedCount, null);
             Arrays.fill(inputEventBatchBuffer, 0, inputEventCount, null);
+            Arrays.fill(executionBatchBuffer, 0, executionCount, null);
         }
     }
 }

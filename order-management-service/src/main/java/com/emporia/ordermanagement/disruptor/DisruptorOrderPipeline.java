@@ -1,5 +1,7 @@
 package com.emporia.ordermanagement.disruptor;
 
+import com.emporia.execution.ExecutionVenueReadiness;
+import com.emporia.execution.OrderIntakeReadiness;
 import com.emporia.events.TradingEvents.ExecutionCommand;
 import com.emporia.events.TradingEvents.OrderCommand;
 import com.emporia.ordermanagement.dto.ProcessingOutcome;
@@ -18,8 +20,6 @@ import com.lmax.disruptor.WaitStrategy;
 import com.lmax.disruptor.YieldingWaitStrategy;
 import com.lmax.disruptor.dsl.Disruptor;
 import com.lmax.disruptor.dsl.ProducerType;
-import jakarta.annotation.PostConstruct;
-import jakarta.annotation.PreDestroy;
 
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadMXBean;
@@ -27,7 +27,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.emporia.ha.LeaderElectionService;
 import org.jspecify.annotations.Nullable;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;
@@ -42,7 +45,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * mutex locks, thread context switching, and row contention on hot paths (< 200ns latency).
  */
 @Component
-public class DisruptorOrderPipeline {
+public class DisruptorOrderPipeline implements SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(DisruptorOrderPipeline.class);
     private static final int BUFFER_SIZE = 64 * 1024; // 65,536 slots (power of 2)
 
@@ -99,6 +102,16 @@ public class DisruptorOrderPipeline {
     private Disruptor<OrderRingEvent> disruptor;
     private RingBuffer<OrderRingEvent> ringBuffer;
     private volatile String killSwitchReason = "manual";
+    /** {@link #isRunning()} - sets once {@link #start()} has completed. */
+    private volatile boolean running;
+    /**
+     * Set at the top of {@link #stop()}, before the ring itself stops
+     * consuming. {@link #submitExecutionCommand} checks this so a caller
+     * racing shutdown fails fast instead of blocking on {@link RingBuffer#next()}
+     * forever - nothing reclaims that capacity once the writer thread has
+     * stopped (LMAX_ARCHITECTURE_REWORK_PLAN.md Phase 1 review finding).
+     */
+    private volatile boolean stopping;
     /**
      * Set once, from inside the event handler, the first time it runs. Used
      * only to refuse {@link #submitExecutionCommand} from this thread - see
@@ -117,6 +130,25 @@ public class DisruptorOrderPipeline {
      * 5.1's required guardrail for lossless/blocking execution-command admission).
      */
     private final long executionSubmitWarnThresholdNanos;
+    /**
+     * Counts every execution command applied while the kill switch is
+     * engaged - expected to be nonzero when it happens, not an error by
+     * itself. The kill switch stops new order intake only
+     * ({@link #submit}); {@link #submitExecutionCommand} never blocks on it,
+     * because a fill/reject/cancel already happened at the venue and there is
+     * no durable inbox yet (deferred to Phase 3/4) to hold it until release.
+     * This counter is how an operator who believes the hot path is frozen
+     * finds out state is still moving under them.
+     */
+    private final Counter killSwitchExecutionBypass;
+    /**
+     * Optional, lazily resolved readiness view of the configured execution
+     * venue. Keeping this out of the constructor avoids making the OMS ring
+     * depend directly on a concrete gateway while still closing the restart
+     * window where HTTP could return 201 before the venue finished recovery.
+     */
+    private @Nullable ObjectProvider<ExecutionVenueReadiness> venueReadinessProvider;
+    private volatile @Nullable ExecutionVenueReadiness venueReadiness;
 
     public DisruptorOrderPipeline(OrderCommandHandler orderCommandHandler,
                                  @Nullable ExecutionCommandHandler executionCommandHandler,
@@ -159,11 +191,23 @@ public class DisruptorOrderPipeline {
         this.executionSubmitWait = meters.timer("emporia.oms.execution.submit.wait");
         this.executionQueueLatency = meters.timer("emporia.oms.execution.queue.latency");
         this.executionHandleLatency = meters.timer("emporia.oms.execution.handle.latency");
+        this.killSwitchExecutionBypass = meters.counter("emporia.oms.execution.kill_switch.bypass");
         meters.gauge("emporia.oms.pipeline.queue.depth", queueDepth);
     }
 
-    @PostConstruct
-    public void start() {
+    @Autowired
+    void setExecutionVenueReadinessProvider(ObjectProvider<ExecutionVenueReadiness> venueReadinessProvider) {
+        this.venueReadinessProvider = venueReadinessProvider;
+    }
+
+    void setExecutionVenueReadinessForTest(ExecutionVenueReadiness venueReadiness) {
+        this.venueReadiness = venueReadiness;
+    }
+
+    @Override
+    public synchronized void start() {
+        if (running) return;
+        stopping = false;
         // Before the ring exists, and so before anything appends. A fresh
         // mapping writes from the beginning of the file, so replaying later
         // would read records the process had already started overwriting.
@@ -297,13 +341,38 @@ public class DisruptorOrderPipeline {
         this.ringBuffer = disruptor.start();
         threadFactory.logPlacementHints();
         warmUp();
+        running = true;
     }
 
-    @PreDestroy
-    public void stop() {
+    @Override
+    public boolean isRunning() {
+        return running;
+    }
+
+    /**
+     * Lower than both {@code ExchangeCoreExecutionVenueGateway}
+     * ({@code Integer.MAX_VALUE - 3072}) and {@code FixExecutionVenueGateway}
+     * ({@code Integer.MAX_VALUE - 3072}). Spring stops
+     * {@link SmartLifecycle} beans in descending phase order, so this ring
+     * stops after both venue gateways have already stopped producing new
+     * execution commands - explicit, not the incidental ordering the ring
+     * relied on while it was {@code @PreDestroy}-only (LMAX_ARCHITECTURE_REWORK_PLAN.md
+     * Phase 1 review finding). {@link #stopping} exists for what phase
+     * ordering cannot cover: a call already in flight when {@link #stop()} runs.
+     */
+    @Override
+    public int getPhase() {
+        return Integer.MAX_VALUE - 4096;
+    }
+
+    @Override
+    public synchronized void stop() {
+        if (!running && stopping) return;
+        stopping = true;
         if (disruptor != null) {
             disruptor.shutdown();
         }
+        running = false;
     }
 
     /**
@@ -357,6 +426,10 @@ public class DisruptorOrderPipeline {
             return rejected(503, "not_primary",
                     "This instance is not the primary and does not accept orders");
         }
+        OrderIntakeReadiness intakeReadiness = orderIntakeReadiness();
+        if (!intakeReadiness.readyToAccept()) {
+            return rejected(503, intakeReadiness.reason(), intakeReadiness.message());
+        }
         if (ringBuffer.remainingCapacity() <= minRemainingCapacity) {
             return rejected(429, "overload",
                     "OMS hot path overloaded; command rejected deterministically");
@@ -381,6 +454,17 @@ public class DisruptorOrderPipeline {
             ringBuffer.publish(sequence);
         }
         return future;
+    }
+
+    private OrderIntakeReadiness orderIntakeReadiness() {
+        ExecutionVenueReadiness readiness = venueReadiness;
+        if (readiness == null && venueReadinessProvider != null) {
+            readiness = venueReadinessProvider.getIfAvailable();
+            if (readiness != null) {
+                venueReadiness = readiness;
+            }
+        }
+        return readiness == null ? OrderIntakeReadiness.ready() : readiness.orderIntakeReadiness();
     }
 
     /**
@@ -410,20 +494,38 @@ public class DisruptorOrderPipeline {
      * keeps this consistent with not blocking the calling thread longer than
      * necessary.
      *
-     * <p>Kill-switch/not-primary/shutdown interaction is intentionally not
-     * handled here yet: nothing calls this method in production until task
-     * 5.1 wires {@code ExecutionCommandPublisher} to it, and that shutdown
-     * semantics decision ("block until drained, or a durable inbox") belongs
-     * with that wiring, not guessed at in isolation here.
+     * <p><b>Kill switch never blocks this.</b> A fill/reject/cancel already
+     * happened at the venue - there is no durable inbox yet (deferred to
+     * Phase 3/4) to hold it until the switch releases, so it is applied and
+     * {@link #killSwitchExecutionBypass} is incremented, the same "lossless"
+     * principle as an overloaded ring. Decided during
+     * LMAX_ARCHITECTURE_REWORK_PLAN.md Phase 1 review, superseding this
+     * method's earlier note that the decision was still open.
+     *
+     * <p><b>Shutdown fails fast, never blocks.</b> {@link #stopping} is set at
+     * the top of {@link #stop()}; a call arriving after that throws instead of
+     * calling {@link RingBuffer#next()}, which would otherwise block forever -
+     * nothing reclaims ring capacity once the writer thread has stopped.
+     *
+     * <p><b>Standby fails fast too.</b> A standby must not become a second OMS
+     * state writer by applying venue-originated commands. Venue gateways also
+     * gate their connections/callbacks on leadership-change events, but this is
+     * the final boundary before the BLP sequence itself.
      *
      * @return a future completing when the command has been applied (or
      *         failed) - not when it was merely published to the ring
      * @throws IllegalStateException if called from the OMS writer thread
-     *         itself - blocking there would deadlock waiting for ring
-     *         capacity that only the writer thread's own progress reclaims
+     *         itself (blocking there would deadlock the writer against
+     *         itself), or if the pipeline is stopping or already stopped
      */
     @SuppressWarnings("PMD.CompareObjectsWithEquals")
     public CompletableFuture<Void> submitExecutionCommand(ExecutionCommand command) {
+        if (stopping) {
+            throw new IllegalStateException(
+                    "submitExecutionCommand rejected for order " + command.orderId()
+                            + ": the OMS pipeline is shutting down and no longer accepts "
+                            + "execution commands");
+        }
         // Identity, not value equality - Thread never overrides equals(), so
         // == is what actually asks "is this literally the writer thread".
         if (Thread.currentThread() == writerThread) {
@@ -431,6 +533,19 @@ public class DisruptorOrderPipeline {
                     "submitExecutionCommand must not be called from the OMS writer thread: "
                             + "it blocks for ring capacity that only that thread's own progress "
                             + "reclaims, which would deadlock the writer against itself");
+        }
+        if (leaderElection != null && !leaderElection.isPrimary()) {
+            throw new IllegalStateException(
+                    "submitExecutionCommand rejected for order " + command.orderId()
+                            + ": this instance is not the primary and must not apply "
+                            + "venue execution commands");
+        }
+        if (!accepting.get()) {
+            log.warn("Execution command for order {} applied while the kill switch is engaged "
+                            + "({}) - fills/rejects/venue cancels are never blocked by it, only new "
+                            + "order intake is",
+                    command.orderId(), killSwitchReason);
+            killSwitchExecutionBypass.increment();
         }
         CompletableFuture<Void> future = new CompletableFuture<>();
         long startNanos = System.nanoTime();

@@ -7,6 +7,7 @@ import com.emporia.events.TradingEvents.ListingSnapshot;
 import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.events.TradingEvents.OrderView;
+import com.emporia.ha.LeaderElectionService;
 import com.emporia.ordermanagement.service.LiveDirectOrders;
 import com.emporia.events.math.FixedPointMath;
 import exchange.core2.core.common.CoreSymbolSpecification;
@@ -32,6 +33,7 @@ import exchange.core2.core.simulation.http.EmporiaHttpGatewayConfiguration;
 import exchange.core2.core.simulation.http.HttpEmporiaPortfolioGateway;
 import exchange.core2.core.simulation.outbox.DurableEmporiaPortfolioGateway;
 import exchange.core2.core.simulation.outbox.PortfolioOutboxConfiguration;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -43,6 +45,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.springframework.boot.health.contributor.Health;
 import org.springframework.boot.health.contributor.HealthIndicator;
 import org.springframework.context.SmartLifecycle;
+import org.springframework.context.event.EventListener;
 import org.springframework.core.env.Environment;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -101,7 +104,10 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
 
     private final ExecutionCommandPublisher commands;
     private final ExchangeCoreVenue venue;
+    /** Spring lifecycle state. Active venue state is tracked separately. */
     private final AtomicBoolean running = new AtomicBoolean();
+    /** True only while this instance is allowed to publish venue-originated OMS mutations. */
+    private final AtomicBoolean activePrimary = new AtomicBoolean();
     private final Set<Integer> symbols = ConcurrentHashMap.newKeySet();
     private final Map<Long, Correlation> correlations = new ConcurrentHashMap<>();
     /**
@@ -123,6 +129,16 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     /** How far past its own price a sweep may execute, in basis points. */
     private final BigDecimal slippageBps;
     private final MeterRegistry meters;
+    // Null when no leader election is wired, which connects as before - same
+    // convention as DisruptorOrderPipeline.leaderElection. Non-null and not
+    // primary: start() stays idle rather than recovering venue lifecycle and
+    // accepting order flow, since a standby applying execution commands
+    // through the ring would violate Single Writer
+    // (LMAX_ARCHITECTURE_REWORK_PLAN.md Phase 1 review finding). Threaded
+    // only through GatewaySpec/the @Autowired constructor - the five
+    // test-convenience constructors default it to null via GatewayBuilder,
+    // same as every other optional field there.
+    private final @Nullable LeaderElectionService leaderElection;
     /** Checkpoint failures since the last successful snapshot; 0 means healthy. */
     private final AtomicLong checkpointFailures = new AtomicLong();
     private volatile Instant lastCheckpointSuccess;
@@ -153,12 +169,13 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             // engine has actually been doing.
             @Value("${emporia.execution.exchange-core.journaling:true}") boolean journaling,
             MeterRegistry meters,
-            Environment environment)
+            Environment environment,
+            Optional<LeaderElectionService> leaderElection)
             throws IOException {
         this(commands, tokenProvider, dataSource, recoverySource, liveDirectOrders, exchangeId,
                 storage, partitions, accountingMode, portfolioUrl, portfolioTimeout,
                 retainedCheckpoints, minFreeStorageBytes, slippageBps, waitStrategyName, journaling,
-                meters, activeProfiles(environment));
+                meters, activeProfiles(environment), leaderElection.orElse(null));
     }
 
     public ExchangeCoreExecutionVenueGateway(
@@ -179,7 +196,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             throws IOException {
         this(commands, tokenProvider, dataSource, recoverySource, null, exchangeId, storage,
                 partitions, accountingMode, portfolioUrl, portfolioTimeout, retainedCheckpoints,
-                minFreeStorageBytes, slippageBps, "busy-spin", true, meters, Set.of());
+                minFreeStorageBytes, slippageBps, "busy-spin", true, meters, Set.of(), null);
     }
 
     private ExchangeCoreExecutionVenueGateway(
@@ -200,7 +217,8 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             String waitStrategyName,
             boolean journaling,
             MeterRegistry meters,
-            Set<String> activeProfiles)
+            Set<String> activeProfiles,
+            @Nullable LeaderElectionService leaderElection)
             throws IOException {
         this(GatewaySpec.builder(commands, buildVenue(ProductionVenueSpec.builder()
                         .exchangeId(exchangeId)
@@ -217,6 +235,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
                 .fullEquityRisk(ACCOUNTING_FULL_EQUITY.equalsIgnoreCase(accountingMode))
                 .recoverySource(recoverySource)
                 .liveDirectOrders(liveDirectOrders)
+                .leaderElection(leaderElection)
                 .slippageBps(slippageBps)
                 .meterRegistry(meters)
                 .buildSpec());
@@ -387,6 +406,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         this.liveDirectOrders = spec.liveDirectOrders();
         this.slippageBps = spec.slippageBps();
         this.meters = spec.meters();
+        this.leaderElection = spec.leaderElection();
         if (spec.slippageBps().signum() < 0) {
             throw new IllegalArgumentException("slippage budget must not be negative");
         }
@@ -459,6 +479,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
 
     @Override
     public void submit(OrderView order) {
+        requireActivePrimary("submit");
         try {
             remember(order);
             ensureSymbol(order.listing());
@@ -497,6 +518,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
 
     @Override
     public void modify(OrderView order) {
+        requireActivePrimary("modify");
         try {
             requireLimit(order);
             remember(order);
@@ -518,6 +540,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
 
     @Override
     public void cancel(OrderView order) {
+        requireActivePrimary("cancel");
         try {
             remember(order);
             ensureSymbol(order.listing());
@@ -536,8 +559,26 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
 
     @Override
     public void recover(OrderView order) {
+        requireActivePrimary("recover");
         remember(order);
         ensureSymbol(order.listing());
+    }
+
+    @Override
+    public OrderIntakeReadiness orderIntakeReadiness() {
+        if (!running.get()) {
+            return OrderIntakeReadiness.notReady("execution_venue_not_running",
+                    "Execution venue is not running; retry shortly");
+        }
+        if (leaderElection != null && !leaderElection.isPrimary()) {
+            return OrderIntakeReadiness.notReady("not_primary",
+                    "This instance is not the primary and does not accept orders");
+        }
+        if (leaderElection != null && !activePrimary.get()) {
+            return OrderIntakeReadiness.notReady("execution_venue_not_ready",
+                    "Execution venue is still recovering; retry shortly");
+        }
+        return OrderIntakeReadiness.ready();
     }
 
     /**
@@ -557,6 +598,32 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
      */
     @Override
     public void start() {
+        if (!running.compareAndSet(false, true)) return;
+        if (leaderElection != null && !leaderElection.isPrimary()) {
+            log.info("Exchange-core venue gateway started in STANDBY role; waiting for leadership before opening");
+            return;
+        }
+        try {
+            promoteToPrimary("lifecycle start");
+        } catch (RuntimeException failure) {
+            activePrimary.set(false);
+            running.set(false);
+            throw failure;
+        }
+    }
+
+    @EventListener
+    public void onLeadershipChange(LeaderElectionService.LeadershipChangeEvent event) {
+        if (leaderElection == null || !running.get()) return;
+        if (event.role() == LeaderElectionService.NodeRole.PRIMARY) {
+            promoteToPrimary("leadership promotion epoch " + event.epoch());
+        } else {
+            demoteToStandby("leadership demotion epoch " + event.epoch());
+        }
+    }
+
+    private synchronized void promoteToPrimary(String reason) {
+        if (!running.get() || activePrimary.get()) return;
         // Read the live set in process rather than over HTTP. TradingDataClient
         // calls this same application through the gateway, which cannot answer
         // until the web server is listening - and the web server starts at
@@ -576,7 +643,22 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         if (live != null) {
             venue.recoverLifecycle(lifecycleRebuilder.rebuild(live));
         }
-        running.set(true);
+        activePrimary.set(true);
+        log.info("Exchange-core venue gateway active as PRIMARY ({})", reason);
+    }
+
+    private synchronized void demoteToStandby(String reason) {
+        if (!activePrimary.compareAndSet(true, false)) return;
+        try {
+            venue.checkpoint();
+            recordCheckpointSuccess();
+        } catch (RuntimeException checkpointFailure) {
+            log.warn("Exchange-core checkpoint during {} failed: {}",
+                    reason, checkpointFailure.getMessage());
+            recordCheckpointFailure("ha-demotion", unwrap(checkpointFailure));
+        }
+        log.warn("Exchange-core venue gateway demoted to STANDBY ({}); outbound operations and "
+                + "venue callbacks are now blocked on this node", reason);
     }
 
     /**
@@ -604,8 +686,10 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     @Override
     public void stop() {
         if (running.compareAndSet(true, false)) {
+            activePrimary.set(false);
             try {
                 venue.checkpoint();
+                recordCheckpointSuccess();
             } catch (RuntimeException checkpointFailure) {
                 log.warn("Exchange-core checkpoint on shutdown failed: {}",
                         checkpointFailure.getMessage());
@@ -692,7 +776,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             initialDelayString = "${emporia.execution.exchange-core.snapshot-interval:60s}",
             fixedDelayString = "${emporia.execution.exchange-core.snapshot-interval:60s}")
     void snapshotPeriodically() {
-        if (!running.get()) return;
+        if (!activePrimary.get()) return;
         try {
             venue.checkpoint();
             recordCheckpointSuccess();
@@ -747,6 +831,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     }
 
     private void publishFill(OrderView order, String label, long quantitySteps, long priceTicks) {
+        if (!mayPublishVenueCallback(order, "fill")) return;
         commands.fill(
                 order.id(),
                 order.deskId(),
@@ -758,6 +843,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     }
 
     private void publishCancel(OrderView order, ProductionSimulationResult result) {
+        if (!mayPublishVenueCallback(order, "cancel")) return;
         commands.venueCancel(
                 order.id(),
                 order.deskId(),
@@ -767,12 +853,26 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
     }
 
     private void reject(OrderView order, String detail) {
+        if (!mayPublishVenueCallback(order, "reject")) return;
         commands.reject(
                 order.id(),
                 order.deskId(),
                 reference(order, "REJECT"),
                 order.listing().exchangeMic(),
                 detail);
+    }
+
+    private void requireActivePrimary(String operation) {
+        if (leaderElection == null || activePrimary.get()) return;
+        throw new IllegalStateException("Exchange-core venue gateway is not active PRIMARY; refusing "
+                + operation + " on this node");
+    }
+
+    private boolean mayPublishVenueCallback(OrderView order, String callback) {
+        if (leaderElection == null || activePrimary.get()) return true;
+        log.warn("Suppressing exchange-core {} callback for order {} because this node is no longer PRIMARY",
+                callback, order.id());
+        return false;
     }
 
     /**
@@ -1136,7 +1236,8 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             TradingDataClient recoverySource,
             LiveDirectOrders liveDirectOrders,
             BigDecimal slippageBps,
-            MeterRegistry meters) {
+            MeterRegistry meters,
+            @Nullable LeaderElectionService leaderElection) {
         private GatewaySpec {
             commands = Objects.requireNonNull(commands, "commands");
             venue = Objects.requireNonNull(venue, "venue");
@@ -1157,6 +1258,7 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
         private LiveDirectOrders liveDirectOrders;
         private BigDecimal slippageBps = DEFAULT_SLIPPAGE_BPS;
         private MeterRegistry meters = new SimpleMeterRegistry();
+        private @Nullable LeaderElectionService leaderElection;
 
         private GatewayBuilder(ExecutionCommandPublisher commands, ExchangeCoreVenue venue) {
             this.commands = commands;
@@ -1188,13 +1290,18 @@ public class ExchangeCoreExecutionVenueGateway implements ExecutionVenueGateway,
             return this;
         }
 
+        GatewayBuilder leaderElection(@Nullable LeaderElectionService leaderElection) {
+            this.leaderElection = leaderElection;
+            return this;
+        }
+
         ExchangeCoreExecutionVenueGateway build() {
             return new ExchangeCoreExecutionVenueGateway(buildSpec());
         }
 
         private GatewaySpec buildSpec() {
             return new GatewaySpec(commands, venue, fullEquityRisk, recoverySource,
-                    liveDirectOrders, slippageBps, meters);
+                    liveDirectOrders, slippageBps, meters, leaderElection);
         }
     }
 

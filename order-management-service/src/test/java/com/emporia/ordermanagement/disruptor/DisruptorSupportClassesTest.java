@@ -100,4 +100,39 @@ class DisruptorSupportClassesTest {
         assertThat(event.getSubmittedAtNanos()).isEqualTo(0L);
         assertThat(event.getStartedAtNanos()).isEqualTo(0L);
     }
+
+    /**
+     * LMAX_ARCHITECTURE_REWORK_PLAN.md task 5.5's runtime guard: pure
+     * name-based predicate, tested directly against controlled thread names
+     * rather than via HotPathAssertions.ENABLED (a static final flag read
+     * once at class-load from a system property - not something a running
+     * test can flip after the fact).
+     */
+    @Test
+    void recognisesTheWriterThreadByNamePrefix() throws InterruptedException {
+        assertThat(isWriterThreadOrStartupReplayOnAThreadNamed("oms-hotpath-1")).isTrue();
+        assertThat(isWriterThreadOrStartupReplayOnAThreadNamed("oms-hotpath-42")).isTrue();
+    }
+
+    @Test
+    void recognisesTheDocumentedStartupReplayException() throws InterruptedException {
+        assertThat(isWriterThreadOrStartupReplayOnAThreadNamed("main"))
+                .as("OrderCommandReplayHarness replays on the main thread before the writer thread exists")
+                .isTrue();
+    }
+
+    @Test
+    void rejectsThreadsThatAreNeitherTheWriterNorStartupReplay() throws InterruptedException {
+        assertThat(isWriterThreadOrStartupReplayOnAThreadNamed("http-nio-8086-exec-1")).isFalse();
+        assertThat(isWriterThreadOrStartupReplayOnAThreadNamed("scheduling-1")).isFalse();
+        assertThat(isWriterThreadOrStartupReplayOnAThreadNamed("Test worker")).isFalse();
+    }
+
+    private static boolean isWriterThreadOrStartupReplayOnAThreadNamed(String name) throws InterruptedException {
+        AtomicBoolean result = new AtomicBoolean();
+        Thread thread = new Thread(() -> result.set(HotPathAssertions.isWriterThreadOrStartupReplay()), name);
+        thread.start();
+        thread.join(2000);
+        return result.get();
+    }
 }

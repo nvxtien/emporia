@@ -32,11 +32,24 @@ public class TradingOrder {
      * {@link #recordRevision()} and by nothing else.
      *
      * <p>Deliberately <b>not</b> {@code @Version}. Hibernate's optimistic
-     * locking is not wanted here: order state changes all run on the single
-     * Disruptor writer thread, so the race it guards against - a venue fill and
-     * a user cancel updating one row at once - cannot occur, and the writes that
-     * would carry the guard go out through raw JDBC where Hibernate is not
-     * involved at all.
+     * locking is not wanted here: state mutation is intended to be confined to
+     * the OMS BLP writer thread - Single Writer ownership,
+     * {@code LMAX_ARCHITECTURE_REWORK_PLAN.md} R1 - so the race {@code @Version}
+     * guards against, a venue fill and a user cancel updating one row at once,
+     * is not supposed to be reachable at all, and the writes that would carry
+     * the guard go out through raw JDBC where Hibernate is not involved anyway.
+     *
+     * <p>The methods below stay {@code synchronized} regardless. Single Writer
+     * is an ownership rule, not a claim that this class enforces it by itself -
+     * {@code synchronized} is the defensive publication/snapshot guardrail for
+     * a boundary violation or a snapshot-publication edge case, not evidence
+     * that either is expected. A full call-site audit (plan task 5.3, 2026-08-18)
+     * found every one of these methods reached only from the ring writer thread
+     * on the shared, live instance - but that finding rests on execution
+     * commands actually routing through {@code DisruptorOrderPipeline} as
+     * designed (task 5.1), which has not yet been verified against a real
+     * Spring context. {@code synchronized} stays until that verification lands;
+     * removing it is a deliberately separate, later task.
      *
      * <p>Keeping the annotation was not free. It made Spring Data decide new
      * from existing by {@code version == null}, and this constructor assigns 0,

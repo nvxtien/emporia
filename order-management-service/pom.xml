@@ -78,6 +78,11 @@
             <scope>provided</scope>
         </dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency>
+        <!-- LMAX_ARCHITECTURE_REWORK_PLAN.md task 5.5: static enforcement that
+             production code outside DisruptorOrderPipeline cannot call the BLP
+             handlers or mutate order state directly. Test-only, no production
+             classpath impact. -->
+        <dependency><groupId>com.tngtech.archunit</groupId><artifactId>archunit-junit5</artifactId><version>1.3.0</version><scope>test</scope></dependency>
         <dependency>
             <groupId>net.jqwik</groupId>
             <artifactId>jqwik</artifactId>
@@ -202,6 +207,31 @@
                             <includes>
                                 <include>**/TradingOrderPostgresPersistenceSpec.java</include>
                                 <include>**/AbsorbedConflictReportingSpec.java</include>
+                            </includes>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <!--
+            Separate from postgres-it: ExecutionRingWiringSpec references
+            ExchangeCoreExecutionVenueGateway/RoutingExecutionVenueGateway,
+            which only compile under -Dmatching (the agency profile excludes
+            them). Folding it into postgres-it's includes would break
+            `mvn test -Ppostgres-it` on its own, since that combination does
+            not imply -Dmatching. Compose the two instead:
+            `mvn test -Dmatching -Pring-wiring-it`.
+        -->
+        <profile>
+            <id>ring-wiring-it</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <includes>
+                                <include>**/ExecutionRingWiringSpec.java</include>
                             </includes>
                         </configuration>
                     </plugin>

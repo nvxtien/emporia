@@ -4,9 +4,11 @@ import com.emporia.events.TradingEvents.ListingSnapshot;
 import com.emporia.events.TradingEvents.OrderCommandResult;
 import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderType;
+import com.emporia.ordermanagement.model.Execution;
 import com.emporia.ordermanagement.model.OrderEvent;
 import com.emporia.ordermanagement.model.ProcessedCommand;
 import com.emporia.ordermanagement.model.TradingOrder;
+import com.emporia.ordermanagement.repository.ExecutionRepository;
 import com.emporia.ordermanagement.repository.OrderEventRepository;
 import com.emporia.ordermanagement.repository.ProcessedCommandRepository;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
@@ -43,6 +45,7 @@ class AsyncDbWriterTest {
     private final TradingOrderRepository orders = mock(TradingOrderRepository.class);
     private final OrderEventRepository events = mock(OrderEventRepository.class);
     private final ProcessedCommandRepository processed = mock(ProcessedCommandRepository.class);
+    private final ExecutionRepository executions = mock(ExecutionRepository.class);
     private AsyncDbWriter writer;
 
     @BeforeEach
@@ -62,7 +65,7 @@ class AsyncDbWriterTest {
         SimpleMeterRegistry meters = new SimpleMeterRegistry();
         when(jdbc.batchUpdate(anyString(), anyList(), anyInt(), any()))
                 .thenReturn(new int[][]{{1, 0}});
-        AsyncDbWriter instrumented = new AsyncDbWriter(orders, events, processed, null, jdbc, null, null, meters);
+        AsyncDbWriter instrumented = new AsyncDbWriter(orders, events, processed, null, jdbc, null, null, meters, null);
 
         instrumented.enqueue(new ProcessedCommand(
                 new OrderCommandResult(SCHEMA_VERSION, UUID.randomUUID(), true, 201, null, "{}")));
@@ -79,7 +82,7 @@ class AsyncDbWriterTest {
         SimpleMeterRegistry meters = new SimpleMeterRegistry();
         when(jdbc.batchUpdate(anyString(), anyList(), anyInt(), any()))
                 .thenReturn(new int[][]{{1, 1}});
-        AsyncDbWriter instrumented = new AsyncDbWriter(orders, events, processed, null, jdbc, null, null, meters);
+        AsyncDbWriter instrumented = new AsyncDbWriter(orders, events, processed, null, jdbc, null, null, meters, null);
 
         instrumented.enqueue(new ProcessedCommand(
                 new OrderCommandResult(SCHEMA_VERSION, UUID.randomUUID(), true, 201, null, "{}")));
@@ -88,6 +91,55 @@ class AsyncDbWriterTest {
         instrumented.flush();
 
         assertThat(meters.counter("emporia.oms.dedup.duplicate_reached_db").count()).isZero();
+    }
+
+    /**
+     * LMAX_ARCHITECTURE_REWORK_PLAN.md task 5.2's other half:
+     * ExecutionCommandHandler.applyFillAndRecord used to call
+     * executions.save(...) synchronously - this is what replaces it.
+     */
+    @Test
+    void enqueuesAndFlushesAnExecution() {
+        AsyncDbWriter withExecutions = new AsyncDbWriter(orders, events, processed, null, null, null, null,
+                new SimpleMeterRegistry(), executions);
+        Execution execution = testExecution();
+
+        withExecutions.enqueue(execution);
+        withExecutions.flush();
+
+        verify(executions).saveAll(anyList());
+    }
+
+    /**
+     * Same oracle as {@link #countsCommandsThatReachedTheDatabaseTwice}, for
+     * execution references: this should be unreachable now that
+     * OrderStateCache.existsExecutionReference gates every fill before
+     * applyFillAndRecord ever enqueues a row, so a count above zero means that
+     * gate was bypassed.
+     */
+    @Test
+    void countsExecutionsThatReachedTheDatabaseTwice() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        when(jdbc.batchUpdate(anyString(), anyList(), anyInt(), any()))
+                .thenReturn(new int[][]{{1, 0}});
+        AsyncDbWriter instrumented = new AsyncDbWriter(orders, events, processed, null, jdbc, null, null, meters, executions);
+
+        instrumented.enqueue(testExecution());
+        instrumented.enqueue(testExecution());
+        instrumented.flush();
+
+        assertThat(meters.counter("emporia.oms.dedup.duplicate_execution_reached_db").count()).isEqualTo(1.0);
+    }
+
+    private static Execution testExecution() {
+        UUID orderId = UUID.randomUUID();
+        ListingSnapshot listing = new ListingSnapshot(1L, 1, "AAPL", "Apple Inc.", "AAPL", "XNAS", "Nasdaq", "US", "USD",
+                new BigDecimal("0.01"), BigDecimal.ONE, new BigDecimal("200"), new BigDecimal("198"));
+        TradingOrder order = new TradingOrder(orderId, "trader-1", listing, OrderSide.BUY, OrderType.LIMIT,
+                new BigDecimal("100"), new BigDecimal("150.00"), "DMA", "ref-1", null, null, null);
+        return new Execution(UUID.randomUUID(), "exec-ref-" + UUID.randomUUID(), order,
+                new BigDecimal("10"), new BigDecimal("150.00"), "XNAS", java.time.Instant.now());
     }
 
     @Test
@@ -123,7 +175,7 @@ class AsyncDbWriterTest {
     @Test
     void aRowTheDatabaseRefusesIsDroppedRatherThanRetriedForever() {
         SimpleMeterRegistry meters = new SimpleMeterRegistry();
-        AsyncDbWriter isolating = new AsyncDbWriter(orders, events, processed, null, null, null, null, meters);
+        AsyncDbWriter isolating = new AsyncDbWriter(orders, events, processed, null, null, null, null, meters, null);
         when(orders.saveAll(anyList())).thenThrow(new RuntimeException("violates check constraint"));
 
         isolating.enqueue(testOrder());
@@ -141,7 +193,7 @@ class AsyncDbWriterTest {
     @SuppressWarnings("unchecked")
     void rowsTheDatabaseAcceptsStillLandWhenOneRowInTheBatchFails() {
         SimpleMeterRegistry meters = new SimpleMeterRegistry();
-        AsyncDbWriter isolating = new AsyncDbWriter(orders, events, processed, null, null, null, null, meters);
+        AsyncDbWriter isolating = new AsyncDbWriter(orders, events, processed, null, null, null, null, meters, null);
         TradingOrder poison = testOrder();
         TradingOrder healthy = testOrder();
         when(orders.saveAll(anyList())).thenAnswer(invocation -> {
@@ -186,7 +238,7 @@ class AsyncDbWriterTest {
             return new int[][]{applied};
         });
         AsyncDbWriter snapshotting = new AsyncDbWriter(
-                orders, events, processed, null, jdbc, null, null, new SimpleMeterRegistry());
+                orders, events, processed, null, jdbc, null, null, new SimpleMeterRegistry(), null);
 
         TradingOrder order = testOrder();
         snapshotting.enqueue(order);
@@ -217,7 +269,7 @@ class AsyncDbWriterTest {
         MemoryMappedWalLogger wal = mock(MemoryMappedWalLogger.class);
         org.mockito.Mockito.when(wal.isEnabled()).thenReturn(true);
         AsyncDbWriter writerWithWal = new AsyncDbWriter(
-                orders, events, processed, null, null, wal, null, new SimpleMeterRegistry());
+                orders, events, processed, null, null, wal, null, new SimpleMeterRegistry(), null);
         when(orders.saveAll(anyList())).thenThrow(new RuntimeException("violates check constraint"));
 
         writerWithWal.enqueue(testOrder());
@@ -230,7 +282,7 @@ class AsyncDbWriterTest {
     void reclaimWaitsUntilEveryQueueDrainsBeforeCompactingTheLog() {
         MemoryMappedWalLogger wal = mock(MemoryMappedWalLogger.class);
         org.mockito.Mockito.when(wal.isEnabled()).thenReturn(true);
-        AsyncDbWriter writerWithWal = new AsyncDbWriter(orders, events, processed, null, null, wal, null, null);
+        AsyncDbWriter writerWithWal = new AsyncDbWriter(orders, events, processed, null, null, wal, null, null, null);
         // One more than a single flush batch, so one order is still queued
         // when reclaimWriteAheadLog runs its emptiness check.
         for (int i = 0; i < 501; i++) {
@@ -264,7 +316,7 @@ class AsyncDbWriterTest {
         JdbcTemplate jdbc = mock(JdbcTemplate.class);
         when(jdbc.batchUpdate(anyString(), anyList(), anyInt(), any())).thenReturn(new int[][]{{1}});
         AsyncDbWriter probing = new AsyncDbWriter(
-                orders, events, processed, null, jdbc, null, null, new SimpleMeterRegistry());
+                orders, events, processed, null, jdbc, null, null, new SimpleMeterRegistry(), null);
         probing.enqueue(testOrder());
         probing.flush();
 
@@ -284,7 +336,7 @@ class AsyncDbWriterTest {
     void countsOrdersWhoseFirstWriteFoundTheIdAlreadyThere() {
         SimpleMeterRegistry meters = new SimpleMeterRegistry();
         AsyncDbWriter instrumented = new AsyncDbWriter(
-                orders, events, processed, null, jdbcWhereFirstWritesReturn(new int[][]{{1, 0}}), null, null, meters);
+                orders, events, processed, null, jdbcWhereFirstWritesReturn(new int[][]{{1, 0}}), null, null, meters, null);
 
         instrumented.enqueueNew(testOrder());
         instrumented.enqueueNew(testOrder());
@@ -298,7 +350,7 @@ class AsyncDbWriterTest {
         SimpleMeterRegistry meters = new SimpleMeterRegistry();
         // Counts that would fire the report if this path ever took the insert.
         JdbcTemplate jdbc = jdbcWhereFirstWritesReturn(new int[][]{{0, 0}});
-        AsyncDbWriter instrumented = new AsyncDbWriter(orders, events, processed, null, jdbc, null, null, meters);
+        AsyncDbWriter instrumented = new AsyncDbWriter(orders, events, processed, null, jdbc, null, null, meters, null);
 
         instrumented.enqueue(testOrder());
         instrumented.flush();
@@ -318,7 +370,7 @@ class AsyncDbWriterTest {
     void aCreateAndAStateChangeInOneBatchAreOneInsertAndOneUpsert() {
         SimpleMeterRegistry meters = new SimpleMeterRegistry();
         JdbcTemplate jdbc = jdbcWhereFirstWritesReturn(new int[][]{{1}});
-        AsyncDbWriter instrumented = new AsyncDbWriter(orders, events, processed, null, jdbc, null, null, meters);
+        AsyncDbWriter instrumented = new AsyncDbWriter(orders, events, processed, null, jdbc, null, null, meters, null);
         TradingOrder order = testOrder();
 
         instrumented.enqueueNew(order);
@@ -335,7 +387,7 @@ class AsyncDbWriterTest {
     void anOrderCountsAsAFirstWriteOnlyOnce() {
         SimpleMeterRegistry meters = new SimpleMeterRegistry();
         JdbcTemplate jdbc = jdbcWhereFirstWritesReturn(new int[][]{{1}});
-        AsyncDbWriter instrumented = new AsyncDbWriter(orders, events, processed, null, jdbc, null, null, meters);
+        AsyncDbWriter instrumented = new AsyncDbWriter(orders, events, processed, null, jdbc, null, null, meters, null);
         TradingOrder order = testOrder();
 
         instrumented.enqueueNew(order);

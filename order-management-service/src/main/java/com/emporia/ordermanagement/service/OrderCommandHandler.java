@@ -7,6 +7,7 @@ import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.events.risk.OrderRiskChecks;
+import com.emporia.ordermanagement.disruptor.HotPathAssertions;
 import com.emporia.ordermanagement.dto.ProcessingOutcome;
 import com.emporia.ordermanagement.model.OrderEvent;
 import com.emporia.ordermanagement.model.ProcessedCommand;
@@ -71,6 +72,19 @@ public class OrderCommandHandler {
      * Direct Java invocation without Spring AOP / CGLIB proxy reflection.
      */
     public ProcessingOutcome handle(OrderCommand command) {
+        // LMAX_ARCHITECTURE_REWORK_PLAN.md task 5.5's runtime guard for R1
+        // (Single Writer ownership). Off by default (HotPathAssertions.ENABLED),
+        // same as every other hot-path assertion - this is a diagnostic, not a
+        // production gate. Known gap: OrderShadowComparisonService constructs
+        // its own throwaway OrderCommandHandler and calls handle() from a
+        // Tomcat request thread by design (see SingleWriterBoundaryTest's
+        // documented exception for the same call) - enabling this flag in an
+        // environment where that admin endpoint is used will false-positive
+        // there. Accepted for now: this is an opt-in debug tool, not something
+        // enabled by default.
+        HotPathAssertions.require(HotPathAssertions.isWriterThreadOrStartupReplay(),
+                "OrderCommandHandler.handle() called from " + Thread.currentThread().getName()
+                        + ", not the OMS writer thread or startup replay");
         // Timer, not Observation: measured on the single writer thread, the
         // Observation machinery cost ~0.3 ms per command whether or not the span
         // was sampled, and on a single-writer path a fixed per-event cost is

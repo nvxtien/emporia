@@ -112,6 +112,16 @@ public class OrderStateCache {
     private final Timer cancelChildrenFromDb;
     private final Timer cancelDeskFromIndex;
     private final Timer cancelDeskFromDb;
+    // LMAX_ARCHITECTURE_REWORK_PLAN.md task 5.2: execution-reference dedup was
+    // ExecutionCommandHandler's own direct, uncached JPA call on every fill -
+    // the one place it was genuinely worse than OrderCommandHandler, not just
+    // a degraded fallback. Shares the same RotatingDedupIndex filters as
+    // command/order dedup rather than a dedicated instance: DedupIndexConfig's
+    // own javadoc already treats multiple key spaces sharing one filter set as
+    // the design, not a compromise - "under-sizing is safe, it raises the
+    // false-positive rate."
+    private final Timer executionReferenceFromIndex;
+    private final Timer executionReferenceFromDb;
     // Owns every filter, including the rotation that stops them growing for as
     // long as the process runs, and every filter it holds has a single writer.
     //
@@ -163,6 +173,8 @@ public class OrderStateCache {
         this.cancelChildrenFromDb = metrics.registry().timer("emporia.oms.cache.lookup", "check", "cancel_children", "source", "db");
         this.cancelDeskFromIndex = metrics.registry().timer("emporia.oms.cache.lookup", "check", "cancel_desk", "source", "index");
         this.cancelDeskFromDb = metrics.registry().timer("emporia.oms.cache.lookup", "check", "cancel_desk", "source", "db");
+        this.executionReferenceFromIndex = metrics.registry().timer("emporia.oms.cache.lookup", "check", "execution_reference", "source", "index");
+        this.executionReferenceFromDb = metrics.registry().timer("emporia.oms.cache.lookup", "check", "execution_reference", "source", "db");
         // No maximumSize and no expireAfterWrite: this is a live-order store, not
         // a cache. Both of those evicted orders that were still live - the size
         // bound silently (137,435 live orders were observed against a 100,000
@@ -231,6 +243,42 @@ public class OrderStateCache {
         boolean exists = orderRepository.existsById(id);
         existsFromDb.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
         return exists;
+    }
+
+    /**
+     * Whether {@code executionReference}, scoped to {@code deskId}/{@code venue},
+     * has already been applied - the same fallback shape as {@link #existsById}:
+     * the dedup index can only answer "definitely new" with confidence (a Bloom
+     * filter has no false negatives), so "maybe seen" falls through to
+     * {@code dbFallback} rather than being treated as a confirmed duplicate.
+     *
+     * <p>Keyed on all three fields, not the bare reference: Postgres's own
+     * uniqueness constraint on {@code execution_reference} is a single global
+     * column, which assumes references are unique across every venue - nothing
+     * in this codebase guarantees that today, so the in-memory index is
+     * deliberately stricter than the schema it fronts.
+     */
+    public boolean existsExecutionReference(String deskId, String venue, String executionReference,
+            Supplier<Boolean> dbFallback) {
+        long started = System.nanoTime();
+        if (indexAnswers() && dedup.definitelyNew(executionReferenceKey(deskId, venue, executionReference))) {
+            executionReferenceFromIndex.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
+            return false;
+        }
+        boolean exists = dbFallback.get();
+        executionReferenceFromDb.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
+        return exists;
+    }
+
+    /** Marks {@code executionReference} as applied, so a repeat is recognised without the database. */
+    public void rememberExecutionReference(String deskId, String venue, String executionReference) {
+        if (dedup != null) dedup.remember(executionReferenceKey(deskId, venue, executionReference));
+    }
+
+    private static UUID executionReferenceKey(String deskId, String venue, String executionReference) {
+        return UUID.nameUUIDFromBytes(
+                (deskId + '\u0000' + venue + '\u0000' + executionReference)
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
     /**

@@ -21,6 +21,11 @@ import java.util.UUID;
 public class Execution {
     @Id
     private UUID id;
+    // Must be globally unique, not just unique per venue - this column's
+    // constraint and ExecutionCommandHandler's dedup id both assume it. Every
+    // ExecutionVenueGateway must mint references that are unique on their own
+    // (e.g. mic-/order-id-prefixed), since nothing downstream re-scopes a
+    // colliding one (LMAX_ARCHITECTURE_REWORK_PLAN.md Phase 1 review finding).
     @Column(name = "execution_reference", nullable = false, unique = true, length = 100)
     private String executionReference;
     @ManyToOne(fetch = FetchType.LAZY, optional = false)

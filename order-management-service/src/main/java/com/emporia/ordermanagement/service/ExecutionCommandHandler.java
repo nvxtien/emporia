@@ -3,6 +3,7 @@ package com.emporia.ordermanagement.service;
 import com.emporia.events.TradingEvents.ExecutionCommand;
 import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderStatus;
+import com.emporia.ordermanagement.disruptor.HotPathAssertions;
 import com.emporia.ordermanagement.model.Execution;
 import com.emporia.ordermanagement.model.OrderEvent;
 import com.emporia.ordermanagement.model.TradingOrder;
@@ -58,11 +59,20 @@ public class ExecutionCommandHandler {
      * Direct Java invocation without Spring AOP / CGLIB proxy reflection.
      */
     public List<OrderDomainEvent> handle(ExecutionCommand command) {
+        // LMAX_ARCHITECTURE_REWORK_PLAN.md task 5.5's runtime guard for R1
+        // (Single Writer ownership). Off by default (HotPathAssertions.ENABLED) -
+        // a diagnostic, not a production gate. No documented exception exists
+        // for this handler (unlike OrderCommandHandler): SingleWriterBoundaryTest
+        // found no legitimate direct caller beyond DisruptorOrderPipeline.
+        HotPathAssertions.require(HotPathAssertions.isWriterThreadOrStartupReplay(),
+                "ExecutionCommandHandler.handle() called from " + Thread.currentThread().getName()
+                        + ", not the OMS writer thread");
         if (command.schemaVersion() != SCHEMA_VERSION) {
             throw new IllegalArgumentException("Unsupported execution command schema version");
         }
         if (command.commandType() == com.emporia.events.TradingEvents.ExecutionCommandType.FILL
-                && executions.existsByExecutionReference(command.executionReference())) {
+                && cache.existsExecutionReference(command.deskId(), command.venue(), command.executionReference(),
+                        () -> executions.existsByExecutionReference(command.executionReference()))) {
             return List.of();
         }
 
@@ -111,7 +121,8 @@ public class ExecutionCommandHandler {
             TradingOrder parent = cache.findByIdAndDeskId(parentId, child.getDeskId())
                     .orElseThrow(() -> new IllegalStateException("Parent order was not found on its desk"));
             String rollupReference = rollupReference(command.executionReference(), parent.getId());
-            if (!executions.existsByExecutionReference(rollupReference)) {
+            if (!cache.existsExecutionReference(parent.getDeskId(), command.venue(), rollupReference,
+                    () -> executions.existsByExecutionReference(rollupReference))) {
                 applyFillAndRecord(parent, command.commandId(), rollupReference,
                         command.quantity(), command.price(), command.quantityScaled(), command.priceScaled(),
                         command.venue(), command.occurredAt(),
@@ -131,7 +142,11 @@ public class ExecutionCommandHandler {
                                     java.time.Instant occurredAt, String message,
                                     List<OrderDomainEvent> result) {
         order.applyFill(quantityScaled, priceScaled);
-        executions.save(new Execution(
+        // Async, not executions.save(...): a synchronous JPA write here was the
+        // other thing that made this handler worse than OrderCommandHandler on
+        // the BLP (LMAX_ARCHITECTURE_REWORK_PLAN.md task 5.2). Same durability
+        // shape as every other row this handler writes - queued, not blocking.
+        asyncDbWriter.enqueue(new Execution(
                 deterministic(reference),
                 reference,
                 order,
@@ -140,6 +155,10 @@ public class ExecutionCommandHandler {
                 venue,
                 occurredAt
         ));
+        // Recorded only after the write is queued: remembering a reference the
+        // enqueue never reached would let a genuine retry of a lost write read
+        // as a duplicate and get silently dropped.
+        cache.rememberExecutionReference(order.getDeskId(), venue, reference);
         cache.put(order);
         asyncDbWriter.enqueue(order);
         addEvent(commandId, order,

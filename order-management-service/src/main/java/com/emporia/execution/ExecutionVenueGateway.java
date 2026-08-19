@@ -36,6 +36,15 @@ interface ExecutionVenueGateway {
     String venueMode();
 
     /**
+     * Whether order intake may return 201 while this gateway is the configured
+     * venue. Default is ready for legacy/test gateways that do not have an
+     * asynchronous recovery/open step.
+     */
+    default OrderIntakeReadiness orderIntakeReadiness() {
+        return OrderIntakeReadiness.ready();
+    }
+
+    /**
      * Which of {@code expected} the venue currently holds open, answered in
      * order-management's own order ids.
      *
