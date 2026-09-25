@@ -335,8 +335,10 @@ public class OrderCommandHandler {
 
     private TradingOrder findOnDesk(String deskId, java.util.UUID orderId) {
         require(orderId != null, 400, "Order id is required");
-        // Cache-backed lookup: avoids a DB SELECT on every command for a live order.
-        return cache.findByIdAndDeskId(orderId, deskId)
+        // Memory-only: a miss here is "not found" (LMAX_ARCHITECTURE_REWORK_PLAN.md
+        // task 7) - this call site always threw 404 on empty already, never
+        // wanted findByIdAndDeskId's DB fallback in the first place.
+        return cache.findLiveByIdAndDeskMemoryOnly(orderId, deskId)
                 .orElseThrow(() -> new DomainProblem(404, "Order not found"));
     }
 

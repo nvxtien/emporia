@@ -17,7 +17,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 import static com.emporia.events.TradingEvents.SCHEMA_VERSION;
 
@@ -77,8 +79,10 @@ public class ExecutionCommandHandler {
         }
 
         // Cache-backed lookup: the child order is almost certainly warm.
-        TradingOrder order = cache.findByIdAndDeskId(command.orderId(), command.deskId())
-                .orElseThrow(() -> new IllegalArgumentException("Execution order was not found on its desk"));
+        Optional<TradingOrder> maybeOrder = findLiveOrAssumeTerminal(command.orderId(), command.deskId(),
+                () -> new IllegalArgumentException("Execution order was not found on its desk"));
+        if (maybeOrder.isEmpty()) return List.of();
+        TradingOrder order = maybeOrder.get();
         List<OrderDomainEvent> result = new ArrayList<>();
 
         switch (command.commandType()) {
@@ -118,8 +122,10 @@ public class ExecutionCommandHandler {
         UUID parentId = child.getParentOrderId();
         while (parentId != null) {
             // Ancestor rollup walk: parent lookup expected to be warm in cache.
-            TradingOrder parent = cache.findByIdAndDeskId(parentId, child.getDeskId())
-                    .orElseThrow(() -> new IllegalStateException("Parent order was not found on its desk"));
+            Optional<TradingOrder> maybeParent = findLiveOrAssumeTerminal(parentId, child.getDeskId(),
+                    () -> new IllegalStateException("Parent order was not found on its desk"));
+            if (maybeParent.isEmpty()) break;
+            TradingOrder parent = maybeParent.get();
             String rollupReference = rollupReference(command.executionReference(), parent.getId());
             if (!cache.existsExecutionReference(parent.getDeskId(), command.venue(), rollupReference,
                     () -> executions.existsByExecutionReference(rollupReference))) {
@@ -177,6 +183,30 @@ public class ExecutionCommandHandler {
      * writer, so it never queued order intake behind it - but it is the same
      * question the writer asks, and the same index answers it.
      */
+    /**
+     * A live order, or an empty result the caller should silently back off
+     * from - never a repository read. {@link OrderStateCache#put} evicts a
+     * terminal order from the live store by design, so a miss here is
+     * ambiguous: genuinely unknown, or an order this instance already
+     * resolved. The dedup index remembers every id {@code put()} ever saw,
+     * live or terminal, so {@link MemoryAnswer#DEFINITELY_NEW} is what tells
+     * the two apart from memory alone - anything else (seen before, or the
+     * index not ready yet) is treated as "probably terminal, back off" rather
+     * than thrown, because a late or duplicate venue message for an order
+     * that already resolved is expected, not a bug this handler should raise
+     * on (LMAX_ARCHITECTURE_REWORK_PLAN.md task 7 review finding -
+     * {@code ignoreOpsOnAlreadyTerminalOrder}).
+     */
+    private Optional<TradingOrder> findLiveOrAssumeTerminal(UUID orderId, String deskId,
+            Supplier<RuntimeException> ifGenuinelyUnknown) {
+        Optional<TradingOrder> live = cache.findLiveByIdAndDeskMemoryOnly(orderId, deskId);
+        if (live.isPresent()) return live;
+        if (cache.existsByIdMemoryOnly(orderId) == MemoryAnswer.DEFINITELY_NEW) {
+            throw ifGenuinelyUnknown.get();
+        }
+        return Optional.empty();
+    }
+
     private boolean hasLiveChildren(java.util.UUID parentId) {
         return !cache.liveChildrenOf(parentId, () -> orders.findByParentOrderIdAndStatusIn(parentId, ACTIVE))
                 .isEmpty();
@@ -217,8 +247,10 @@ public class ExecutionCommandHandler {
         UUID currentId = parentId;
         while (currentId != null) {
             // Ancestor walk: cache hit expected since child was just written above.
-            TradingOrder parent = cache.findByIdAndDeskId(currentId, command.deskId())
-                    .orElseThrow(() -> new IllegalStateException("Parent order was not found on its desk"));
+            Optional<TradingOrder> maybeParent = findLiveOrAssumeTerminal(currentId, command.deskId(),
+                    () -> new IllegalStateException("Parent order was not found on its desk"));
+            if (maybeParent.isEmpty()) return;
+            TradingOrder parent = maybeParent.get();
             if (parent.getTargetStatus() != OrderStatus.CANCELLED || isTerminal(parent)
                     || hasLiveChildren(parent.getId())) {
                 return;

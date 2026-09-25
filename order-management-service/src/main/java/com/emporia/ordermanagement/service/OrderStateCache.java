@@ -229,6 +229,22 @@ public class OrderStateCache {
         return fromDb;
     }
 
+    /**
+     * The live-order store's own answer, and only that - no repository
+     * fallback on a miss. LMAX_ARCHITECTURE_REWORK_PLAN.md task 7: the BLP
+     * handlers' own lookups (a live order they expect to already hold) never
+     * wanted {@link #findByIdAndDeskId}'s DB fallback in the first place -
+     * every call site there already throws a domain error on
+     * {@code Optional.empty()} rather than trying harder. That fallback stays
+     * for {@code OrderQueryController}, an HTTP read path with no writer-thread
+     * cost concern and a real reason to check the database on a miss.
+     */
+    public Optional<TradingOrder> findLiveByIdAndDeskMemoryOnly(UUID id, String deskId) {
+        TradingOrder cached = orders.getIfPresent(id);
+        if (cached == null) return Optional.empty();
+        return cached.getDeskId().equals(deskId) ? Optional.of(cached) : Optional.empty();
+    }
+
     /** Returns {@code true} when an order with this id exists (any desk). */
     public boolean existsById(UUID id) {
         long started = System.nanoTime();
@@ -243,6 +259,21 @@ public class OrderStateCache {
         boolean exists = orderRepository.existsById(id);
         existsFromDb.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
         return exists;
+    }
+
+    /**
+     * The live-order store and dedup index's own answer, and only that.
+     * {@link MemoryAnswer#UNCERTAIN} - the index is not ready, or a Bloom
+     * filter "maybe seen" - is not resolved here; deciding what a BLP handler
+     * does with it is task 8's deterministic reject/retry, not this method's
+     * job. Not yet called from the BLP (task 7 adds this method; switching
+     * {@link #existsById}'s two callers over is task 8, once "uncertain" has
+     * somewhere principled to go other than this same database read).
+     */
+    public MemoryAnswer existsByIdMemoryOnly(UUID id) {
+        if (orders.getIfPresent(id) != null) return MemoryAnswer.DEFINITELY_EXISTS;
+        if (indexAnswers() && dedup.definitelyNew(id)) return MemoryAnswer.DEFINITELY_NEW;
+        return MemoryAnswer.UNCERTAIN;
     }
 
     /**
@@ -408,12 +439,12 @@ public class OrderStateCache {
      * the two are indistinguishable to a caller that only gets a list, and
      * confusing them would silently skip cancelling a parent's children.
      */
-    public Optional<List<TradingOrder>> liveChildrenOf(UUID parentId) {
+    public Optional<List<TradingOrder>> liveChildrenMemoryOnly(UUID parentId) {
         return resolve(liveChildrenByParent.get(parentId));
     }
 
     /** Live orders on {@code deskId}, newest first, or empty when this store cannot answer. */
-    public Optional<List<TradingOrder>> liveOrdersOnDesk(String deskId) {
+    public Optional<List<TradingOrder>> liveOrdersOnDeskMemoryOnly(String deskId) {
         return resolve(liveOrdersByDesk.get(deskId))
                 .map(found -> found.stream()
                         .sorted(java.util.Comparator.comparing(TradingOrder::getCreatedAt).reversed())
@@ -428,7 +459,7 @@ public class OrderStateCache {
      */
     public List<TradingOrder> liveChildrenOf(UUID parentId, Supplier<List<TradingOrder>> dbFallback) {
         long started = System.nanoTime();
-        Optional<List<TradingOrder>> fromIndex = liveChildrenOf(parentId);
+        Optional<List<TradingOrder>> fromIndex = liveChildrenMemoryOnly(parentId);
         if (fromIndex.isPresent()) {
             cancelChildrenFromIndex.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
             return fromIndex.get();
@@ -441,7 +472,7 @@ public class OrderStateCache {
     /** Live orders on {@code deskId}, newest first, with the same timing as {@link #liveChildrenOf(UUID, Supplier)}. */
     public List<TradingOrder> liveOrdersOnDesk(String deskId, Supplier<List<TradingOrder>> dbFallback) {
         long started = System.nanoTime();
-        Optional<List<TradingOrder>> fromIndex = liveOrdersOnDesk(deskId);
+        Optional<List<TradingOrder>> fromIndex = liveOrdersOnDeskMemoryOnly(deskId);
         if (fromIndex.isPresent()) {
             cancelDeskFromIndex.record(System.nanoTime() - started, TimeUnit.NANOSECONDS);
             return fromIndex.get();
@@ -546,5 +577,41 @@ public class OrderStateCache {
         // must be in the index by the time the load finishes, or the flip to
         // ready would leave a hole exactly the size of the warm-up window.
         if (dedup != null) dedup.remember(command.result().commandId());
+    }
+
+    /**
+     * The cache and dedup index's own answer, and only that - no repository
+     * fallback. Unlike {@link #existsByIdMemoryOnly}, a confirmed "seen
+     * before" is not enough on its own: idempotent replay needs the original
+     * {@link ProcessedCommand} payload, and the 50,000-entry Caffeine tier is
+     * smaller than the dedup index's own horizon, so "the index says seen"
+     * and "the cache has the value" are genuinely different facts. Not yet
+     * called from the BLP, same reasoning as {@link #existsByIdMemoryOnly}.
+     */
+    public ProcessedLookup findProcessedByIdMemoryOnly(UUID commandId) {
+        ProcessedCommand cached = processed.getIfPresent(commandId);
+        if (cached != null) return ProcessedLookup.found(cached);
+        if (indexAnswers() && dedup.definitelyNew(commandId)) return ProcessedLookup.definitelyNew();
+        return ProcessedLookup.uncertain();
+    }
+
+    /**
+     * {@link #value} is non-null exactly when {@link #answer} is
+     * {@code DEFINITELY_EXISTS} - the index can confirm "seen" without the
+     * cache holding the payload, so those two are kept as distinct states
+     * rather than collapsing "seen, no value" into {@code UNCERTAIN}.
+     */
+    public record ProcessedLookup(MemoryAnswer answer, @Nullable ProcessedCommand value) {
+        public static ProcessedLookup found(ProcessedCommand value) {
+            return new ProcessedLookup(MemoryAnswer.DEFINITELY_EXISTS, value);
+        }
+
+        public static ProcessedLookup definitelyNew() {
+            return new ProcessedLookup(MemoryAnswer.DEFINITELY_NEW, null);
+        }
+
+        public static ProcessedLookup uncertain() {
+            return new ProcessedLookup(MemoryAnswer.UNCERTAIN, null);
+        }
     }
 }

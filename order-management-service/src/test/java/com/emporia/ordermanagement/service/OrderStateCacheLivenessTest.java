@@ -106,10 +106,10 @@ class OrderStateCacheLivenessTest {
         cache.put(childOf(parent));
 
         assertThat(cache.isLiveSetComplete()).isFalse();
-        assertThat(cache.liveChildrenOf(parent.getId()))
+        assertThat(cache.liveChildrenMemoryOnly(parent.getId()))
                 .as("an incomplete store must not answer a negative")
                 .isEmpty();
-        assertThat(cache.liveOrdersOnDesk("desk-a")).isEmpty();
+        assertThat(cache.liveOrdersOnDeskMemoryOnly("desk-a")).isEmpty();
     }
 
     @Test
@@ -121,9 +121,9 @@ class OrderStateCacheLivenessTest {
         cache.put(child);
         cache.markLiveSetComplete();
 
-        assertThat(cache.liveChildrenOf(parent.getId())).contains(List.of(child));
-        assertThat(cache.liveOrdersOnDesk("desk-a")).get().asInstanceOf(LIST).hasSize(2);
-        assertThat(cache.liveChildrenOf(UUID.randomUUID()))
+        assertThat(cache.liveChildrenMemoryOnly(parent.getId())).contains(List.of(child));
+        assertThat(cache.liveOrdersOnDeskMemoryOnly("desk-a")).get().asInstanceOf(LIST).hasSize(2);
+        assertThat(cache.liveChildrenMemoryOnly(UUID.randomUUID()))
                 .as("a parent with no children answers empty, not unknown")
                 .contains(List.of());
     }
@@ -140,8 +140,8 @@ class OrderStateCacheLivenessTest {
         child.cancel();
         cache.put(child);
 
-        assertThat(cache.liveChildrenOf(parent.getId())).contains(List.of());
-        assertThat(cache.liveOrdersOnDesk("desk-a")).get().asInstanceOf(LIST).hasSize(1);
+        assertThat(cache.liveChildrenMemoryOnly(parent.getId())).contains(List.of());
+        assertThat(cache.liveOrdersOnDeskMemoryOnly("desk-a")).get().asInstanceOf(LIST).hasSize(1);
     }
 
     /**

@@ -241,7 +241,7 @@ class OrderCommandHandlerTest {
         TradingOrder parent = liveOrder();
         UUID childId = UUID.randomUUID();
         when(orders.existsById(childId)).thenReturn(false);
-        when(orders.findByIdAndDeskId(parent.getId(), DESK)).thenReturn(Optional.of(parent));
+        cache.put(parent);
 
         OrderCommand command = new OrderCommand(
                 SCHEMA_VERSION, UUID.randomUUID(), CommandType.CREATE,
@@ -263,7 +263,7 @@ class OrderCommandHandlerTest {
         parent.requestCancel();
         UUID childId = UUID.randomUUID();
         when(orders.existsById(childId)).thenReturn(false);
-        when(orders.findByIdAndDeskId(parent.getId(), DESK)).thenReturn(Optional.of(parent));
+        cache.put(parent);
 
         OrderCommand command = new OrderCommand(
                 SCHEMA_VERSION, UUID.randomUUID(), CommandType.CREATE,
@@ -286,7 +286,7 @@ class OrderCommandHandlerTest {
     @Test
     void modifyUpdatesQuantityAndPriceOnADmaOrder() {
         TradingOrder order = liveOrder();
-        when(orders.findByIdAndDeskId(order.getId(), DESK)).thenReturn(Optional.of(order));
+        cache.put(order);
 
         OrderCommand command = new OrderCommand(
                 SCHEMA_VERSION, UUID.randomUUID(), CommandType.MODIFY,
@@ -305,7 +305,7 @@ class OrderCommandHandlerTest {
     @Test
     void modifyRejectsNonDmaOrders() {
         TradingOrder order = liveOrder("VWAP");
-        when(orders.findByIdAndDeskId(order.getId(), DESK)).thenReturn(Optional.of(order));
+        cache.put(order);
 
         OrderCommand command = new OrderCommand(
                 SCHEMA_VERSION, UUID.randomUUID(), CommandType.MODIFY,
@@ -322,7 +322,7 @@ class OrderCommandHandlerTest {
     @Test
     void modifyRejectsStaleExpectedVersion() {
         TradingOrder order = liveOrder();
-        when(orders.findByIdAndDeskId(order.getId(), DESK)).thenReturn(Optional.of(order));
+        cache.put(order);
 
         OrderCommand command = new OrderCommand(
                 SCHEMA_VERSION, UUID.randomUUID(), CommandType.MODIFY,
@@ -340,7 +340,7 @@ class OrderCommandHandlerTest {
     void modifyRejectsOrderPendingCancellation() {
         TradingOrder order = liveOrder();
         order.requestCancel();
-        when(orders.findByIdAndDeskId(order.getId(), DESK)).thenReturn(Optional.of(order));
+        cache.put(order);
 
         OrderCommand command = new OrderCommand(
                 SCHEMA_VERSION, UUID.randomUUID(), CommandType.MODIFY,
@@ -357,7 +357,6 @@ class OrderCommandHandlerTest {
     @Test
     void modifyRejectsOrderNotFoundOnDesk() {
         UUID orderId = UUID.randomUUID();
-        when(orders.findByIdAndDeskId(orderId, DESK)).thenReturn(Optional.empty());
 
         OrderCommand command = new OrderCommand(
                 SCHEMA_VERSION, UUID.randomUUID(), CommandType.MODIFY,
@@ -378,7 +377,7 @@ class OrderCommandHandlerTest {
     @Test
     void cancelRequestsParentCancellationAndPublishesCancelRequestedEvent() {
         TradingOrder order = liveOrder();
-        when(orders.findByIdAndDeskId(order.getId(), DESK)).thenReturn(Optional.of(order));
+        cache.put(order);
         when(orders.findByParentOrderIdAndStatusIn(any(), any())).thenReturn(List.of());
 
         ProcessingOutcome outcome = handler.handle(cancelCommand(order.getId()));
@@ -396,7 +395,7 @@ class OrderCommandHandlerTest {
         TradingOrder parent = liveOrder();
         TradingOrder child = liveOrder();
 
-        when(orders.findByIdAndDeskId(parent.getId(), DESK)).thenReturn(Optional.of(parent));
+        cache.put(parent);
         // First call: children of parent; second call (recursive): children of child
         when(orders.findByParentOrderIdAndStatusIn(org.mockito.ArgumentMatchers.eq(parent.getId()), any()))
                 .thenReturn(List.of(child));
@@ -416,7 +415,7 @@ class OrderCommandHandlerTest {
     void cancelRejectsAlreadyPendingCancellation() {
         TradingOrder order = liveOrder();
         order.requestCancel();
-        when(orders.findByIdAndDeskId(order.getId(), DESK)).thenReturn(Optional.of(order));
+        cache.put(order);
 
         ProcessingOutcome outcome = handler.handle(cancelCommand(order.getId()));
 
@@ -599,7 +598,7 @@ class OrderCommandHandlerTest {
     @Test
     void aModifyCarryingAVersionOlderThanTheOrderIsRefused() {
         TradingOrder order = liveOrder();
-        when(orders.findByIdAndDeskId(order.getId(), DESK)).thenReturn(Optional.of(order));
+        cache.put(order);
         long asTheClientReadIt = order.getVersion();
 
         // A fill lands between the client's read and its modify. Every committed
@@ -616,7 +615,7 @@ class OrderCommandHandlerTest {
     @Test
     void aModifyCarryingTheCurrentVersionIsAccepted() {
         TradingOrder order = liveOrder();
-        when(orders.findByIdAndDeskId(order.getId(), DESK)).thenReturn(Optional.of(order));
+        cache.put(order);
 
         order.applyFill(new BigDecimal("1"), new BigDecimal("100"));
         cache.put(order);
