@@ -8,6 +8,7 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 /**
  * Fills {@link CommandDedupIndex} from Postgres so the hot path can stop asking
@@ -70,6 +71,12 @@ public class DedupIndexLoader {
                                       WHERE order_status IN ('LIVE', 'PARTIALLY_FILLED'))
             """;
 
+    private static final String SELECT_EXECUTION_REFERENCES = """
+            SELECT o.desk_id, e.venue, e.execution_reference
+              FROM emporia_order_data.execution e
+              JOIN emporia_order_data.trading_order o ON o.id = e.order_id
+            """;
+
     private final JdbcTemplate jdbcTemplate;
 
     public DedupIndexLoader(JdbcTemplate jdbcTemplate) {
@@ -93,6 +100,10 @@ public class DedupIndexLoader {
      * without noticing.
      */
     public long load(CommandDedupIndex index, Duration window) {
+        return load(index, window, ignored -> { });
+    }
+
+    public long load(CommandDedupIndex index, Duration window, Consumer<UUID> executionReferenceSink) {
         Instant since = Instant.now().minus(window);
         Timestamp from = Timestamp.from(since);
         long started = System.nanoTime();
@@ -100,12 +111,13 @@ public class DedupIndexLoader {
         long commands = stream(SELECT_COMMANDS, index, from);
         long recentOrders = stream(SELECT_RECENT_ORDERS, index, from);
         long workingTrees = stream(SELECT_WORKING_TREES, index);
+        long executionReferences = streamExecutionReferences(SELECT_EXECUTION_REFERENCES, executionReferenceSink);
 
         long elapsedMs = (System.nanoTime() - started) / 1_000_000;
-        log.info("Loaded {} processed commands, {} recent orders and {} orders in working trees into "
-                        + "the deduplication index in {} ms (window={}, since={})",
-                commands, recentOrders, workingTrees, elapsedMs, window, since);
-        return commands + recentOrders + workingTrees;
+        log.info("Loaded {} processed commands, {} recent orders, {} orders in working trees and {} execution references "
+                        + "into the deduplication index in {} ms (window={}, since={})",
+                commands, recentOrders, workingTrees, executionReferences, elapsedMs, window, since);
+        return commands + recentOrders + workingTrees + executionReferences;
     }
 
     private long stream(String sql, CommandDedupIndex index, Object... arguments) {
@@ -114,6 +126,19 @@ public class DedupIndexLoader {
             index.remember((UUID) rs.getObject(1));
             loaded[0]++;
         }, arguments);
+        return loaded[0];
+    }
+
+    private long streamExecutionReferences(String sql, Consumer<UUID> sink) {
+        long[] loaded = {0};
+        jdbcTemplate.query(sql, rs -> {
+            String desk = rs.getString(1);
+            String venue = rs.getString(2);
+            String reference = rs.getString(3);
+            sink.accept(UUID.nameUUIDFromBytes((desk + '\u0000' + venue + '\u0000' + reference)
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            loaded[0]++;
+        });
         return loaded[0];
     }
 }

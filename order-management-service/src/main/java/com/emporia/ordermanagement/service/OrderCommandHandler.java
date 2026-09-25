@@ -94,7 +94,11 @@ public class OrderCommandHandler {
         String outcome = "success";
         try {
             // Cache-backed idempotency check: avoids a DB SELECT on every command.
-            ProcessedCommand cached = cache.findProcessedById(command.commandId()).orElse(null);
+            OrderStateCache.ProcessedLookup processedLookup = cache.findProcessedByIdMemoryOnly(command.commandId());
+            if (processedLookup.answer() == MemoryAnswer.UNCERTAIN) {
+                throw new HotPathUnavailableException("Order command deduplication state is not ready; retry");
+            }
+            ProcessedCommand cached = processedLookup.value();
             if (cached != null) {
                 outcome = "duplicate";
                 // No events, deliberately. This used to load the original
@@ -129,6 +133,9 @@ public class OrderCommandHandler {
                         .record(System.nanoTime() - dispatchStartNanos,
                                 java.util.concurrent.TimeUnit.NANOSECONDS);
                 return result;
+            } catch (HotPathUnavailableException unavailable) {
+                outcome = "not_ready";
+                return retryable(command, unavailable.getMessage());
             } catch (DomainProblem problem) {
                 outcome = "rejected";
                 OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), false,
@@ -138,6 +145,9 @@ public class OrderCommandHandler {
                 asyncDbWriter.enqueue(processedCmd);
                 return new ProcessingOutcome(result, List.of());
             }
+        } catch (HotPathUnavailableException unavailable) {
+            outcome = "not_ready";
+            return retryable(command, unavailable.getMessage());
         } catch (RuntimeException exception) {
             outcome = "error";
             throw exception;
@@ -149,21 +159,21 @@ public class OrderCommandHandler {
         }
     }
 
-    /**
-     * Live children of an order, from memory when the live-order store holds
-     * every live order, and from the database until it does.
-     *
-     * <p>The fallback is not a nicety. An index over an incomplete store
-     * answers with the orders that happen to be in it, and a child missed here
-     * is a child left live after its parent was cancelled - silently.
-     */
+    /** Live children; an incomplete live-order store is retryable, never a DB read. */
     private List<TradingOrder> liveChildrenOf(java.util.UUID parentId) {
-        return cache.liveChildrenOf(parentId, () -> orders.findByParentOrderIdAndStatusIn(parentId, CANCELLABLE));
+        return cache.liveChildrenMemoryOnly(parentId)
+                .orElseThrow(() -> new HotPathUnavailableException("Live-order index is not ready; retry"));
     }
 
-    /** Live orders on a desk, newest first, with the same fallback and for the same reason. */
+    /** Live orders on a desk, newest first; an incomplete store is retryable. */
     private List<TradingOrder> liveOrdersOnDesk(String deskId) {
-        return cache.liveOrdersOnDesk(deskId, () -> orders.findByDeskIdAndStatusInOrderByCreatedAtDesc(deskId, CANCELLABLE));
+        return cache.liveOrdersOnDeskMemoryOnly(deskId)
+                .orElseThrow(() -> new HotPathUnavailableException("Live-order index is not ready; retry"));
+    }
+
+    private ProcessingOutcome retryable(OrderCommand command, String message) {
+        return new ProcessingOutcome(new OrderCommandResult(
+                SCHEMA_VERSION, command.commandId(), false, 503, message, null), List.of());
     }
 
     private static String commandTypeTag(OrderCommand command) {
@@ -192,8 +202,11 @@ public class OrderCommandHandler {
     private ProcessingOutcome create(OrderCommand command) {
         require(command.orderId() != null && command.listing() != null && command.side() != null
                 && command.orderType() != null, 400, "Create command is incomplete");
-        // Cache-backed duplicate order guard: avoids a DB SELECT on CREATE.
-        require(!cache.existsById(command.orderId()), 409, "Order already exists");
+        MemoryAnswer orderId = cache.existsByIdMemoryOnly(command.orderId());
+        if (orderId == MemoryAnswer.UNCERTAIN) {
+            throw new HotPathUnavailableException("Order deduplication state is not ready; retry");
+        }
+        require(orderId != MemoryAnswer.DEFINITELY_EXISTS, 409, "Order already exists");
         // The live-order store is bounded by liveness, and this is what stops it
         // growing without one. Refusing here is the same trade the ring makes
         // when it fills: an admitted order this service cannot hold is worse

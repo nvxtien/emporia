@@ -15,15 +15,13 @@ import java.util.concurrent.Executors;
 
 /**
  * Loads the horizon's identifiers in the background and hands the result to
- * {@link RotatingDedupIndex}, after which the hot path stops asking Postgres
- * whether it has seen a command before.
+ * {@link RotatingDedupIndex}, after which the hot path answers deduplication
+ * and execution-reference questions from memory.
  *
  * <h2>Why the load runs after startup rather than during it</h2>
  * <p>Blocking startup would be simpler, but the service would refuse orders for
- * the duration. Running afterwards means orders are accepted from the first
- * moment, answered by the database until the load finishes - which is exactly
- * the behaviour that predates the index, and its latency. Warm-up costs speed,
- * not correctness.
+ * the duration. Running afterwards keeps startup responsive; until the load
+ * finishes, BLP commands return a retryable not-ready response.
  *
  * <h2>Ordering</h2>
  * <p>{@link ApplicationReadyEvent} fires after {@code DisruptorOrderPipeline}'s
@@ -51,6 +49,7 @@ public class DedupIndexWarmup {
     private static final Logger log = LoggerFactory.getLogger(DedupIndexWarmup.class);
 
     private final @Nullable RotatingDedupIndex dedup;
+    private final OrderStateCache cache;
     private final JdbcTemplate jdbcTemplate;
     // Owned for the bean's life and shut down in @PreDestroy, rather than
     // created inside the listener where it would outlive its only reference.
@@ -60,15 +59,16 @@ public class DedupIndexWarmup {
         return thread;
     });
 
-    public DedupIndexWarmup(@Nullable RotatingDedupIndex dedup, JdbcTemplate jdbcTemplate) {
+    public DedupIndexWarmup(@Nullable RotatingDedupIndex dedup, JdbcTemplate jdbcTemplate, OrderStateCache cache) {
         this.dedup = dedup;
         this.jdbcTemplate = jdbcTemplate;
+        this.cache = cache;
     }
 
     @EventListener(ApplicationReadyEvent.class)
     public void warmUp() {
         if (dedup == null || jdbcTemplate == null) {
-            log.info("Deduplication index disabled; hot-path lookups continue to read through to Postgres");
+            log.info("Deduplication index disabled; hot-path commands remain unavailable");
             return;
         }
         loader.execute(this::loadAndPublish);
@@ -80,7 +80,7 @@ public class DedupIndexWarmup {
      * <p>{@code shutdownNow} rather than {@code shutdown}: the load is a long
      * streaming read and waiting for it would hold up shutdown for no gain. An
      * abandoned load is never published, so stopping midway loses nothing but
-     * the work already done - the hot path simply stays on Postgres.
+     * the work already done - the hot path remains fail-closed and retryable.
      */
     @PreDestroy
     public void stop() {
@@ -90,17 +90,21 @@ public class DedupIndexWarmup {
     private void loadAndPublish() {
         try {
             CommandDedupIndex history = dedup.newHistoryFilter();
-            long loaded = new DedupIndexLoader(jdbcTemplate).load(history, dedup.horizon());
+            long loaded = new DedupIndexLoader(jdbcTemplate).load(history, dedup.horizon(), key -> {
+                cache.rememberExecutionReferenceKey(key);
+                history.remember(key);
+            });
             dedup.publishHistory(history);
+            cache.markExecutionReferencesReady();
             log.info("Deduplication index ready: {} identifiers over {}, {} KB of filters. "
                             + "Hot-path lookups now answer from memory.",
                     loaded, dedup.horizon(), dedup.bytes() / 1024);
         } catch (RuntimeException loadFailure) {
             // Never fatal, and deliberately never published on failure: a
             // partially filled filter reports "never seen" for things it has
-            // seen, which would let duplicate orders through. Staying on the
-            // database path costs latency and nothing else.
-            log.error("Deduplication index load failed; hot-path lookups stay on Postgres", loadFailure);
+            // seen, which would let duplicate orders through. The BLP stays
+            // fail-closed and returns retryable not-ready responses.
+            log.error("Deduplication index load failed; hot-path commands stay unavailable", loadFailure);
         }
     }
 }

@@ -14,9 +14,9 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.doAnswer;
 
 class DedupIndexLoaderTest {
 
@@ -82,6 +82,31 @@ class DedupIndexLoaderTest {
 
         assertThat(loaded).isZero();
         assertThat(index.definitelyNew(UUID.randomUUID())).isTrue();
+    }
+
+    @Test
+    void executionReferencesAreStreamedIntoTheExactKeySink() throws Exception {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        doAnswer(invocation -> {
+            String sql = invocation.getArgument(0);
+            if (!sql.contains("execution_reference")) return null;
+            RowCallbackHandler handler = invocation.getArgument(1);
+            ResultSet row = mock(ResultSet.class);
+            when(row.getString(1)).thenReturn("desk-a");
+            when(row.getString(2)).thenReturn("XNAS");
+            when(row.getString(3)).thenReturn("fill-1");
+            handler.processRow(row);
+            return null;
+        }).when(jdbc).query(anyString(), any(RowCallbackHandler.class));
+        doAnswer(invocation -> null).when(jdbc)
+                .query(anyString(), any(RowCallbackHandler.class), any(Object[].class));
+
+        List<UUID> keys = new java.util.ArrayList<>();
+        long loaded = new DedupIndexLoader(jdbc).load(new CommandDedupIndex(1_000, 0.001), WINDOW, keys::add);
+
+        assertThat(loaded).isEqualTo(1);
+        assertThat(keys).containsExactly(UUID.nameUUIDFromBytes(
+                "desk-a\u0000XNAS\u0000fill-1".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
     }
 
     /**

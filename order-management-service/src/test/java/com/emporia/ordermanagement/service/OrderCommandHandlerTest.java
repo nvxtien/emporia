@@ -53,7 +53,7 @@ class OrderCommandHandlerTest {
     private final MeterRegistry meters = new SimpleMeterRegistry();
     private final ObservationRegistry observations = observationRegistry(meters);
     private final OrderMetrics metrics = new OrderMetrics(new SimpleMeterRegistry());
-    private final OrderStateCache cache = new OrderStateCache(orders, processed, metrics, null, 1000, 1000);
+    private final OrderStateCache cache = new OrderStateCache(orders, processed, metrics, readyDedup(), 1000, 1000);
     private final AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
     private final ShardedOrderDispatcher dispatcher = mock(ShardedOrderDispatcher.class);
     private final OrderCommandHandler handler =
@@ -71,6 +71,7 @@ class OrderCommandHandlerTest {
 
     @BeforeEach
     void defaultNoCache() {
+        cache.markLiveSetComplete();
         when(processed.findById(any())).thenReturn(Optional.empty());
         when(events.save(any(OrderEvent.class))).thenAnswer(inv -> inv.getArgument(0));
         when(orders.save(any(TradingOrder.class))).thenAnswer(inv -> {
@@ -102,6 +103,27 @@ class OrderCommandHandlerTest {
         verify(asyncDbWriter).enqueue(any(ProcessedCommand.class));
         // One outbox row for the CREATED event.
         verify(dispatcher, times(1)).dispatch(any(OrderDomainEvent.class));
+    }
+
+    @Test
+    void createRetriesWhenTheMemoryIndexCannotAnswerDuplicateOrderCheck() {
+        UUID orderId = UUID.randomUUID();
+        OrderStateCache unready = new OrderStateCache(orders, processed, metrics, null, 1000, 1000);
+        OrderCommandHandler unreadyHandler = new OrderCommandHandler(
+                orders, new ObjectMapper(), observations, metrics, unready, asyncDbWriter, dispatcher);
+
+        ProcessingOutcome outcome = unreadyHandler.handle(createCommand(orderId));
+
+        assertThat(outcome.result().success()).isFalse();
+        assertThat(outcome.result().status()).isEqualTo(503);
+        verify(orders, never()).existsById(any());
+        verify(asyncDbWriter, never()).enqueue(any(ProcessedCommand.class));
+    }
+
+    private static RotatingDedupIndex readyDedup() {
+        RotatingDedupIndex dedup = new RotatingDedupIndex(Duration.ofHours(24), 2, 100_000, 0.001);
+        dedup.publishHistory(new CommandDedupIndex(100_000, 0.001));
+        return dedup;
     }
 
     @Test
@@ -188,7 +210,9 @@ class OrderCommandHandlerTest {
     @Test
     void createRejectsDuplicateOrderId() {
         UUID orderId = UUID.randomUUID();
-        when(orders.existsById(orderId)).thenReturn(true);
+        TradingOrder existing = liveOrder();
+        ReflectionTestUtils.setField(existing, "id", orderId);
+        cache.put(existing);
 
         ProcessingOutcome outcome = handler.handle(createCommand(orderId));
 
@@ -393,9 +417,10 @@ class OrderCommandHandlerTest {
     @Test
     void cancelCascadesToLiveChildOrdersRecursively() {
         TradingOrder parent = liveOrder();
-        TradingOrder child = liveOrder();
+        TradingOrder child = childOrder(parent);
 
         cache.put(parent);
+        cache.put(child);
         // First call: children of parent; second call (recursive): children of child
         when(orders.findByParentOrderIdAndStatusIn(org.mockito.ArgumentMatchers.eq(parent.getId()), any()))
                 .thenReturn(List.of(child));
@@ -431,8 +456,8 @@ class OrderCommandHandlerTest {
     void cancelAllRequestsCancellationForAllActiveOrdersOnDesk() {
         TradingOrder first = liveOrder();
         TradingOrder second = liveOrder();
-        when(orders.findByDeskIdAndStatusInOrderByCreatedAtDesc(any(), any()))
-                .thenReturn(List.of(first, second));
+        cache.put(first);
+        cache.put(second);
 
         ProcessingOutcome outcome = handler.handle(cancelAllCommand());
 
@@ -449,8 +474,7 @@ class OrderCommandHandlerTest {
     void cancelAllSkipsOrdersAlreadyPendingCancellation() {
         TradingOrder alreadyCancelling = liveOrder();
         alreadyCancelling.requestCancel();
-        when(orders.findByDeskIdAndStatusInOrderByCreatedAtDesc(any(), any()))
-                .thenReturn(List.of(alreadyCancelling));
+        cache.put(alreadyCancelling);
 
         ProcessingOutcome outcome = handler.handle(cancelAllCommand());
 
@@ -500,7 +524,7 @@ class OrderCommandHandlerTest {
         OrderCommandResult cachedResult = new OrderCommandResult(
                 SCHEMA_VERSION, commandId, true, 201, null, "{}");
         ProcessedCommand cached = new ProcessedCommand(cachedResult);
-        when(processed.findById(commandId)).thenReturn(Optional.of(cached));
+        cache.putProcessed(cached);
         when(events.findByCommandIdOrderByOccurredAtAsc(commandId)).thenReturn(List.of());
 
         OrderCommand command = new OrderCommand(
@@ -536,6 +560,16 @@ class OrderCommandHandlerTest {
         );
         ReflectionTestUtils.setField(order, "version", 1L);
         return order;
+    }
+
+    private static TradingOrder childOrder(TradingOrder parent) {
+        TradingOrder child = new TradingOrder(
+                UUID.randomUUID(), USER, DESK, listing(), OrderSide.BUY, OrderType.LIMIT,
+                new BigDecimal("10"), new BigDecimal("100"), "DMA", "child-ref",
+                parent.getId(), parent.getRootOrderId(), "{}"
+        );
+        ReflectionTestUtils.setField(child, "version", 1L);
+        return child;
     }
 
     /**

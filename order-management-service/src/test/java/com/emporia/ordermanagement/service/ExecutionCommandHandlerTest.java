@@ -43,11 +43,29 @@ class ExecutionCommandHandlerTest {
     private final OrderEventRepository events = mock(OrderEventRepository.class);
     private final ProcessedCommandRepository processed = mock(ProcessedCommandRepository.class);
     private final OrderMetrics metrics = new OrderMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
-    private final OrderStateCache cache = new OrderStateCache(orders, processed, metrics, null, 1000, 1000);
+    private final OrderStateCache cache = new OrderStateCache(orders, processed, metrics, readyDedup(), 1000, 1000);
     private final AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
     private final ShardedOrderDispatcher dispatcher = mock(ShardedOrderDispatcher.class);
     private final ExecutionCommandHandler handler =
             new ExecutionCommandHandler(orders, executions, new ObjectMapper(), metrics, cache, asyncDbWriter, dispatcher);
+
+    @org.junit.jupiter.api.BeforeEach
+    void readyMemoryState() {
+        cache.markLiveSetComplete();
+        cache.markExecutionReferencesReady();
+    }
+
+    @Test
+    void fillRetriesWhenExecutionReferenceIndexCannotAnswer() {
+        TradingOrder order = order();
+        OrderStateCache unready = new OrderStateCache(orders, processed, metrics, null, 1000, 1000);
+        ExecutionCommandHandler unreadyHandler = new ExecutionCommandHandler(
+                orders, executions, new ObjectMapper(), metrics, unready, asyncDbWriter, dispatcher);
+
+        assertThatThrownBy(() -> unreadyHandler.handle(command(
+                order, ExecutionCommandType.FILL, "not-ready", BigDecimal.ONE, BigDecimal.TEN, null
+        ))).hasMessageContaining("not ready");
+    }
 
     @Test
     void recordsAPartialFillAndPublishesTheNewOrderState() {
@@ -97,7 +115,7 @@ class ExecutionCommandHandlerTest {
     @Test
     void ignoresDuplicateReferencesButAcceptsAFillReportedAfterCancellation() {
         TradingOrder order = order();
-        when(executions.existsByExecutionReference("duplicate")).thenReturn(true);
+        cache.rememberExecutionReference("desk-a", "XNAS", "duplicate");
 
         assertThat(handler.handle(command(
                 order, ExecutionCommandType.FILL, "duplicate", BigDecimal.ONE, BigDecimal.TEN, null
@@ -132,6 +150,7 @@ class ExecutionCommandHandlerTest {
         RotatingDedupIndex dedup = new RotatingDedupIndex(Duration.ofHours(24), 2, 1_000, 0.001);
         dedup.publishHistory(new CommandDedupIndex(1_000, 0.001));
         OrderStateCache indexed = new OrderStateCache(orders, processed, metrics, dedup, 1000, 1000);
+        indexed.markExecutionReferencesReady();
         ExecutionCommandHandler indexedHandler =
                 new ExecutionCommandHandler(orders, executions, new ObjectMapper(), metrics, indexed, asyncDbWriter, dispatcher);
         TradingOrder order = order();
@@ -153,6 +172,7 @@ class ExecutionCommandHandlerTest {
         when(executions.existsByExecutionReference(any())).thenReturn(false);
         cache.put(child);
         cache.put(parent);
+        cache.put(child);
         when(events.save(any(OrderEvent.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         var published = handler.handle(command(
@@ -242,6 +262,7 @@ class ExecutionCommandHandlerTest {
         TradingOrder child = child(parent);
 
         cache.put(parent);
+        cache.put(child);
         when(orders.findByParentOrderIdAndStatusIn(org.mockito.ArgumentMatchers.eq(parent.getId()), any()))
                 .thenReturn(List.of(child));
 
@@ -250,6 +271,12 @@ class ExecutionCommandHandlerTest {
         assertThat(result).isEmpty();
         assertThat(parent.getStatus()).isEqualTo(OrderStatus.LIVE);
         verify(dispatcher, never()).dispatch(any(OrderDomainEvent.class));
+    }
+
+    private static RotatingDedupIndex readyDedup() {
+        RotatingDedupIndex dedup = new RotatingDedupIndex(Duration.ofHours(24), 2, 100_000, 0.001);
+        dedup.publishHistory(new CommandDedupIndex(100_000, 0.001));
+        return dedup;
     }
 
     private static TradingOrder order() {

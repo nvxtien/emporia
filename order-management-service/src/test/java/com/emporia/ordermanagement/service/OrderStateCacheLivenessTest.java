@@ -161,6 +161,20 @@ class OrderStateCacheLivenessTest {
                 .isTrue();
     }
 
+    @Test
+    void readyExecutionReferenceStateAnswersDuplicatesWithoutTheDatabase() {
+        RotatingDedupIndex dedup = new RotatingDedupIndex(java.time.Duration.ofHours(24), 2, 4_000, 0.001);
+        dedup.publishHistory(new CommandDedupIndex(1_000, 0.001));
+        OrderStateCache cache = new OrderStateCache(orders, processed, metrics, dedup, 100, 1000);
+        cache.rememberExecutionReference("desk-a", "XNAS", "ref-1");
+        cache.markExecutionReferencesReady();
+
+        assertThat(cache.executionReferenceMemoryOnly("desk-a", "XNAS", "ref-1"))
+                .isEqualTo(MemoryAnswer.DEFINITELY_EXISTS);
+        assertThat(cache.executionReferenceMemoryOnly("desk-a", "XNAS", "ref-2"))
+                .isEqualTo(MemoryAnswer.DEFINITELY_NEW);
+    }
+
     /**
      * LMAX_ARCHITECTURE_REWORK_PLAN.md task 5.2: this is the fix for
      * ExecutionCommandHandler's own direct JPA read on every fill. A Bloom
