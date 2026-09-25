@@ -13,6 +13,7 @@ import io.micrometer.core.instrument.Timer;
 import com.emporia.events.sbe.SbeEncoderDecoder;
 import com.emporia.ordermanagement.service.MemoryMappedWalLogger;
 import com.emporia.ordermanagement.service.OrderCommandReplayHarness;
+import com.emporia.ordermanagement.service.OrderInputEventRecorder;
 import com.lmax.disruptor.BusySpinWaitStrategy;
 import com.lmax.disruptor.EventHandler;
 import com.lmax.disruptor.RingBuffer;
@@ -66,6 +67,7 @@ public class DisruptorOrderPipeline implements SmartLifecycle {
     // Kafka listeners left. Enforced here so a second instance fails loudly
     // rather than silently accepting duplicate orders.
     private final @Nullable LeaderElectionService leaderElection;
+    private @Nullable OrderInputEventRecorder inputEventRecorder;
     private final Counter walFailures;
     private final String waitStrategyName;
     private final long minRemainingCapacity;
@@ -204,6 +206,15 @@ public class DisruptorOrderPipeline implements SmartLifecycle {
         this.venueReadiness = venueReadiness;
     }
 
+    @Autowired
+    void setInputEventRecorder(ObjectProvider<OrderInputEventRecorder> recorder) {
+        this.inputEventRecorder = recorder.getIfAvailable();
+    }
+
+    public void setInputEventRecorderForTest(@Nullable OrderInputEventRecorder recorder) {
+        this.inputEventRecorder = recorder;
+    }
+
     @Override
     public synchronized void start() {
         if (running) return;
@@ -307,6 +318,9 @@ public class DisruptorOrderPipeline implements SmartLifecycle {
                 walLatency.record(commandStart - walStart, TimeUnit.NANOSECONDS);
 
                 ProcessingOutcome outcome = orderCommandHandler.handle(event.getCommand());
+                if (inputEventRecorder != null) {
+                    inputEventRecorder.recordApplied(event.getCommand());
+                }
                 long safePointStart = System.nanoTime();
                 commandLatency.record(safePointStart - commandStart, TimeUnit.NANOSECONDS);
 
@@ -452,6 +466,9 @@ public class DisruptorOrderPipeline implements SmartLifecycle {
             queueDepth.incrementAndGet();
         } finally {
             ringBuffer.publish(sequence);
+        }
+        if (inputEventRecorder != null) {
+            inputEventRecorder.recordAccepted(command);
         }
         return future;
     }

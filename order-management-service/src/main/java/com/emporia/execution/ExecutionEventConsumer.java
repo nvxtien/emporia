@@ -627,10 +627,13 @@ class ExecutionEventConsumer {
             throw new IllegalStateException("Could not publish child order command: no order pipeline is configured");
         }
         try {
-            if (inputRecorder != null) {
-                inputRecorder.record(child);
-            }
-            disruptorPipeline.submit(child);
+            disruptorPipeline.submit(child).whenComplete((outcome, failure) -> {
+                if (failure != null || outcome == null || !outcome.result().success()) {
+                    childPublishImmediateFailures.increment();
+                    log.warn("Child order command {} was not accepted by the OMS pipeline", commandId,
+                            failure);
+                }
+            });
         } catch (RuntimeException exception) {
             childPublishImmediateFailures.increment();
             throw new IllegalStateException("Could not publish child order command", exception);

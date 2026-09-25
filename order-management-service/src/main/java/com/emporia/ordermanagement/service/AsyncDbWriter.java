@@ -604,8 +604,8 @@ public class AsyncDbWriter {
     private void flushInputEventsJdbc(List<com.emporia.ordermanagement.model.OrderInputEvent> batch) {
         String sql = """
             INSERT INTO emporia_order_data.order_input_event (
-                command_id, command_type, user_subject, desk_id, schema_version, payload, received_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                command_id, command_type, user_subject, desk_id, schema_version, payload, received_at, stage
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """;
         jdbcTemplate.batchUpdate(sql, batch, batch.size(), (PreparedStatement ps, com.emporia.ordermanagement.model.OrderInputEvent i) -> {
             ps.setObject(1, i.getCommandId());
@@ -615,6 +615,7 @@ public class AsyncDbWriter {
             ps.setInt(5, i.getSchemaVersion());
             ps.setString(6, i.getPayload());
             ps.setTimestamp(7, i.getReceivedAt() == null ? null : Timestamp.from(i.getReceivedAt()));
+            ps.setString(8, i.getStage().name());
         });
     }
 

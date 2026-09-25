@@ -31,7 +31,8 @@ class OrderCommandReplayHarnessTest {
         ReflectionTestUtils.setField(firstEvent, "sequenceId", 1L);
         ReflectionTestUtils.setField(secondEvent, "sequenceId", 2L);
 
-        when(inputEvents.findAllByOrderBySequenceIdAsc()).thenReturn(List.of(secondEvent, firstEvent));
+        when(inputEvents.findAllByStageInOrderBySequenceIdAsc(org.mockito.ArgumentMatchers.anyList()))
+                .thenReturn(List.of(secondEvent, firstEvent));
         when(handler.handle(first)).thenReturn(TestCommands.outcome(first.commandId()));
         when(handler.handle(second)).thenReturn(TestCommands.outcome(second.commandId()));
 
