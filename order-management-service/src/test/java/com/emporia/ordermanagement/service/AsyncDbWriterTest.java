@@ -1,7 +1,9 @@
 package com.emporia.ordermanagement.service;
 
 import com.emporia.events.TradingEvents.ListingSnapshot;
+import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderCommandResult;
+import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.ordermanagement.model.Execution;
@@ -22,6 +24,7 @@ import org.mockito.ArgumentCaptor;
 import java.sql.PreparedStatement;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
@@ -108,6 +111,24 @@ class AsyncDbWriterTest {
         withExecutions.flush();
 
         verify(executions).saveAll(anyList());
+    }
+
+    @Test
+    void writesTypedOutputToTheDurableOutbox() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        when(jdbc.batchUpdate(anyString(), anyList(), anyInt(), any()))
+                .thenReturn(new int[][]{{1}});
+        AsyncDbWriter withOutbox = new AsyncDbWriter(
+                orders, events, processed, null, jdbc, null, null, new SimpleMeterRegistry(), null);
+
+        withOutbox.enqueueOutput(new OrderDomainEvent(
+                SCHEMA_VERSION, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+                "trader", "desk", "CREATED", 1L, OrderStatus.LIVE, Instant.now(), "{}"));
+        withOutbox.flush();
+
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).batchUpdate(sql.capture(), anyList(), anyInt(), any());
+        assertThat(sql.getValue()).contains("order_delivery_outbox");
     }
 
     /**

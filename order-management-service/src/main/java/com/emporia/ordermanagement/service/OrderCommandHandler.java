@@ -182,20 +182,14 @@ public class OrderCommandHandler {
     }
 
     /**
-     * Hands each domain event this command produced to the in-process
-     * dispatcher, in the same place and at the same time as the rows that
-     * make the command durable, so a crash before the WAL flush - including
-     * one during replay, which calls {@code handle} directly - cannot leave a
-     * durable order nobody was told about. Only on success: a rejection never
-     * reaches execution today either.
+     * Hands each venue-bound domain event to the durable output queue. The BLP
+     * creates only the typed event; persistence and delivery happen outside it.
      */
     @SuppressWarnings("PMD.UnusedFormalParameter")
     private void enqueueOutbox(OrderCommand command, ProcessingOutcome outcome) {
         if (!outcome.result().success()) return;
         for (OrderDomainEvent event : outcome.events()) {
-            if (shardedOrderDispatcher != null) {
-                shardedOrderDispatcher.dispatch(event);
-            }
+            asyncDbWriter.enqueueOutput(event);
         }
     }
 

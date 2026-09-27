@@ -102,7 +102,7 @@ class OrderCommandHandlerTest {
         assertThat(outcome.events().getFirst().eventType()).isEqualTo("CREATED");
         verify(asyncDbWriter).enqueue(any(ProcessedCommand.class));
         // One outbox row for the CREATED event.
-        verify(dispatcher, times(1)).dispatch(any(OrderDomainEvent.class));
+        verify(asyncDbWriter, times(1)).enqueueOutput(any(OrderDomainEvent.class));
     }
 
     @Test
@@ -186,7 +186,7 @@ class OrderCommandHandlerTest {
         assertThat(outcome.result().success()).isFalse();
         assertThat(outcome.result().status()).isEqualTo(400);
         verify(orders, never()).save(any());
-        verify(dispatcher, never()).dispatch(any(OrderDomainEvent.class));
+        verify(asyncDbWriter, never()).enqueueOutput(any(OrderDomainEvent.class));
     }
 
     @Test
@@ -323,7 +323,7 @@ class OrderCommandHandlerTest {
         assertThat(outcome.result().success()).isTrue();
         assertThat(outcome.result().status()).isEqualTo(200);
         assertThat(outcome.events().getFirst().eventType()).isEqualTo("MODIFIED");
-        verify(dispatcher, times(1)).dispatch(any(OrderDomainEvent.class));
+        verify(asyncDbWriter, times(1)).enqueueOutput(any(OrderDomainEvent.class));
     }
 
     @Test
@@ -411,7 +411,7 @@ class OrderCommandHandlerTest {
         assertThat(outcome.events()).hasSize(1);
         assertThat(outcome.events().getFirst().eventType()).isEqualTo("CANCEL_REQUESTED");
         assertThat(order.getTargetStatus()).isEqualTo(OrderStatus.CANCELLED);
-        verify(dispatcher, times(1)).dispatch(any(OrderDomainEvent.class));
+        verify(asyncDbWriter, times(1)).enqueueOutput(any(OrderDomainEvent.class));
     }
 
     @Test
@@ -467,7 +467,7 @@ class OrderCommandHandlerTest {
         assertThat(first.getTargetStatus()).isEqualTo(OrderStatus.CANCELLED);
         assertThat(second.getTargetStatus()).isEqualTo(OrderStatus.CANCELLED);
         // Two child CANCEL_REQUESTED events.
-        verify(dispatcher, times(2)).dispatch(any(OrderDomainEvent.class));
+        verify(asyncDbWriter, times(2)).enqueueOutput(any(OrderDomainEvent.class));
     }
 
     @Test
@@ -539,7 +539,7 @@ class OrderCommandHandlerTest {
 
         assertThat(replayed.result()).isEqualTo(first.result());
         verify(orders, never()).existsById(any());
-        verify(dispatcher, never()).dispatch(any(OrderDomainEvent.class));
+        verify(asyncDbWriter, never()).enqueueOutput(any(OrderDomainEvent.class));
     }
 
     // -------------------------------------------------------------------------

@@ -2,6 +2,7 @@ package com.emporia.ordermanagement.service;
 
 import com.emporia.events.TradingEvents.OrderCommand;
 import com.emporia.ordermanagement.model.OrderInputEvent;
+import com.emporia.ordermanagement.model.OrderInputEventStage;
 import com.emporia.ordermanagement.repository.OrderInputEventRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -15,6 +16,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.any;
 
 class OrderCommandReplayHarnessTest {
     @Test
@@ -39,6 +41,33 @@ class OrderCommandReplayHarnessTest {
         assertThat(harness.replayAll())
                 .extracting(outcome -> outcome.result().commandId())
                 .containsExactly(first.commandId(), second.commandId());
+    }
+
+    @Test
+    void doesNotReplayReceivedOnlyAuditRows() throws Exception {
+        OrderInputEventRepository inputEvents = mock(OrderInputEventRepository.class);
+        OrderCommandHandler handler = mock(OrderCommandHandler.class);
+        ObjectMapper objectMapper = new ObjectMapper();
+        OrderCommand received = TestCommands.command(UUID.randomUUID());
+        OrderCommand accepted = TestCommands.command(UUID.randomUUID());
+        OrderInputEvent receivedEvent = new OrderInputEvent(
+                received, objectMapper.writeValueAsString(received), OrderInputEventStage.RECEIVED);
+        OrderInputEvent acceptedEvent = new OrderInputEvent(
+                accepted, objectMapper.writeValueAsString(accepted), OrderInputEventStage.ACCEPTED);
+        ReflectionTestUtils.setField(receivedEvent, "sequenceId", 1L);
+        ReflectionTestUtils.setField(acceptedEvent, "sequenceId", 2L);
+        when(inputEvents.findAllByStageInOrderBySequenceIdAsc(org.mockito.ArgumentMatchers.anyList()))
+                .thenReturn(List.of(acceptedEvent));
+        when(handler.handle(any(OrderCommand.class))).thenReturn(TestCommands.outcome(accepted.commandId()));
+
+        OrderCommandReplayHarness harness = new OrderCommandReplayHarness(
+                inputEvents, handler, objectMapper, new MemoryMappedWalLogger(null, 1));
+
+        assertThat(harness.replayAll()).extracting(outcome -> outcome.result().commandId())
+                .containsExactly(accepted.commandId());
+        verify(handler, org.mockito.Mockito.never()).handle(received);
+        verify(inputEvents).findAllByStageInOrderBySequenceIdAsc(
+                List.of(OrderInputEventStage.ACCEPTED, OrderInputEventStage.APPLIED));
     }
 
     @Test

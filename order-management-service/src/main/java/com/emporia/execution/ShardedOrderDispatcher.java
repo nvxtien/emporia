@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.CompletableFuture;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -97,16 +98,19 @@ public class ShardedOrderDispatcher {
         return numShards;
     }
 
-    public void dispatch(OrderDomainEvent event) {
+    public CompletableFuture<Void> dispatch(OrderDomainEvent event) {
         if (event == null || event.orderId() == null) {
-            return;
+            return CompletableFuture.completedFuture(null);
         }
+        CompletableFuture<Void> completion = new CompletableFuture<>();
         int shardIndex = Math.abs(event.orderId().hashCode()) % numShards;
         shards[shardIndex].submit(() -> {
             try {
                 eventConsumer.processEvent(event);
             } catch (Exception exception) {
                 log.error("Failed to process order domain event in-process for order {}", event.orderId(), exception);
+                completion.completeExceptionally(exception);
+                return;
             }
             try {
                 // Replaces the deleted OrderDomainEventStreamConsumer's Kafka listener: same
@@ -118,7 +122,9 @@ public class ShardedOrderDispatcher {
             } catch (Exception exception) {
                 log.warn("Failed to publish order domain event to SSE stream for order {}", event.orderId(), exception);
             }
+            completion.complete(null);
         });
+        return completion;
     }
 
     @PreDestroy
