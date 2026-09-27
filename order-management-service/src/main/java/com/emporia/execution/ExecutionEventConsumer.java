@@ -169,7 +169,7 @@ class ExecutionEventConsumer {
     }
 
     void processEvent(OrderDomainEvent event) {
-        OrderView order = read(event.payload());
+        OrderView order = event.view() != null ? event.view() : read(event.payload());
         switch (event.eventType()) {
             case "CREATED" -> handleCreated(order);
             case "MODIFIED" -> handleModified(order);

@@ -137,8 +137,22 @@ public final class TradingEvents {
             long orderVersion,
             OrderStatus status,
             Instant occurredAt,
-            String payload
+            String payload,
+            OrderView view
     ) {
+        public OrderDomainEvent(int schemaVersion, UUID eventId, UUID commandId, UUID orderId,
+                                String userSubject, String deskId, String eventType, long orderVersion,
+                                OrderStatus status, Instant occurredAt, String payload) {
+            this(schemaVersion, eventId, commandId, orderId, userSubject, deskId, eventType,
+                    orderVersion, status, occurredAt, payload, null);
+        }
+
+        public OrderDomainEvent(int schemaVersion, UUID eventId, UUID commandId, UUID orderId,
+                                String userSubject, String deskId, String eventType, long orderVersion,
+                                OrderStatus status, Instant occurredAt, OrderView view) {
+            this(schemaVersion, eventId, commandId, orderId, userSubject, deskId, eventType,
+                    orderVersion, status, occurredAt, null, view);
+        }
     }
 
     public record ExecutionCommand(

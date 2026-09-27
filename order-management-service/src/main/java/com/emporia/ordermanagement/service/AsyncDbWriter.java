@@ -20,6 +20,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import tools.jackson.databind.ObjectMapper;
 
 import java.sql.PreparedStatement;
 import java.sql.Timestamp;
@@ -62,6 +63,7 @@ public class AsyncDbWriter {
     private final Counter duplicateExecutions;
     private final Counter rejectedRows;
     private final MemoryMappedWalLogger wal;
+    private final ObjectMapper objectMapper;
 
     /**
      * An order write, paired with the state it was enqueued for.
@@ -108,7 +110,19 @@ public class AsyncDbWriter {
     private final org.springframework.transaction.support.TransactionTemplate transactionTemplate;
 
     public AsyncDbWriter(TradingOrderRepository orders, OrderEventRepository events, ProcessedCommandRepository processed) {
-        this(orders, events, processed, null, null, null, null, null, null);
+        this(orders, events, processed, null, null, null, null, null, null, null);
+    }
+
+    public AsyncDbWriter(TradingOrderRepository orders, OrderEventRepository events,
+                         ProcessedCommandRepository processed,
+                         com.emporia.ordermanagement.repository.OrderInputEventRepository inputEvents,
+                         JdbcTemplate jdbcTemplate,
+                         MemoryMappedWalLogger wal,
+                         org.springframework.transaction.support.TransactionTemplate transactionTemplate,
+                         io.micrometer.core.instrument.@Nullable MeterRegistry meters,
+                         @Nullable ExecutionRepository executions) {
+        this(orders, events, processed, inputEvents, jdbcTemplate, wal, transactionTemplate,
+                meters, executions, null);
     }
 
     // Marks the constructor Spring injects through. Without it there are two
@@ -125,7 +139,8 @@ public class AsyncDbWriter {
                          MemoryMappedWalLogger wal,
                          org.springframework.transaction.support.TransactionTemplate transactionTemplate,
                          io.micrometer.core.instrument.@Nullable MeterRegistry meters,
-                         @Nullable ExecutionRepository executions) {
+                         @Nullable ExecutionRepository executions,
+                         ObjectMapper objectMapper) {
         this.orders = orders;
         this.events = events;
         this.processed = processed;
@@ -134,6 +149,7 @@ public class AsyncDbWriter {
         this.jdbcTemplate = jdbcTemplate;
         this.wal = wal;
         this.transactionTemplate = transactionTemplate;
+        this.objectMapper = objectMapper;
         io.micrometer.core.instrument.MeterRegistry registry = meters == null ? new SimpleMeterRegistry() : meters;
         this.duplicateCommands = registry.counter("emporia.oms.dedup.duplicate_reached_db");
         this.duplicateOrders = registry.counter("emporia.oms.dedup.duplicate_order_reached_db");
@@ -514,7 +530,7 @@ public class AsyncDbWriter {
             ps.setBigDecimal(7, e.getQuantity());
             ps.setBigDecimal(8, e.getPrice());
             ps.setString(9, e.getMessage());
-            ps.setString(10, e.getPayload());
+            ps.setString(10, serializedPayload(e.getView(), e.getPayload()));
             ps.setTimestamp(11, e.getOccurredAt() == null ? null : Timestamp.from(e.getOccurredAt()));
         });
     }
@@ -632,8 +648,18 @@ public class AsyncDbWriter {
                         ps.setLong(8, event.orderVersion());
                         ps.setString(9, event.status() == null ? null : event.status().name());
                         ps.setTimestamp(10, event.occurredAt() == null ? null : Timestamp.from(event.occurredAt()));
-                        ps.setString(11, event.payload());
+                        ps.setString(11, serializedPayload(event.view(), event.payload()));
                     });
+        }
+    }
+
+    private String serializedPayload(Object view, String payload) {
+        if (payload != null) return payload;
+        if (view == null || objectMapper == null) return "{}";
+        try {
+            return objectMapper.writeValueAsString(view);
+        } catch (Exception exception) {
+            throw new IllegalStateException("Could not serialize an output snapshot", exception);
         }
     }
 

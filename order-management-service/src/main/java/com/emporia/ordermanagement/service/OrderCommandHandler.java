@@ -6,6 +6,7 @@ import com.emporia.events.TradingEvents.OrderCommandResult;
 import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderType;
+import com.emporia.events.TradingEvents.OrderView;
 import com.emporia.events.risk.OrderRiskChecks;
 import com.emporia.ordermanagement.disruptor.HotPathAssertions;
 import com.emporia.ordermanagement.dto.ProcessingOutcome;
@@ -263,9 +264,10 @@ public class OrderCommandHandler {
         metrics.cancelRequested();
         // One serialisation, used twice: the order has not changed between the
         // event and the result, and this runs on the single writer thread.
-        String payload = json(order.view());
+        OrderView view = order.view();
+        String payload = json(view);
         OrderEvent parentEvent = new OrderEvent(command.commandId(), order, "CANCEL_REQUESTED",
-                "Cancellation requested by user", payload);
+                "Cancellation requested by user", view);
         asyncDbWriter.enqueue(parentEvent);
         domainEvents.add(parentEvent.domainEvent());
         OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), true, 200,
@@ -273,7 +275,7 @@ public class OrderCommandHandler {
         ProcessedCommand processedCmd = new ProcessedCommand(result);
         cache.putProcessed(processedCmd);
         asyncDbWriter.enqueue(processedCmd);
-        return new ProcessingOutcome(result, domainEvents, order.view());
+        return new ProcessingOutcome(result, domainEvents, view);
     }
 
     private void requestChildCancellations(OrderCommand command, java.util.UUID parentId,
@@ -285,8 +287,9 @@ public class OrderCommandHandler {
             cache.put(child);
             asyncDbWriter.enqueue(child);
             metrics.cancelRequested();
+            OrderView view = child.view();
             OrderEvent childEvent = new OrderEvent(command.commandId(), child, "CANCEL_REQUESTED",
-                    "Cancellation requested with parent order", json(child.view()));
+                    "Cancellation requested with parent order", view);
             asyncDbWriter.enqueue(childEvent);
             domainEvents.add(childEvent.domainEvent());
         }
@@ -300,9 +303,10 @@ public class OrderCommandHandler {
             cache.put(order);
             asyncDbWriter.enqueue(order);
             metrics.cancelRequested();
-            String payload = json(order.view());
+            OrderView view = order.view();
+            String payload = json(view);
             OrderEvent event = new OrderEvent(command.commandId(), order, "CANCEL_REQUESTED",
-                    "Cancellation requested by user using cancel all", payload);
+                    "Cancellation requested by user using cancel all", view);
             asyncDbWriter.enqueue(event);
             domainEvents.add(event.domainEvent());
         }
@@ -318,14 +322,15 @@ public class OrderCommandHandler {
     private ProcessingOutcome success(OrderCommand command, TradingOrder order, String type, String message, int status) {
         long startNanos = System.nanoTime();
         try {
-        String payload = json(order.view());
-        OrderEvent event = new OrderEvent(command.commandId(), order, type, message, payload);
+        OrderView view = order.view();
+        String payload = json(view);
+        OrderEvent event = new OrderEvent(command.commandId(), order, type, message, view);
         asyncDbWriter.enqueue(event);
         OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), true, status, null, payload);
         ProcessedCommand processedCommand = new ProcessedCommand(result);
         cache.putProcessed(processedCommand);
         asyncDbWriter.enqueue(processedCommand);
-        return new ProcessingOutcome(result, List.of(event.domainEvent()), order.view());
+        return new ProcessingOutcome(result, List.of(event.domainEvent()), view);
         } finally {
             metrics.registry().timer("emporia.oms.command.persist")
                     .record(System.nanoTime() - startNanos,

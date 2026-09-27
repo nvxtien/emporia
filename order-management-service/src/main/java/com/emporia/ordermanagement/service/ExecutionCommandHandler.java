@@ -3,6 +3,7 @@ package com.emporia.ordermanagement.service;
 import com.emporia.events.TradingEvents.ExecutionCommand;
 import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderStatus;
+import com.emporia.events.TradingEvents.OrderView;
 import com.emporia.ordermanagement.disruptor.HotPathAssertions;
 import com.emporia.ordermanagement.model.Execution;
 import com.emporia.ordermanagement.model.OrderEvent;
@@ -267,7 +268,8 @@ public class ExecutionCommandHandler {
 
     private void addEvent(UUID commandId, TradingOrder order, String type, String message,
                           List<OrderDomainEvent> result) {
-        OrderEvent event = new OrderEvent(commandId, order, type, message, json(order.view()));
+        OrderView view = order.view();
+        OrderEvent event = new OrderEvent(commandId, order, type, message, view);
         asyncDbWriter.enqueue(event);
         result.add(event.domainEvent());
     }
