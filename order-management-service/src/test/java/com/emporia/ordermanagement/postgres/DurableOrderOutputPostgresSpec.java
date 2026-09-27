@@ -14,6 +14,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import java.time.Instant;
+import java.sql.Timestamp;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
@@ -113,7 +114,7 @@ public class DurableOrderOutputPostgresSpec {
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, event.eventId(), event.schemaVersion(), event.commandId(), event.orderId(),
                 event.userSubject(), event.deskId(), event.eventType(), event.orderVersion(),
-                event.status().name(), event.occurredAt(), event.payload());
+                event.status().name(), Timestamp.from(event.occurredAt()), event.payload());
     }
 
     private static OrderDomainEvent event(UUID orderId, String type) {
