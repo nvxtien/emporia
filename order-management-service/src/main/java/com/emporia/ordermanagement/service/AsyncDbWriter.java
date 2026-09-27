@@ -384,6 +384,8 @@ public class AsyncDbWriter {
     }
 
     private void writeProcessed(List<ProcessedCommand> batch) {
+        batch.forEach(command -> command.materializePayload(
+                serializedPayload(command.view(), command.result().payload())));
         if (jdbcTemplate != null) {
             flushProcessedJdbc(batch);
         } else {
@@ -548,7 +550,7 @@ public class AsyncDbWriter {
             ps.setBoolean(3, p.result().success());
             ps.setInt(4, p.result().status());
             ps.setString(5, p.result().detail());
-            ps.setString(6, p.result().payload());
+            ps.setString(6, serializedPayload(p.view(), p.result().payload()));
             ps.setTimestamp(7, p.getProcessedAt() == null ? null : Timestamp.from(p.getProcessedAt()));
         });
         reportAbsorbedDuplicates(affected, batch);

@@ -17,7 +17,6 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Supplier;
@@ -31,7 +30,6 @@ public class ExecutionCommandHandler {
 
     private final TradingOrderRepository orders;
     private final ExecutionRepository executions;
-    private final ObjectMapper objectMapper;
     private final OrderMetrics metrics;
     private final OrderStateCache cache;
     private final AsyncDbWriter asyncDbWriter;
@@ -50,7 +48,6 @@ public class ExecutionCommandHandler {
                             com.emporia.execution.ShardedOrderDispatcher shardedOrderDispatcher) {
         this.orders = orders;
         this.executions = executions;
-        this.objectMapper = objectMapper;
         this.metrics = metrics;
         this.cache = cache;
         this.asyncDbWriter = asyncDbWriter;
@@ -272,14 +269,6 @@ public class ExecutionCommandHandler {
         OrderEvent event = new OrderEvent(commandId, order, type, message, view);
         asyncDbWriter.enqueue(event);
         result.add(event.domainEvent());
-    }
-
-    private String json(Object value) {
-        try {
-            return objectMapper.writeValueAsString(value == null ? Map.of() : value);
-        } catch (Exception exception) {
-            throw new IllegalStateException("Could not serialize an execution event", exception);
-        }
     }
 
     private static boolean isTerminal(TradingOrder order) {

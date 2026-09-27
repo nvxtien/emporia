@@ -117,7 +117,7 @@ public class OrderCommandHandler {
                 // The one consumer that does read these events,
                 // OrderShadowComparisonService, replays into a sandbox that
                 // already records them in memory and reads them from there.
-                return new ProcessingOutcome(cached.result(), List.of());
+                return new ProcessingOutcome(cached.result(), List.of(), cached.view());
             }
 
             try {
@@ -265,14 +265,13 @@ public class OrderCommandHandler {
         // One serialisation, used twice: the order has not changed between the
         // event and the result, and this runs on the single writer thread.
         OrderView view = order.view();
-        String payload = json(view);
         OrderEvent parentEvent = new OrderEvent(command.commandId(), order, "CANCEL_REQUESTED",
                 "Cancellation requested by user", view);
         asyncDbWriter.enqueue(parentEvent);
         domainEvents.add(parentEvent.domainEvent());
         OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), true, 200,
-                null, payload);
-        ProcessedCommand processedCmd = new ProcessedCommand(result);
+                null, null);
+        ProcessedCommand processedCmd = new ProcessedCommand(result, view);
         cache.putProcessed(processedCmd);
         asyncDbWriter.enqueue(processedCmd);
         return new ProcessingOutcome(result, domainEvents, view);
@@ -304,16 +303,14 @@ public class OrderCommandHandler {
             asyncDbWriter.enqueue(order);
             metrics.cancelRequested();
             OrderView view = order.view();
-            String payload = json(view);
             OrderEvent event = new OrderEvent(command.commandId(), order, "CANCEL_REQUESTED",
                     "Cancellation requested by user using cancel all", view);
             asyncDbWriter.enqueue(event);
             domainEvents.add(event.domainEvent());
         }
         CancelAllView cancelAllView = new CancelAllView(domainEvents.size());
-        String payload = json(cancelAllView);
-        OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), true, 200, null, payload);
-        ProcessedCommand processedCmd = new ProcessedCommand(result);
+        OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), true, 200, null, null);
+        ProcessedCommand processedCmd = new ProcessedCommand(result, cancelAllView);
         cache.putProcessed(processedCmd);
         asyncDbWriter.enqueue(processedCmd);
         return new ProcessingOutcome(result, domainEvents, cancelAllView);
@@ -323,11 +320,10 @@ public class OrderCommandHandler {
         long startNanos = System.nanoTime();
         try {
         OrderView view = order.view();
-        String payload = json(view);
         OrderEvent event = new OrderEvent(command.commandId(), order, type, message, view);
         asyncDbWriter.enqueue(event);
-        OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), true, status, null, payload);
-        ProcessedCommand processedCommand = new ProcessedCommand(result);
+        OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), true, status, null, null);
+        ProcessedCommand processedCommand = new ProcessedCommand(result, view);
         cache.putProcessed(processedCommand);
         asyncDbWriter.enqueue(processedCommand);
         return new ProcessingOutcome(result, List.of(event.domainEvent()), view);

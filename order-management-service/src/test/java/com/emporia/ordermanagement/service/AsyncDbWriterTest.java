@@ -39,6 +39,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -129,6 +130,32 @@ class AsyncDbWriterTest {
         ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
         verify(jdbc).batchUpdate(sql.capture(), anyList(), anyInt(), any());
         assertThat(sql.getValue()).contains("order_delivery_outbox");
+    }
+
+    @Test
+    void serializesTypedProcessedResponseOutsideTheBlp() throws Exception {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        PreparedStatement statement = mock(PreparedStatement.class);
+        doAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            org.springframework.jdbc.core.ParameterizedPreparedStatementSetter<ProcessedCommand> setter =
+                    (org.springframework.jdbc.core.ParameterizedPreparedStatementSetter<ProcessedCommand>) invocation.getArgument(3);
+            setter.setValues(statement, new ProcessedCommand(
+                    new OrderCommandResult(SCHEMA_VERSION, UUID.randomUUID(), true, 201, null, null),
+                    java.util.Map.of("status", "LIVE")));
+            return new int[][]{{1}};
+        }).when(jdbc).batchUpdate(anyString(), anyList(), anyInt(), any());
+
+        AsyncDbWriter instrumented = new AsyncDbWriter(
+                orders, events, processed, null, jdbc, null, null, new SimpleMeterRegistry(), null,
+                new tools.jackson.databind.ObjectMapper());
+        instrumented.enqueue(new ProcessedCommand(
+                new OrderCommandResult(SCHEMA_VERSION, UUID.randomUUID(), true, 201, null, null),
+                java.util.Map.of("status", "LIVE")));
+
+        instrumented.flush();
+
+        verify(statement).setString(6, "{\"status\":\"LIVE\"}");
     }
 
     /**
