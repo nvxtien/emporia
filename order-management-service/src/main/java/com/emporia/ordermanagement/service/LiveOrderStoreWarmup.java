@@ -3,10 +3,10 @@ package com.emporia.ordermanagement.service;
 import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.ordermanagement.model.TradingOrder;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
-import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.SmartLifecycle;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Component;
 
@@ -18,12 +18,12 @@ import java.util.UUID;
  * traffic, so the store holds the whole live set rather than the part this
  * process happens to have seen.
  *
- * <h2>Why this runs in {@code @PostConstruct} and not on ApplicationReadyEvent</h2>
+ * <h2>Why this runs as a phased lifecycle and not on ApplicationReadyEvent</h2>
  * <p>{@code DedupIndexWarmup} loads after the application is ready, and can:
  * its filter only ever answers "never seen", so a command arriving mid-load is
  * still handled correctly by falling through to the database.
  *
- * <p>This load cannot. If the web server were already accepting orders, a fill
+ * <p>This load cannot run after traffic opens. If the web server were already accepting orders, a fill
  * could update an order in memory while the loader still held the older row
  * from the database, and writing that row over the newer one would lose the
  * fill. Loading before the port opens removes the race rather than guarding
@@ -37,7 +37,7 @@ import java.util.UUID;
  * answering a question negatively from an incomplete store - see that method.
  */
 @Component
-public class LiveOrderStoreWarmup {
+public class LiveOrderStoreWarmup implements SmartLifecycle {
 
     private static final Logger log = LoggerFactory.getLogger(LiveOrderStoreWarmup.class);
 
@@ -49,6 +49,7 @@ public class LiveOrderStoreWarmup {
     private final OrderStateCache cache;
     private final TradingOrderRepository orders;
     private final int pageSize;
+    private volatile boolean running;
 
     public LiveOrderStoreWarmup(OrderStateCache cache, TradingOrderRepository orders,
                                 @Value("${emporia.orders.warmup-page-size:5000}") int pageSize) {
@@ -57,7 +58,13 @@ public class LiveOrderStoreWarmup {
         this.pageSize = pageSize;
     }
 
-    @PostConstruct
+    @Override
+    public synchronized void start() {
+        if (running) return;
+        load();
+        running = true;
+    }
+
     public void load() {
         long startedAt = System.nanoTime();
         long loaded = 0;
@@ -103,5 +110,26 @@ public class LiveOrderStoreWarmup {
             log.error("Live-order store load failed after {} order(s); lookups stay on Postgres and "
                     + "indexes over the store must not be trusted", loaded, loadFailure);
         }
+    }
+
+    @Override
+    public void stop() {
+        running = false;
+    }
+
+    @Override
+    public boolean isRunning() {
+        return running;
+    }
+
+    @Override
+    public boolean isAutoStartup() {
+        return true;
+    }
+
+    /** Starts before the OMS ring (MAX_VALUE - 4096). */
+    @Override
+    public int getPhase() {
+        return Integer.MAX_VALUE - 8192;
     }
 }

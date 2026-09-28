@@ -74,4 +74,12 @@ class AeronOrderCommandSubscriberTest {
             assertThat(subscriber.poll()).isEqualTo(0);
         }
     }
+
+    @Test
+    void startsAfterTheOmsRing() {
+        AeronOrderCommandSubscriber subscriber = new AeronOrderCommandSubscriber(mock(DisruptorOrderPipeline.class));
+
+        assertThat(subscriber.isAutoStartup()).isTrue();
+        assertThat(subscriber.getPhase()).isGreaterThan(Integer.MAX_VALUE - 4096);
+    }
 }

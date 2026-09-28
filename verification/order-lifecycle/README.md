@@ -64,7 +64,7 @@ Model checking completed. No error has been found.
 
 ## Scope
 
-The model intentionally abstracts away prices, users, persistence, Kafka,
+The model intentionally abstracts away prices, users, persistence, transport,
 optimistic versions, and command idempotency. The jqwik tests cover numeric
 validation, versioned modifications, terminal cancellation, and duplicate
 commands in executable Java. This specification focuses on the future execution

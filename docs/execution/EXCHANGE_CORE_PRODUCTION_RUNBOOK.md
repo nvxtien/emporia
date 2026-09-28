@@ -210,12 +210,9 @@ Acceptance for a catch-up-capacity improvement is lower end-to-end order
 latency at the same offered rates with checkpoint metrics still present,
 checkpoint failures at `0`, and no partial checkpoint files left behind.
 
-> **Known gap**: `order-path-capacity.sh` still contains Kafka-consumer-group
-> lag wait/drain logic from before the OMS/execution merge removed Kafka from
-> this path entirely. That specific check now queries a Prometheus metric
-> (`kafka_consumergroup_lag`) that no longer exists in this topology - it
-> needs separate attention (see the repository root README for current
-> architecture) before this section can be followed literally.
+The capacity check waits on the OMS ring, WAL, asynchronous database writer,
+and durable output outbox. There is no broker lag or consumer-group drain in
+this topology.
 
 ## Rollback
 

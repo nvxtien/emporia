@@ -6,6 +6,7 @@ import com.emporia.events.TradingEvents.OrderCommandResult;
 import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderType;
+import com.emporia.events.TradingEvents.OrderView;
 import com.emporia.events.risk.OrderRiskChecks;
 import com.emporia.ordermanagement.disruptor.HotPathAssertions;
 import com.emporia.ordermanagement.dto.ProcessingOutcome;
@@ -94,7 +95,11 @@ public class OrderCommandHandler {
         String outcome = "success";
         try {
             // Cache-backed idempotency check: avoids a DB SELECT on every command.
-            ProcessedCommand cached = cache.findProcessedById(command.commandId()).orElse(null);
+            OrderStateCache.ProcessedLookup processedLookup = cache.findProcessedByIdMemoryOnly(command.commandId());
+            if (processedLookup.answer() == MemoryAnswer.UNCERTAIN) {
+                throw new HotPathUnavailableException("Order command deduplication state is not ready; retry");
+            }
+            ProcessedCommand cached = processedLookup.value();
             if (cached != null) {
                 outcome = "duplicate";
                 // No events, deliberately. This used to load the original
@@ -112,7 +117,7 @@ public class OrderCommandHandler {
                 // The one consumer that does read these events,
                 // OrderShadowComparisonService, replays into a sandbox that
                 // already records them in memory and reads them from there.
-                return new ProcessingOutcome(cached.result(), List.of());
+                return new ProcessingOutcome(cached.result(), List.of(), cached.view());
             }
 
             try {
@@ -129,6 +134,9 @@ public class OrderCommandHandler {
                         .record(System.nanoTime() - dispatchStartNanos,
                                 java.util.concurrent.TimeUnit.NANOSECONDS);
                 return result;
+            } catch (HotPathUnavailableException unavailable) {
+                outcome = "not_ready";
+                return retryable(command, unavailable.getMessage());
             } catch (DomainProblem problem) {
                 outcome = "rejected";
                 OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), false,
@@ -138,6 +146,9 @@ public class OrderCommandHandler {
                 asyncDbWriter.enqueue(processedCmd);
                 return new ProcessingOutcome(result, List.of());
             }
+        } catch (HotPathUnavailableException unavailable) {
+            outcome = "not_ready";
+            return retryable(command, unavailable.getMessage());
         } catch (RuntimeException exception) {
             outcome = "error";
             throw exception;
@@ -149,21 +160,21 @@ public class OrderCommandHandler {
         }
     }
 
-    /**
-     * Live children of an order, from memory when the live-order store holds
-     * every live order, and from the database until it does.
-     *
-     * <p>The fallback is not a nicety. An index over an incomplete store
-     * answers with the orders that happen to be in it, and a child missed here
-     * is a child left live after its parent was cancelled - silently.
-     */
+    /** Live children; an incomplete live-order store is retryable, never a DB read. */
     private List<TradingOrder> liveChildrenOf(java.util.UUID parentId) {
-        return cache.liveChildrenOf(parentId, () -> orders.findByParentOrderIdAndStatusIn(parentId, CANCELLABLE));
+        return cache.liveChildrenMemoryOnly(parentId)
+                .orElseThrow(() -> new HotPathUnavailableException("Live-order index is not ready; retry"));
     }
 
-    /** Live orders on a desk, newest first, with the same fallback and for the same reason. */
+    /** Live orders on a desk, newest first; an incomplete store is retryable. */
     private List<TradingOrder> liveOrdersOnDesk(String deskId) {
-        return cache.liveOrdersOnDesk(deskId, () -> orders.findByDeskIdAndStatusInOrderByCreatedAtDesc(deskId, CANCELLABLE));
+        return cache.liveOrdersOnDeskMemoryOnly(deskId)
+                .orElseThrow(() -> new HotPathUnavailableException("Live-order index is not ready; retry"));
+    }
+
+    private ProcessingOutcome retryable(OrderCommand command, String message) {
+        return new ProcessingOutcome(new OrderCommandResult(
+                SCHEMA_VERSION, command.commandId(), false, 503, message, null), List.of());
     }
 
     private static String commandTypeTag(OrderCommand command) {
@@ -172,28 +183,25 @@ public class OrderCommandHandler {
     }
 
     /**
-     * Hands each domain event this command produced to the in-process
-     * dispatcher, in the same place and at the same time as the rows that
-     * make the command durable, so a crash before the WAL flush - including
-     * one during replay, which calls {@code handle} directly - cannot leave a
-     * durable order nobody was told about. Only on success: a rejection never
-     * reaches execution today either.
+     * Hands each venue-bound domain event to the durable output queue. The BLP
+     * creates only the typed event; persistence and delivery happen outside it.
      */
     @SuppressWarnings("PMD.UnusedFormalParameter")
     private void enqueueOutbox(OrderCommand command, ProcessingOutcome outcome) {
         if (!outcome.result().success()) return;
         for (OrderDomainEvent event : outcome.events()) {
-            if (shardedOrderDispatcher != null) {
-                shardedOrderDispatcher.dispatch(event);
-            }
+            asyncDbWriter.enqueueOutput(event);
         }
     }
 
     private ProcessingOutcome create(OrderCommand command) {
         require(command.orderId() != null && command.listing() != null && command.side() != null
                 && command.orderType() != null, 400, "Create command is incomplete");
-        // Cache-backed duplicate order guard: avoids a DB SELECT on CREATE.
-        require(!cache.existsById(command.orderId()), 409, "Order already exists");
+        MemoryAnswer orderId = cache.existsByIdMemoryOnly(command.orderId());
+        if (orderId == MemoryAnswer.UNCERTAIN) {
+            throw new HotPathUnavailableException("Order deduplication state is not ready; retry");
+        }
+        require(orderId != MemoryAnswer.DEFINITELY_EXISTS, 409, "Order already exists");
         // The live-order store is bounded by liveness, and this is what stops it
         // growing without one. Refusing here is the same trade the ring makes
         // when it fills: an admitted order this service cannot hold is worse
@@ -256,17 +264,17 @@ public class OrderCommandHandler {
         metrics.cancelRequested();
         // One serialisation, used twice: the order has not changed between the
         // event and the result, and this runs on the single writer thread.
-        String payload = json(order.view());
+        OrderView view = order.view();
         OrderEvent parentEvent = new OrderEvent(command.commandId(), order, "CANCEL_REQUESTED",
-                "Cancellation requested by user", payload);
+                "Cancellation requested by user", view);
         asyncDbWriter.enqueue(parentEvent);
         domainEvents.add(parentEvent.domainEvent());
         OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), true, 200,
-                null, payload);
-        ProcessedCommand processedCmd = new ProcessedCommand(result);
+                null, null);
+        ProcessedCommand processedCmd = new ProcessedCommand(result, view);
         cache.putProcessed(processedCmd);
         asyncDbWriter.enqueue(processedCmd);
-        return new ProcessingOutcome(result, domainEvents, order.view());
+        return new ProcessingOutcome(result, domainEvents, view);
     }
 
     private void requestChildCancellations(OrderCommand command, java.util.UUID parentId,
@@ -278,8 +286,9 @@ public class OrderCommandHandler {
             cache.put(child);
             asyncDbWriter.enqueue(child);
             metrics.cancelRequested();
+            OrderView view = child.view();
             OrderEvent childEvent = new OrderEvent(command.commandId(), child, "CANCEL_REQUESTED",
-                    "Cancellation requested with parent order", json(child.view()));
+                    "Cancellation requested with parent order", view);
             asyncDbWriter.enqueue(childEvent);
             domainEvents.add(childEvent.domainEvent());
         }
@@ -293,16 +302,15 @@ public class OrderCommandHandler {
             cache.put(order);
             asyncDbWriter.enqueue(order);
             metrics.cancelRequested();
-            String payload = json(order.view());
+            OrderView view = order.view();
             OrderEvent event = new OrderEvent(command.commandId(), order, "CANCEL_REQUESTED",
-                    "Cancellation requested by user using cancel all", payload);
+                    "Cancellation requested by user using cancel all", view);
             asyncDbWriter.enqueue(event);
             domainEvents.add(event.domainEvent());
         }
         CancelAllView cancelAllView = new CancelAllView(domainEvents.size());
-        String payload = json(cancelAllView);
-        OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), true, 200, null, payload);
-        ProcessedCommand processedCmd = new ProcessedCommand(result);
+        OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), true, 200, null, null);
+        ProcessedCommand processedCmd = new ProcessedCommand(result, cancelAllView);
         cache.putProcessed(processedCmd);
         asyncDbWriter.enqueue(processedCmd);
         return new ProcessingOutcome(result, domainEvents, cancelAllView);
@@ -311,14 +319,14 @@ public class OrderCommandHandler {
     private ProcessingOutcome success(OrderCommand command, TradingOrder order, String type, String message, int status) {
         long startNanos = System.nanoTime();
         try {
-        String payload = json(order.view());
-        OrderEvent event = new OrderEvent(command.commandId(), order, type, message, payload);
+        OrderView view = order.view();
+        OrderEvent event = new OrderEvent(command.commandId(), order, type, message, view);
         asyncDbWriter.enqueue(event);
-        OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), true, status, null, payload);
-        ProcessedCommand processedCommand = new ProcessedCommand(result);
+        OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(), true, status, null, null);
+        ProcessedCommand processedCommand = new ProcessedCommand(result, view);
         cache.putProcessed(processedCommand);
         asyncDbWriter.enqueue(processedCommand);
-        return new ProcessingOutcome(result, List.of(event.domainEvent()), order.view());
+        return new ProcessingOutcome(result, List.of(event.domainEvent()), view);
         } finally {
             metrics.registry().timer("emporia.oms.command.persist")
                     .record(System.nanoTime() - startNanos,

@@ -149,7 +149,7 @@ row("Order command path", 14)
 panels.append(timeseries(
     "Submit latency by operation and destination", 15, 0, 12,
     pct_targets("emporia_order_submit", ["operation", "destination"], "{{operation}}/{{destination}}"),
-    desc="Phase 1_2 traced ~1.2s of a 1.24s submit to waiting on the Kafka request/reply round trip, "
+    desc="Phase 1_2 traced ~1.2s of a 1.24s submit to waiting on the legacy request/reply round trip, "
          "not to downstream processing."))
 panels.append(timeseries(
     "Risk check latency by service", 15, 12, 12,

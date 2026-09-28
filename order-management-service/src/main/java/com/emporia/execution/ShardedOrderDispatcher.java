@@ -11,10 +11,12 @@ import org.springframework.stereotype.Component;
 
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -30,13 +32,14 @@ public class ShardedOrderDispatcher {
 
     private final int numShards;
     private final ExecutorService[] shards;
-    // The same array, typed so the queue can be read. Executors.newSingleThreadExecutor
-    // hands back an unbounded LinkedBlockingQueue wrapped so its depth is invisible,
-    // and this queue sits between "the client was told 201" and "the venue has the
-    // order" - the one place a backlog is both possible and unobservable.
+    private final ThreadPoolExecutor streamPublisher;
+    // The same array, typed so queue depth is observable. Capacity is bounded so
+    // overload becomes a retryable outbox failure instead of unbounded memory use.
     private final ThreadPoolExecutor[] queues;
     private final ExecutionEventConsumer eventConsumer;
     private final OrderStreamService streams;
+    private final io.micrometer.core.instrument.Counter rejected;
+    private final io.micrometer.core.instrument.Counter streamRejected;
 
     // PMD's CloseResource can't see that these pools outlive the constructor
     // and are closed in shutdown() (already suppressed there), so it flags the
@@ -47,20 +50,47 @@ public class ShardedOrderDispatcher {
             @Lazy ExecutionEventConsumer eventConsumer,
             OrderStreamService streams,
             MeterRegistry meters) {
+        this(numShards, 4096, 1024, eventConsumer, streams, meters);
+    }
+
+    @SuppressWarnings("PMD.CloseResource")
+    public ShardedOrderDispatcher(int numShards, int queueCapacity,
+                                  ExecutionEventConsumer eventConsumer,
+                                  OrderStreamService streams, MeterRegistry meters) {
+        this(numShards, queueCapacity, 1024, eventConsumer, streams, meters);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    @SuppressWarnings("PMD.CloseResource")
+    public ShardedOrderDispatcher(
+            @Value("${emporia.execution.dispatcher.shards:8}") int numShards,
+            @Value("${emporia.execution.dispatcher.queue-capacity:4096}") int queueCapacity,
+            @Value("${emporia.execution.stream.queue-capacity:1024}") int streamQueueCapacity,
+            @Lazy ExecutionEventConsumer eventConsumer,
+            OrderStreamService streams,
+            MeterRegistry meters) {
         this.numShards = Math.max(1, numShards);
+        int boundedCapacity = Math.max(1, queueCapacity);
+        int boundedStreamCapacity = Math.max(1, streamQueueCapacity);
         this.eventConsumer = Objects.requireNonNull(eventConsumer, "eventConsumer");
         this.streams = Objects.requireNonNull(streams, "streams");
-
-        log.info("Sharded In-Process Dispatcher initialized (shards={})", this.numShards);
+        this.rejected = meters.counter("emporia.oms.dispatcher.rejected");
+        this.streamRejected = meters.counter("emporia.oms.sse.rejected");
         this.shards = new ExecutorService[this.numShards];
         this.queues = new ThreadPoolExecutor[this.numShards];
+        this.streamPublisher = new ThreadPoolExecutor(1, 1, 0L,
+                TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(boundedStreamCapacity),
+                runnable -> {
+                    Thread thread = new Thread(runnable, "order-stream-publisher-0");
+                    thread.setDaemon(true);
+                    return thread;
+                });
         for (int i = 0; i < this.numShards; i++) {
             final int shardIndex = i;
-            // newSingleThreadExecutor wraps a ThreadPoolExecutor in a finalizable
-            // delegate, so build the same thing directly rather than unwrapping it.
             ThreadPoolExecutor pool = new ThreadPoolExecutor(1, 1, 0L,
-                    java.util.concurrent.TimeUnit.MILLISECONDS,
-                    new java.util.concurrent.LinkedBlockingQueue<>(),
+                    TimeUnit.MILLISECONDS,
+                    new ArrayBlockingQueue<>(boundedCapacity),
                     runnable -> {
                         Thread thread = new Thread(runnable, "execution-dispatcher-shard-" + shardIndex);
                         thread.setDaemon(true);
@@ -76,8 +106,7 @@ public class ShardedOrderDispatcher {
         // The gap between "the client has a 201" and "the venue has the order".
         // A backlog here is invisible in every other signal: order-management
         // looks healthy, the venue looks healthy, and only the two together are
-        // short. It is also unbounded, so it can absorb an arbitrary amount of
-        // work before anything says so.
+        // short. The bounded queue rejects excess work so the durable outbox can retry it.
         Gauge.builder("emporia.oms.dispatcher.queue.depth", this, ShardedOrderDispatcher::queueDepth)
                 .description("Order events accepted but not yet handed to the venue")
                 .register(meters);
@@ -97,28 +126,44 @@ public class ShardedOrderDispatcher {
         return numShards;
     }
 
-    public void dispatch(OrderDomainEvent event) {
+    public CompletableFuture<Void> dispatch(OrderDomainEvent event) {
         if (event == null || event.orderId() == null) {
-            return;
+            return CompletableFuture.completedFuture(null);
         }
-        int shardIndex = Math.abs(event.orderId().hashCode()) % numShards;
-        shards[shardIndex].submit(() -> {
-            try {
-                eventConsumer.processEvent(event);
-            } catch (Exception exception) {
-                log.error("Failed to process order domain event in-process for order {}", event.orderId(), exception);
-            }
-            try {
-                // Replaces the deleted OrderDomainEventStreamConsumer's Kafka listener: same
-                // event, same downstream call, just triggered directly instead of via a
-                // permanently-rebalancing ephemeral consumer group. Runs on the shard thread,
-                // not the caller's, so a slow/backpressured SSE client can't add latency to
-                // order submission.
-                streams.publish(event);
-            } catch (Exception exception) {
-                log.warn("Failed to publish order domain event to SSE stream for order {}", event.orderId(), exception);
-            }
-        });
+        CompletableFuture<Void> completion = new CompletableFuture<>();
+        int shardIndex = Math.floorMod(event.orderId().hashCode(), numShards);
+        try {
+            shards[shardIndex].submit(() -> {
+                try {
+                    eventConsumer.processEvent(event);
+                } catch (Exception exception) {
+                    log.error("Failed to process order domain event in-process for order {}", event.orderId(), exception);
+                    completion.completeExceptionally(exception);
+                    return;
+                }
+                try {
+                    streamPublisher.execute(() -> {
+                        try {
+                            streams.publish(event);
+                        } catch (Exception exception) {
+                            log.warn("Failed to publish order domain event to SSE stream for order {}",
+                                    event.orderId(), exception);
+                        }
+                    });
+                } catch (RejectedExecutionException streamBackpressure) {
+                    streamRejected.increment();
+                    log.warn("Dropped SSE event for order {} because the stream queue is full",
+                            event.orderId());
+                }
+                completion.complete(null);
+            });
+        } catch (RejectedExecutionException rejectedExecution) {
+            rejected.increment();
+            completion.completeExceptionally(rejectedExecution);
+            log.warn("Rejected order domain event for order {} because the dispatcher queue is full",
+                    event.orderId());
+        }
+        return completion;
     }
 
     @PreDestroy
@@ -134,6 +179,15 @@ public class ShardedOrderDispatcher {
                 shard.shutdownNow();
                 Thread.currentThread().interrupt();
             }
+        }
+        streamPublisher.shutdown();
+        try {
+            if (!streamPublisher.awaitTermination(2, TimeUnit.SECONDS)) {
+                streamPublisher.shutdownNow();
+            }
+        } catch (InterruptedException interrupted) {
+            streamPublisher.shutdownNow();
+            Thread.currentThread().interrupt();
         }
     }
 }

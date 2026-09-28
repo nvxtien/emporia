@@ -6,6 +6,7 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.Transient;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -28,15 +29,29 @@ public class ProcessedCommand {
     private String detail;
     @Column(columnDefinition = "text")
     private String payload;
+    @Transient
+    private Object view;
     @Column(name = "processed_at", nullable = false)
     private Instant processedAt;
 
     protected ProcessedCommand() { }
 
     public ProcessedCommand(OrderCommandResult result) {
+        this(result, null);
+    }
+
+    public ProcessedCommand(OrderCommandResult result, Object view) {
         commandId = result.commandId(); schemaVersion = result.schemaVersion(); success = result.success();
-        status = result.status(); detail = result.detail(); payload = result.payload(); processedAt = DomainClock.now();
+        status = result.status(); detail = result.detail(); payload = result.payload();
+        this.view = view;
+        processedAt = DomainClock.now();
     }
 
     public OrderCommandResult result() { return new OrderCommandResult(schemaVersion, commandId, success, status, detail, payload); }
+
+    public Object view() { return view; }
+
+    public void materializePayload(String serialized) {
+        if (payload == null) payload = serialized;
+    }
 }

@@ -3,6 +3,7 @@ package com.emporia.ordermanagement.service;
 import com.emporia.events.TradingEvents.ExecutionCommand;
 import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderStatus;
+import com.emporia.events.TradingEvents.OrderView;
 import com.emporia.ordermanagement.disruptor.HotPathAssertions;
 import com.emporia.ordermanagement.model.Execution;
 import com.emporia.ordermanagement.model.OrderEvent;
@@ -30,7 +31,6 @@ public class ExecutionCommandHandler {
 
     private final TradingOrderRepository orders;
     private final ExecutionRepository executions;
-    private final ObjectMapper objectMapper;
     private final OrderMetrics metrics;
     private final OrderStateCache cache;
     private final AsyncDbWriter asyncDbWriter;
@@ -49,7 +49,6 @@ public class ExecutionCommandHandler {
                             com.emporia.execution.ShardedOrderDispatcher shardedOrderDispatcher) {
         this.orders = orders;
         this.executions = executions;
-        this.objectMapper = objectMapper;
         this.metrics = metrics;
         this.cache = cache;
         this.asyncDbWriter = asyncDbWriter;
@@ -72,10 +71,13 @@ public class ExecutionCommandHandler {
         if (command.schemaVersion() != SCHEMA_VERSION) {
             throw new IllegalArgumentException("Unsupported execution command schema version");
         }
-        if (command.commandType() == com.emporia.events.TradingEvents.ExecutionCommandType.FILL
-                && cache.existsExecutionReference(command.deskId(), command.venue(), command.executionReference(),
-                        () -> executions.existsByExecutionReference(command.executionReference()))) {
-            return List.of();
+        if (command.commandType() == com.emporia.events.TradingEvents.ExecutionCommandType.FILL) {
+            MemoryAnswer reference = cache.executionReferenceMemoryOnly(
+                    command.deskId(), command.venue(), command.executionReference());
+            if (reference == MemoryAnswer.UNCERTAIN) {
+                throw new HotPathUnavailableException("Execution deduplication state is not ready; retry");
+            }
+            if (reference == MemoryAnswer.DEFINITELY_EXISTS) return List.of();
         }
 
         // Cache-backed lookup: the child order is almost certainly warm.
@@ -127,8 +129,11 @@ public class ExecutionCommandHandler {
             if (maybeParent.isEmpty()) break;
             TradingOrder parent = maybeParent.get();
             String rollupReference = rollupReference(command.executionReference(), parent.getId());
-            if (!cache.existsExecutionReference(parent.getDeskId(), command.venue(), rollupReference,
-                    () -> executions.existsByExecutionReference(rollupReference))) {
+            MemoryAnswer reference = cache.executionReferenceMemoryOnly(parent.getDeskId(), command.venue(), rollupReference);
+            if (reference == MemoryAnswer.UNCERTAIN) {
+                throw new HotPathUnavailableException("Execution deduplication state is not ready; retry");
+            }
+            if (reference == MemoryAnswer.DEFINITELY_NEW) {
                 applyFillAndRecord(parent, command.commandId(), rollupReference,
                         command.quantity(), command.price(), command.quantityScaled(), command.priceScaled(),
                         command.venue(), command.occurredAt(),
@@ -175,14 +180,7 @@ public class ExecutionCommandHandler {
         if (order.getStatus() == OrderStatus.CANCELLED) metrics.orderCancelled();
     }
 
-    /**
-     * Whether an order still has live children, answered from the live-order
-     * store when it is complete and from the database until it is.
-     *
-     * <p>This runs on the execution dispatcher's threads rather than the single
-     * writer, so it never queued order intake behind it - but it is the same
-     * question the writer asks, and the same index answers it.
-     */
+    /** Whether an order still has live children, answered from the complete live-order store. */
     /**
      * A live order, or an empty result the caller should silently back off
      * from - never a repository read. {@link OrderStateCache#put} evicts a
@@ -208,8 +206,9 @@ public class ExecutionCommandHandler {
     }
 
     private boolean hasLiveChildren(java.util.UUID parentId) {
-        return !cache.liveChildrenOf(parentId, () -> orders.findByParentOrderIdAndStatusIn(parentId, ACTIVE))
-                .isEmpty();
+        return cache.liveChildrenMemoryOnly(parentId)
+                .orElseThrow(() -> new HotPathUnavailableException("Live-order index is not ready; retry"))
+                .stream().findAny().isPresent();
     }
 
     private void reject(TradingOrder order, ExecutionCommand command, List<OrderDomainEvent> result) {
@@ -267,17 +266,10 @@ public class ExecutionCommandHandler {
 
     private void addEvent(UUID commandId, TradingOrder order, String type, String message,
                           List<OrderDomainEvent> result) {
-        OrderEvent event = new OrderEvent(commandId, order, type, message, json(order.view()));
+        OrderView view = order.view();
+        OrderEvent event = new OrderEvent(commandId, order, type, message, view);
         asyncDbWriter.enqueue(event);
         result.add(event.domainEvent());
-    }
-
-    private String json(Object value) {
-        try {
-            return objectMapper.writeValueAsString(value == null ? Map.of() : value);
-        } catch (Exception exception) {
-            throw new IllegalStateException("Could not serialize an execution event", exception);
-        }
     }
 
     private static boolean isTerminal(TradingOrder order) {

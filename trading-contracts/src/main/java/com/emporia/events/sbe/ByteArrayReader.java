@@ -11,7 +11,7 @@ import java.nio.ByteOrder;
  * <h2>Why not {@code ByteBuffer.wrap()}?</h2>
  * <p>{@code ByteBuffer.wrap(byte[])} allocates a {@code HeapByteBuffer} object on
  * every call — roughly 48 bytes of heap garbage per message on a modern JVM. On
- * the Kafka hot path this happens once per {@link SbeView} construction: small, but
+ * the Aeron hot path this happens once per {@link SbeView} construction: small, but
  * unnecessary because all fields in the SBE wire format sit at statically-known or
  * cheaply-computed offsets that can be read with a single {@code VarHandle.get}.
  *

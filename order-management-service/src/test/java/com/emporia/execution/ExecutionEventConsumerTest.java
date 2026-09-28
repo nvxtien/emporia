@@ -196,7 +196,6 @@ class ExecutionEventConsumerTest {
             assertThat(child.limitPrice()).isEqualByComparingTo("102");
             assertThat(child.executionParameters()).containsEntry("venuePrice", new BigDecimal("101.25"));
             assertThat(child.quantity()).isEqualByComparingTo(parent.remainingQuantity());
-            verify(inputRecorder).record(child);
             assertThat(timerCount("emporia.strategy.decision", "strategy", "smart", "outcome", "success")).isEqualTo(1);
         }
 

@@ -756,7 +756,10 @@ class TradingOrderPropertyTest {
             );
 
             OrderMetrics metrics = new OrderMetrics(new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
-            OrderStateCache cache = new OrderStateCache(orders, processed, metrics, null, 1000, 1000);
+            RotatingDedupIndex dedup = new RotatingDedupIndex(java.time.Duration.ofHours(24), 2, 1000, 0.001);
+            dedup.publishHistory(new CommandDedupIndex(1000, 0.001));
+            OrderStateCache cache = new OrderStateCache(orders, processed, metrics, dedup, 1000, 1000);
+            cache.markLiveSetComplete();
             AsyncDbWriter asyncDbWriter = org.mockito.Mockito.mock(AsyncDbWriter.class);
             org.mockito.stubbing.Answer<Void> recordOrder = invocation -> {
                 TradingOrder o = invocation.getArgument(0);

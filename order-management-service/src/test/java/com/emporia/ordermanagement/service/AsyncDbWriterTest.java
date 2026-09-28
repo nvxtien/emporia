@@ -1,7 +1,9 @@
 package com.emporia.ordermanagement.service;
 
 import com.emporia.events.TradingEvents.ListingSnapshot;
+import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.OrderCommandResult;
+import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.TradingEvents.OrderSide;
 import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.ordermanagement.model.Execution;
@@ -22,6 +24,7 @@ import org.mockito.ArgumentCaptor;
 import java.sql.PreparedStatement;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
@@ -36,6 +39,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -108,6 +112,50 @@ class AsyncDbWriterTest {
         withExecutions.flush();
 
         verify(executions).saveAll(anyList());
+    }
+
+    @Test
+    void writesTypedOutputToTheDurableOutbox() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        when(jdbc.batchUpdate(anyString(), anyList(), anyInt(), any()))
+                .thenReturn(new int[][]{{1}});
+        AsyncDbWriter withOutbox = new AsyncDbWriter(
+                orders, events, processed, null, jdbc, null, null, new SimpleMeterRegistry(), null);
+
+        withOutbox.enqueueOutput(new OrderDomainEvent(
+                SCHEMA_VERSION, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+                "trader", "desk", "CREATED", 1L, OrderStatus.LIVE, Instant.now(), "{}"));
+        withOutbox.flush();
+
+        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).batchUpdate(sql.capture(), anyList(), anyInt(), any());
+        assertThat(sql.getValue()).contains("order_delivery_outbox");
+    }
+
+    @Test
+    void serializesTypedProcessedResponseOutsideTheBlp() throws Exception {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        PreparedStatement statement = mock(PreparedStatement.class);
+        doAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            org.springframework.jdbc.core.ParameterizedPreparedStatementSetter<ProcessedCommand> setter =
+                    (org.springframework.jdbc.core.ParameterizedPreparedStatementSetter<ProcessedCommand>) invocation.getArgument(3);
+            setter.setValues(statement, new ProcessedCommand(
+                    new OrderCommandResult(SCHEMA_VERSION, UUID.randomUUID(), true, 201, null, null),
+                    java.util.Map.of("status", "LIVE")));
+            return new int[][]{{1}};
+        }).when(jdbc).batchUpdate(anyString(), anyList(), anyInt(), any());
+
+        AsyncDbWriter instrumented = new AsyncDbWriter(
+                orders, events, processed, null, jdbc, null, null, new SimpleMeterRegistry(), null,
+                new tools.jackson.databind.ObjectMapper());
+        instrumented.enqueue(new ProcessedCommand(
+                new OrderCommandResult(SCHEMA_VERSION, UUID.randomUUID(), true, 201, null, null),
+                java.util.Map.of("status", "LIVE")));
+
+        instrumented.flush();
+
+        verify(statement).setString(6, "{\"status\":\"LIVE\"}");
     }
 
     /**

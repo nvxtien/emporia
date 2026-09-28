@@ -29,6 +29,14 @@ class LiveOrderStoreWarmupTest {
             new OrderStateCache(orders, processed, metrics, null, 1000, 1000);
 
     @Test
+    void warmsTheLiveStoreBeforeTheOmsRingStarts() {
+        LiveOrderStoreWarmup warmup = new LiveOrderStoreWarmup(cache, orders, 2);
+
+        assertThat(warmup.getPhase()).isLessThan(Integer.MAX_VALUE - 4096);
+        assertThat(warmup.isAutoStartup()).isTrue();
+    }
+
+    @Test
     void loadsEveryLiveOrderAcrossPagesAndThenDeclaresTheSetComplete() {
         when(orders.findByStatusInAndIdGreaterThanOrderByIdAsc(anyCollection(), any(UUID.class), any(Pageable.class)))
                 .thenReturn(List.of(liveOrder(), liveOrder()))

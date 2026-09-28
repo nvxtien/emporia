@@ -35,7 +35,8 @@ class FastOrderRequestDtoTest {
         // Verify valid JSON format
         assertThat(jsonString).contains("\"orderId\":\"ORD-998877\"");
         assertThat(jsonString).contains("\"clientId\":1001");
-        assertThat(jsonString).contains("\"priceScaled\":150250000");
+        assertThat(jsonString).contains("\"price\":150250000");
+        assertThat(jsonString).contains("\"quantity\":100000000");
 
         // Deserialize byte[] -> DTO
         FastOrderRequestDto restored = dslJson.deserialize(FastOrderRequestDto.class, jsonBytes, jsonBytes.length);

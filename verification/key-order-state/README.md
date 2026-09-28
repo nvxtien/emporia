@@ -10,7 +10,7 @@ JPA entity itself. The extraction is deliberate:
 - quantities are integral lots instead of `BigDecimal`; the listing size
   increment maps production quantities to lots;
 - the model retains the production accounting and status transitions;
-- persistence, optimistic locking, Lombok, Spring, Kafka, price averaging, and
+- persistence, optimistic locking, Lombok, Spring, transport, price averaging, and
   concurrency are excluded.
 
 ## What is proved

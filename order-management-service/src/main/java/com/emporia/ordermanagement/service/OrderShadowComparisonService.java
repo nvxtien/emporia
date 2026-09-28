@@ -22,6 +22,7 @@ import tools.jackson.databind.node.ObjectNode;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -124,7 +125,18 @@ public class OrderShadowComparisonService {
     private static NormalizedEvent normalize(OrderDomainEvent event, ObjectMapper objectMapper) {
         return new NormalizedEvent(event.commandId(), event.orderId(), event.userSubject(), event.deskId(),
                 event.eventType(), event.orderVersion(), event.status().name(),
-                normalizePayload(event.payload(), objectMapper));
+                normalizePayload(event.payload() != null
+                        ? event.payload()
+                        : serializeView(event.view(), objectMapper), objectMapper));
+    }
+
+    private static String serializeView(Object view, ObjectMapper objectMapper) {
+        if (view == null) return null;
+        try {
+            return objectMapper.writeValueAsString(view);
+        } catch (Exception exception) {
+            return null;
+        }
     }
 
     private static String normalizePayload(String payload, ObjectMapper objectMapper) {
@@ -281,7 +293,10 @@ public class OrderShadowComparisonService {
                     }
             );
             OrderMetrics metrics = new OrderMetrics(new SimpleMeterRegistry());
-            OrderStateCache cache = new OrderStateCache(orders, processed, metrics, null, 1000, 1000);
+            RotatingDedupIndex dedup = new RotatingDedupIndex(Duration.ofHours(24), 2, 1000, 0.001);
+            dedup.publishHistory(new CommandDedupIndex(1000, 0.001));
+            OrderStateCache cache = new OrderStateCache(orders, processed, metrics, dedup, 1000, 1000);
+            cache.markLiveSetComplete();
             AsyncDbWriter asyncDbWriter = new InMemoryAsyncDbWriter(
                     orders, events, processed, storedOrders, eventsByCommand, processedCommands);
             handler = new OrderCommandHandler(orders, new ObjectMapper(), ObservationRegistry.NOOP,

@@ -2,7 +2,7 @@
 # Cold-start check for the OMS Disruptor hot path.
 #
 # Restarts order-management-service and immediately submits an order through the
-# gateway. The retired order-command-service Kafka reply-listener race (504 after
+# gateway. The retired order-command-service reply-listener race (504 after
 # publish) no longer applies; this check now verifies that the gateway → OMS
 # path accepts the first post-restart request without hanging.
 #

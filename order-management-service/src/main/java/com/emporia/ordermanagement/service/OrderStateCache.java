@@ -136,6 +136,8 @@ public class OrderStateCache {
 
     /** See {@link #isLiveSetComplete()}. Written once, by the startup load. */
     private volatile boolean liveSetComplete;
+    private volatile boolean executionReferencesReady;
+    private final Set<UUID> executionReferenceKeys = ConcurrentHashMap.newKeySet();
 
     /**
      * Live children by parent, and live orders by desk.
@@ -301,9 +303,29 @@ public class OrderStateCache {
         return exists;
     }
 
+    /** Returns the execution-reference answer without a repository fallback. */
+    public MemoryAnswer executionReferenceMemoryOnly(String deskId, String venue, String executionReference) {
+        UUID key = executionReferenceKey(deskId, venue, executionReference);
+        if (!executionReferencesReady) return MemoryAnswer.UNCERTAIN;
+        if (executionReferenceKeys.contains(key)) return MemoryAnswer.DEFINITELY_EXISTS;
+        if (indexAnswers() && dedup.definitelyNew(key)) return MemoryAnswer.DEFINITELY_NEW;
+        return MemoryAnswer.UNCERTAIN;
+    }
+
     /** Marks {@code executionReference} as applied, so a repeat is recognised without the database. */
     public void rememberExecutionReference(String deskId, String venue, String executionReference) {
-        if (dedup != null) dedup.remember(executionReferenceKey(deskId, venue, executionReference));
+        UUID key = executionReferenceKey(deskId, venue, executionReference);
+        executionReferenceKeys.add(key);
+        if (dedup != null) dedup.remember(key);
+    }
+
+    void rememberExecutionReferenceKey(UUID key) {
+        executionReferenceKeys.add(key);
+    }
+
+    /** Publishes the exact execution-reference snapshot after warm-up completes. */
+    void markExecutionReferencesReady() {
+        executionReferencesReady = true;
     }
 
     private static UUID executionReferenceKey(String deskId, String venue, String executionReference) {
