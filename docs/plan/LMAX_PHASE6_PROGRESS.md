@@ -16,10 +16,10 @@
 - Recovery warm-up, Aeron intake, and cross-command interleaving tests pass.
 - PostgreSQL outbox integration passes, including reclaiming an expired lease
   after simulated process loss.
+- Full Maven reactor test suite passes locally with Java 21.
 - `git diff --check` passes.
 
-## Next
+## Checkpoint
 
-- Run the full module suite in CI or an environment with all Maven plugins
-  cached; the local reactor-wide run is still affected by Mockito/JDK 21
-  self-attach when the agent setup is bypassed.
+- Phase 6 recovery lifecycle work is complete.
+- Keep CI's Mockito/JDK 21 agent configuration aligned with the local suite.

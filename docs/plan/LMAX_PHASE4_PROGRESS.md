@@ -20,10 +20,11 @@
   expired-lease recovery drill for a fresh dispatcher.
 - `git diff --check` passes.
 
-## Remaining work
+## Checkpoint
 
 - The PostgreSQL crash/retry drill is now covered by
   `DurableOrderOutputPostgresSpec`.
-- Define bounded dispatcher backpressure and complete Phase 4 checkpoint.
+- Bounded dispatcher backpressure is implemented and covered by unit tests.
+- Phase 4 checkpoint is complete.
 - Preserve the documented process-death versus machine-loss durability
   distinction unless the product requirement changes.
