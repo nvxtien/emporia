@@ -12,6 +12,7 @@ import com.emporia.events.TradingEvents.OrderType;
 import com.emporia.ordermanagement.dto.ProcessingOutcome;
 import com.emporia.ordermanagement.service.ExecutionCommandHandler;
 import com.emporia.ordermanagement.service.OrderCommandHandler;
+import com.emporia.ordermanagement.service.OrderInputEventRecorder;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -69,6 +70,22 @@ class DisruptorOrderPipelineTest {
         ProcessingOutcome result = future.get(5, TimeUnit.SECONDS);
         assertThat(result).isNotNull();
         assertThat(result.result().commandId()).isEqualTo(commandId);
+    }
+
+    @Test
+    void recordsInputOnlyAfterTheOrderSlotIsAccepted() throws Exception {
+        OrderInputEventRecorder recorder = mock(OrderInputEventRecorder.class);
+        pipeline.setInputEventRecorderForTest(recorder);
+        when(handler.handle(any())).thenAnswer(invocation -> {
+            OrderCommand command = invocation.getArgument(0);
+            return new ProcessingOutcome(new OrderCommandResult(
+                    SCHEMA_VERSION, command.commandId(), true, 201, "Created", "{}"), List.of());
+        });
+
+        OrderCommand command = sampleCommand(UUID.randomUUID());
+        pipeline.submit(command).get(5, TimeUnit.SECONDS);
+
+        verify(recorder).recordAccepted(command);
     }
 
     @Test

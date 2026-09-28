@@ -126,7 +126,7 @@ class OrderShadowComparisonServiceTest {
             OrderEvent created = new OrderEvent(command.commandId(), order, "CREATED",
                     "Order accepted by Emporia", payload);
             OrderCommandResult result = new OrderCommandResult(SCHEMA_VERSION, command.commandId(),
-                    true, 201, null, payload);
+                    true, 201, null, null);
             when(processed.findById(command.commandId())).thenReturn(Optional.of(new ProcessedCommand(result)));
             when(events.findByCommandIdOrderByOccurredAtAsc(command.commandId())).thenReturn(List.of(created));
 

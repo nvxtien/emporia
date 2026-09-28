@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -59,5 +60,56 @@ class ShardedOrderDispatcherTest {
         assertThat(dispatcher.getNumShards()).isEqualTo(8);
 
         dispatcher.shutdown();
+    }
+
+    @Test
+    void rejectsWhenTheBoundedQueueIsFull() throws Exception {
+        ExecutionEventConsumer consumer = mock(ExecutionEventConsumer.class);
+        OrderStreamService streams = mock(OrderStreamService.class);
+        ShardedOrderDispatcher dispatcher = new ShardedOrderDispatcher(
+                1, 1, consumer, streams, new SimpleMeterRegistry());
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            entered.countDown();
+            release.await(3, TimeUnit.SECONDS);
+            return null;
+        }).when(consumer).processEvent(any());
+
+        UUID orderId = UUID.randomUUID();
+        dispatcher.dispatch(event(orderId));
+        assertThat(entered.await(3, TimeUnit.SECONDS)).isTrue();
+        dispatcher.dispatch(event(orderId));
+        CompletableFuture<Void> rejected = dispatcher.dispatch(event(orderId));
+
+        assertThat(rejected).isCompletedExceptionally();
+        release.countDown();
+        dispatcher.shutdown();
+    }
+
+    @Test
+    void publishesSseOnASeparateWorkerFromVenueDelivery() throws Exception {
+        ExecutionEventConsumer consumer = mock(ExecutionEventConsumer.class);
+        OrderStreamService streams = mock(OrderStreamService.class);
+        ShardedOrderDispatcher dispatcher = new ShardedOrderDispatcher(
+                1, 1, 1, consumer, streams, new SimpleMeterRegistry());
+        CountDownLatch streamLatch = new CountDownLatch(1);
+        AtomicReference<String> streamThread = new AtomicReference<>();
+        doAnswer(invocation -> {
+            streamThread.set(Thread.currentThread().getName());
+            streamLatch.countDown();
+            return null;
+        }).when(streams).publish(any());
+
+        dispatcher.dispatch(event(UUID.randomUUID())).join();
+
+        assertThat(streamLatch.await(3, TimeUnit.SECONDS)).isTrue();
+        assertThat(streamThread.get()).startsWith("order-stream-publisher-");
+        dispatcher.shutdown();
+    }
+
+    private static OrderDomainEvent event(UUID orderId) {
+        return new OrderDomainEvent(1, UUID.randomUUID(), UUID.randomUUID(), orderId,
+                "user1", "desk1", "CREATED", 1L, OrderStatus.LIVE, Instant.now(), "{}");
     }
 }

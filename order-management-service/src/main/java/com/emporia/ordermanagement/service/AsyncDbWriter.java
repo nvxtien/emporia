@@ -2,6 +2,7 @@ package com.emporia.ordermanagement.service;
 
 import com.emporia.ordermanagement.model.Execution;
 import com.emporia.ordermanagement.model.OrderEvent;
+import com.emporia.events.TradingEvents.OrderDomainEvent;
 import com.emporia.events.TradingEvents.ListingSnapshot;
 import com.emporia.events.TradingEvents.OrderView;
 import com.emporia.ordermanagement.model.ProcessedCommand;
@@ -19,6 +20,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import tools.jackson.databind.ObjectMapper;
 
 import java.sql.PreparedStatement;
 import java.sql.Timestamp;
@@ -61,6 +63,7 @@ public class AsyncDbWriter {
     private final Counter duplicateExecutions;
     private final Counter rejectedRows;
     private final MemoryMappedWalLogger wal;
+    private final ObjectMapper objectMapper;
 
     /**
      * An order write, paired with the state it was enqueued for.
@@ -94,6 +97,7 @@ public class AsyncDbWriter {
     private final ConcurrentLinkedDeque<ProcessedCommand> processedQueue = new ConcurrentLinkedDeque<>();
     private final ConcurrentLinkedDeque<com.emporia.ordermanagement.model.OrderInputEvent> inputEventQueue = new ConcurrentLinkedDeque<>();
     private final ConcurrentLinkedDeque<Execution> executionQueue = new ConcurrentLinkedDeque<>();
+    private final ConcurrentLinkedDeque<OrderDomainEvent> outputQueue = new ConcurrentLinkedDeque<>();
 
     // Pre-allocated reusable batch buffers per thread / flush iteration
     private final PendingOrder[] orderBatchBuffer = new PendingOrder[BATCH_SIZE];
@@ -101,11 +105,24 @@ public class AsyncDbWriter {
     private final ProcessedCommand[] processedBatchBuffer = new ProcessedCommand[BATCH_SIZE];
     private final com.emporia.ordermanagement.model.OrderInputEvent[] inputEventBatchBuffer = new com.emporia.ordermanagement.model.OrderInputEvent[BATCH_SIZE];
     private final Execution[] executionBatchBuffer = new Execution[BATCH_SIZE];
+    private final OrderDomainEvent[] outputBatchBuffer = new OrderDomainEvent[BATCH_SIZE];
 
     private final org.springframework.transaction.support.TransactionTemplate transactionTemplate;
 
     public AsyncDbWriter(TradingOrderRepository orders, OrderEventRepository events, ProcessedCommandRepository processed) {
-        this(orders, events, processed, null, null, null, null, null, null);
+        this(orders, events, processed, null, null, null, null, null, null, null);
+    }
+
+    public AsyncDbWriter(TradingOrderRepository orders, OrderEventRepository events,
+                         ProcessedCommandRepository processed,
+                         com.emporia.ordermanagement.repository.OrderInputEventRepository inputEvents,
+                         JdbcTemplate jdbcTemplate,
+                         MemoryMappedWalLogger wal,
+                         org.springframework.transaction.support.TransactionTemplate transactionTemplate,
+                         io.micrometer.core.instrument.@Nullable MeterRegistry meters,
+                         @Nullable ExecutionRepository executions) {
+        this(orders, events, processed, inputEvents, jdbcTemplate, wal, transactionTemplate,
+                meters, executions, null);
     }
 
     // Marks the constructor Spring injects through. Without it there are two
@@ -122,7 +139,8 @@ public class AsyncDbWriter {
                          MemoryMappedWalLogger wal,
                          org.springframework.transaction.support.TransactionTemplate transactionTemplate,
                          io.micrometer.core.instrument.@Nullable MeterRegistry meters,
-                         @Nullable ExecutionRepository executions) {
+                         @Nullable ExecutionRepository executions,
+                         ObjectMapper objectMapper) {
         this.orders = orders;
         this.events = events;
         this.processed = processed;
@@ -131,6 +149,7 @@ public class AsyncDbWriter {
         this.jdbcTemplate = jdbcTemplate;
         this.wal = wal;
         this.transactionTemplate = transactionTemplate;
+        this.objectMapper = objectMapper;
         io.micrometer.core.instrument.MeterRegistry registry = meters == null ? new SimpleMeterRegistry() : meters;
         this.duplicateCommands = registry.counter("emporia.oms.dedup.duplicate_reached_db");
         this.duplicateOrders = registry.counter("emporia.oms.dedup.duplicate_order_reached_db");
@@ -172,6 +191,11 @@ public class AsyncDbWriter {
 
     public void enqueue(com.emporia.ordermanagement.model.OrderInputEvent inputEvent) {
         if (inputEvent != null) inputEventQueue.addLast(inputEvent);
+    }
+
+    /** Queues the typed venue-boundary event for durable outbox persistence. */
+    public void enqueueOutput(OrderDomainEvent event) {
+        if (event != null) outputQueue.addLast(event);
     }
 
     // Configurable so scripts/perf/wal-recovery-check.sh can widen it well
@@ -241,6 +265,9 @@ public class AsyncDbWriter {
         salvageEach(Arrays.asList(executionBatchBuffer).subList(0, batch.executionCount),
                 this::writeExecutions,
                 row -> "execution " + row.getId() + " reference=" + row.getExecutionReference());
+        salvageEach(Arrays.asList(outputBatchBuffer).subList(0, batch.outputCount),
+                this::writeOutputEvents,
+                row -> "delivery event " + row.eventId());
     }
 
     private <T> void salvageEach(List<T> rows, java.util.function.Consumer<List<T>> write,
@@ -274,7 +301,8 @@ public class AsyncDbWriter {
     }
 
     /**
-     * Reclaims the write-ahead log space covering rows this flush persisted.
+     * Reclaims the write-ahead log space covering rows this flush persisted,
+     * including the durable venue-output outbox rows.
      *
      * <p>Only once the queues are empty: until then some enqueued row is still
      * unwritten, and its log record is what would recover it. Compaction keeps
@@ -286,7 +314,7 @@ public class AsyncDbWriter {
         if (wal == null || !wal.isEnabled()) return;
         if (!orderQueue.isEmpty() || !eventQueue.isEmpty()
                 || !processedQueue.isEmpty() || !inputEventQueue.isEmpty()
-                || !executionQueue.isEmpty()) {
+                || !executionQueue.isEmpty() || !outputQueue.isEmpty()) {
             return;
         }
         wal.compactToSafePoint();
@@ -303,7 +331,8 @@ public class AsyncDbWriter {
                 drain(eventQueue, eventBatchBuffer),
                 drain(processedQueue, processedBatchBuffer),
                 drain(inputEventQueue, inputEventBatchBuffer),
-                drain(executionQueue, executionBatchBuffer));
+                drain(executionQueue, executionBatchBuffer),
+                drain(outputQueue, outputBatchBuffer));
     }
 
     private <T> int drain(ConcurrentLinkedDeque<T> queue, T[] buffer) {
@@ -323,6 +352,7 @@ public class AsyncDbWriter {
         persistProcessed(batch.processedCount);
         persistInputEvents(batch.inputEventCount);
         persistExecutions(batch.executionCount);
+        persistOutputEvents(batch.outputCount);
     }
 
     private void persistOrders(int count) {
@@ -354,6 +384,8 @@ public class AsyncDbWriter {
     }
 
     private void writeProcessed(List<ProcessedCommand> batch) {
+        batch.forEach(command -> command.materializePayload(
+                serializedPayload(command.view(), command.result().payload())));
         if (jdbcTemplate != null) {
             flushProcessedJdbc(batch);
         } else {
@@ -500,7 +532,7 @@ public class AsyncDbWriter {
             ps.setBigDecimal(7, e.getQuantity());
             ps.setBigDecimal(8, e.getPrice());
             ps.setString(9, e.getMessage());
-            ps.setString(10, e.getPayload());
+            ps.setString(10, serializedPayload(e.getView(), e.getPayload()));
             ps.setTimestamp(11, e.getOccurredAt() == null ? null : Timestamp.from(e.getOccurredAt()));
         });
     }
@@ -518,7 +550,7 @@ public class AsyncDbWriter {
             ps.setBoolean(3, p.result().success());
             ps.setInt(4, p.result().status());
             ps.setString(5, p.result().detail());
-            ps.setString(6, p.result().payload());
+            ps.setString(6, serializedPayload(p.view(), p.result().payload()));
             ps.setTimestamp(7, p.getProcessedAt() == null ? null : Timestamp.from(p.getProcessedAt()));
         });
         reportAbsorbedDuplicates(affected, batch);
@@ -593,6 +625,46 @@ public class AsyncDbWriter {
         if (count > 0) writeInputEvents(Arrays.asList(inputEventBatchBuffer).subList(0, count));
     }
 
+    private void persistOutputEvents(int count) {
+        if (count > 0) writeOutputEvents(Arrays.asList(outputBatchBuffer).subList(0, count));
+    }
+
+    private void writeOutputEvents(List<OrderDomainEvent> batch) {
+        if (jdbcTemplate != null) {
+            String sql = """
+                INSERT INTO emporia_order_data.order_delivery_outbox (
+                    event_id, schema_version, command_id, order_id, user_subject, desk_id,
+                    event_type, order_version, order_status, occurred_at, payload
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (event_id) DO NOTHING
+                """;
+            jdbcTemplate.batchUpdate(sql, batch, batch.size(),
+                    (PreparedStatement ps, OrderDomainEvent event) -> {
+                        ps.setObject(1, event.eventId());
+                        ps.setInt(2, event.schemaVersion());
+                        ps.setObject(3, event.commandId());
+                        ps.setObject(4, event.orderId());
+                        ps.setString(5, event.userSubject());
+                        ps.setString(6, event.deskId());
+                        ps.setString(7, event.eventType());
+                        ps.setLong(8, event.orderVersion());
+                        ps.setString(9, event.status() == null ? null : event.status().name());
+                        ps.setTimestamp(10, event.occurredAt() == null ? null : Timestamp.from(event.occurredAt()));
+                        ps.setString(11, serializedPayload(event.view(), event.payload()));
+                    });
+        }
+    }
+
+    private String serializedPayload(Object view, String payload) {
+        if (payload != null) return payload;
+        if (view == null || objectMapper == null) return "{}";
+        try {
+            return objectMapper.writeValueAsString(view);
+        } catch (Exception exception) {
+            throw new IllegalStateException("Could not serialize an output snapshot", exception);
+        }
+    }
+
     private void writeInputEvents(List<com.emporia.ordermanagement.model.OrderInputEvent> batch) {
         if (jdbcTemplate != null) {
             flushInputEventsJdbc(batch);
@@ -604,8 +676,8 @@ public class AsyncDbWriter {
     private void flushInputEventsJdbc(List<com.emporia.ordermanagement.model.OrderInputEvent> batch) {
         String sql = """
             INSERT INTO emporia_order_data.order_input_event (
-                command_id, command_type, user_subject, desk_id, schema_version, payload, received_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                command_id, command_type, user_subject, desk_id, schema_version, payload, received_at, stage
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """;
         jdbcTemplate.batchUpdate(sql, batch, batch.size(), (PreparedStatement ps, com.emporia.ordermanagement.model.OrderInputEvent i) -> {
             ps.setObject(1, i.getCommandId());
@@ -615,6 +687,7 @@ public class AsyncDbWriter {
             ps.setInt(5, i.getSchemaVersion());
             ps.setString(6, i.getPayload());
             ps.setTimestamp(7, i.getReceivedAt() == null ? null : Timestamp.from(i.getReceivedAt()));
+            ps.setString(8, i.getStage().name());
         });
     }
 
@@ -677,14 +750,21 @@ public class AsyncDbWriter {
         private final int processedCount;
         private final int inputEventCount;
         private final int executionCount;
+        private final int outputCount;
 
         private PendingFlushBatch(int orderCount, int eventCount, int processedCount,
                                   int inputEventCount, int executionCount) {
+            this(orderCount, eventCount, processedCount, inputEventCount, executionCount, 0);
+        }
+
+        private PendingFlushBatch(int orderCount, int eventCount, int processedCount,
+                                  int inputEventCount, int executionCount, int outputCount) {
             this.orderCount = orderCount;
             this.eventCount = eventCount;
             this.processedCount = processedCount;
             this.inputEventCount = inputEventCount;
             this.executionCount = executionCount;
+            this.outputCount = outputCount;
         }
 
         private boolean isEmpty() {
@@ -692,7 +772,8 @@ public class AsyncDbWriter {
                     && eventCount == 0
                     && processedCount == 0
                     && inputEventCount == 0
-                    && executionCount == 0;
+                    && executionCount == 0
+                    && outputCount == 0;
         }
 
         private void clearBuffers() {
@@ -701,6 +782,7 @@ public class AsyncDbWriter {
             Arrays.fill(processedBatchBuffer, 0, processedCount, null);
             Arrays.fill(inputEventBatchBuffer, 0, inputEventCount, null);
             Arrays.fill(executionBatchBuffer, 0, executionCount, null);
+            Arrays.fill(outputBatchBuffer, 0, outputCount, null);
         }
     }
 }

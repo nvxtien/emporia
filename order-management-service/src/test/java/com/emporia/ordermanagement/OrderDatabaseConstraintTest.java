@@ -33,7 +33,7 @@ class OrderDatabaseConstraintTest {
 
             flyway.migrate();
 
-            assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("12");
+            assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("14");
             UUID orderId = insertValidOrder(connection);
 
             assertRejected(connection, orderId, """

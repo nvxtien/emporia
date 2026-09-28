@@ -11,36 +11,40 @@ This document details the software design patterns used across the **Emporia Tra
 - **Implementation**: Single reverse-proxy entry point for frontend requests (`/api/*`).
 - **Benefits**: Decouples the React SPA from internal microservices, handles CORS, routes by path/method, and enforces OAuth2/OIDC PKCE token validation.
 
-### Event-Driven Architecture (EDA) & Event Sourcing
-- **Component**: Apache Kafka backplane (`trading-contracts`, `order-management-service`, `execution-service`).
-- **Implementation**: Asynchronous event streams on versioned topics:
-  - `emporia.order.commands.v1` (`OrderCommand`)
-  - `emporia.orders.v1` (`OrderDomainEvent`)
-  - `emporia.order.results.v1` (`OrderCommandResult`)
-  - `emporia.execution.commands.v1` (`ExecutionCommand`)
-- **Benefits**: Decouples order ingress, state machine management, smart order routing, and venue execution.
+### Event-Driven Architecture (EDA)
+- **Component**: In-process OMS event flow and durable PostgreSQL outboxes.
+- **Implementation**: Commands enter the LMAX Disruptor ring; the single writer
+  emits typed domain events to sharded execution dispatch and persists durable
+  delivery records asynchronously.
+- **Benefits**: Keeps the order path deterministic and low-latency while
+  retaining crash recovery and at-least-once output delivery.
 
 ### Choreography Saga Pattern (Distributed Transactions & Compensation)
-- **Component**: Multi-service event flow (`order-management-service` $\rightarrow$ `execution-service` $\rightarrow$ `portfolio-service`), with optional Kafka ingress via `order-command-service`.
-- **Implementation**:
-  - **Choreography**: Each service reacts to incoming Kafka domain events, performs its local database transaction, and publishes downstream events without a central orchestrator.
-  - **Compensating Actions**: If an execution venue rejects an order or if liquidity is exhausted, `execution-service` emits compensating `ExecutionCommand` messages (`REJECT` / `CANCEL`). `order-management-service` handles these by updating order state to `REJECTED`/`CANCELLED` and restoring reserved trader purchasing power.
-- **Benefits**: Maintains data consistency across independent microservices and databases without distributed locks or 2PC protocols.
+- **Component**: In-process OMS execution flow and the portfolio HTTP boundary.
+- **Implementation**: Venue reports re-enter the OMS ring as typed commands;
+  portfolio snapshots use a PostgreSQL outbox and idempotent receipts.
+- **Benefits**: Maintains consistency across service-owned databases without
+  distributed locks or 2PC protocols.
 
 ### Command Query Responsibility Segregation (CQRS)
 - **Component**: Gateway write path into `order-management-service` (commands via Disruptor) vs query/SSE projections on the same service and `market-data-service`.
-- **Implementation**: Browser mutations enter OMS in-process; Kafka remains the async distribution/audit channel (and an optional alternate ingress through `order-command-service`). Queries and blotter streams are served independently of that distribution path.
-- **Benefits**: Keeps the request critical path free of Kafka round-trips while preserving event-driven fan-out to execution and audit.
+- **Implementation**: Browser mutations enter OMS in-process through the
+  Disruptor; queries and blotter streams are served independently from the
+  command path.
+- **Benefits**: Keeps reads and streaming projections from blocking the order
+  state machine.
 
 ### Transactional Outbox & Idempotent Consumer Pattern
-- **Component**: `order-management-service` (`processed_order_command` table) and `execution-service` (`DurableEmporiaPortfolioGateway`).
+- **Component**: `order-management-service` (`processed_order_command` and
+  `order_delivery_outbox`) plus `portfolio-service` receipt handling.
 - **Implementation**:
   - `processed_order_command` records processed command IDs to reject duplicate command deliveries.
   - `DurableEmporiaPortfolioGateway` writes outgoing portfolio snapshots to PostgreSQL outbox tables before HTTP dispatch.
-- **Benefits**: Ensures at-least-once Kafka processing guarantees without duplicate order execution or lost portfolio receipts.
+- **Benefits**: Ensures at-least-once durable delivery without duplicate order
+  execution or lost portfolio receipts.
 
 ### Database-per-Service Pattern
-- **Component**: Service-owned PostgreSQL persistence for `authentication`, `static-data-service`, `user-preferences-service`, `order-management-service`, `execution-service`, and `portfolio-service`.
+- **Component**: Service-owned PostgreSQL persistence for `authentication`, `static-data-service`, `user-preferences-service`, `order-management-service`, and `portfolio-service`.
 - **Implementation**: Docker deployments use an isolated PostgreSQL instance per stateful service. Non-Docker local runs use one local PostgreSQL instance with separate Flyway-managed schemas. No cross-database or cross-schema foreign keys or SQL queries exist.
 - **Benefits**: Independent persistence ownership, independent schema migrations via Flyway, zero tight coupling between services.
 
@@ -49,7 +53,7 @@ This document details the software design patterns used across the **Emporia Tra
 ## 2. Behavioral Design Patterns
 
 ### Strategy Pattern
-- **Component**: `execution-service` (`ExecutionVenueGateway` interface).
+- **Component**: `order-management-service` (`ExecutionVenueGateway` interface).
 - **Implementation**: Pluggable venue execution implementations:
   - `ExchangeCoreExecutionVenueGateway`: High-performance LMAX Disruptor gateway.
   - `FixExecutionVenueGateway`: FIXT 1.1 / FIX 5.0 SP2 protocol gateway.
@@ -65,8 +69,10 @@ This document details the software design patterns used across the **Emporia Tra
 - **Benefits**: Prevents invalid state transitions (e.g. modifying a filled order). Formally verified with TLA+ model checking.
 
 ### Observer / Publish-Subscribe Pattern
-- **Component**: Kafka consumers (`OrderCommandConsumer`), SSE emitters (`OrderStreamService`), gRPC `StreamObserver`.
-- **Implementation**: Pushes live order blotter updates to web browsers via Server-Sent Events (SSE) and streams conflated top-of-book market quotes to execution routing engines via gRPC.
+- **Component**: SSE emitters (`OrderStreamService`) and gRPC `StreamObserver`.
+- **Implementation**: Pushes live order blotter updates to web browsers via
+  Server-Sent Events (SSE) and streams conflated top-of-book market quotes to
+  execution routing engines via gRPC.
 
 ---
 
@@ -78,7 +84,7 @@ This document details the software design patterns used across the **Emporia Tra
 - **Benefits**: Isolates core trading services from external exchange API details.
 
 ### Decorator Pattern
-- **Component**: `DurableEmporiaPortfolioGateway` in `execution-service`.
+- **Component**: `DurableEmporiaPortfolioGateway` in `order-management-service`.
 - **Implementation**: Wraps `HttpEmporiaPortfolioGateway` to add durable outbox queuing and retry persistence over PostgreSQL without modifying the HTTP client.
 - **Benefits**: Extends gateway resilience transparently.
 

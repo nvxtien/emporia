@@ -13,6 +13,7 @@ import com.emporia.ordermanagement.disruptor.DisruptorOrderPipeline;
 import com.emporia.ordermanagement.client.StaticDataClient;
 import com.emporia.ordermanagement.dto.ProcessingOutcome;
 import com.emporia.ordermanagement.model.OrderInputEvent;
+import com.emporia.ordermanagement.model.OrderInputEventStage;
 import com.emporia.ordermanagement.repository.OrderEventRepository;
 import com.emporia.ordermanagement.repository.ProcessedCommandRepository;
 import com.emporia.ordermanagement.repository.TradingOrderRepository;
@@ -21,6 +22,8 @@ import com.emporia.ordermanagement.service.OrderCommandHandler;
 import com.emporia.ordermanagement.service.OrderInputEventRecorder;
 import com.emporia.ordermanagement.service.OrderMetrics;
 import com.emporia.ordermanagement.service.OrderStateCache;
+import com.emporia.ordermanagement.service.CommandDedupIndex;
+import com.emporia.ordermanagement.service.RotatingDedupIndex;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.observation.DefaultMeterObservationHandler;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -62,6 +65,7 @@ class OrderCommandControllerTest {
         observations.observationConfig()
                 .observationHandler(new DefaultMeterObservationHandler(meters));
         disruptorPipeline = new DisruptorOrderPipeline(handler, null, meters, new MemoryMappedWalLogger(null, 1), null, null, "yielding", 0, 0, 0, 0, "", "");
+        disruptorPipeline.setInputEventRecorderForTest(inputRecorder);
         disruptorPipeline.start();
         controller = new OrderCommandController(staticData, handler, disruptorPipeline, inputRecorder, objectMapper, observations);
     }
@@ -143,15 +147,18 @@ class OrderCommandControllerTest {
         ProcessedCommandRepository processed = mock(ProcessedCommandRepository.class);
         AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
         OrderMetrics metrics = new OrderMetrics(new SimpleMeterRegistry());
-        OrderStateCache cache = new OrderStateCache(orders, processed, metrics, null, 1000, 1000);
+        RotatingDedupIndex dedup = new RotatingDedupIndex(java.time.Duration.ofHours(24), 2, 100_000, 0.001);
+        dedup.publishHistory(new CommandDedupIndex(100_000, 0.001));
+        OrderStateCache cache = new OrderStateCache(orders, processed, metrics, dedup, 1000, 1000);
         OrderCommandHandler realHandler = new OrderCommandHandler(orders, objectMapper,
                 observations, metrics, cache, asyncDbWriter);
-        DisruptorOrderPipeline realPipeline = new DisruptorOrderPipeline(
-                realHandler, null, new SimpleMeterRegistry(), new MemoryMappedWalLogger(null, 1),
-                null, null, "yielding", 0, 0, 0, 0, "", "");
+            DisruptorOrderPipeline realPipeline = new DisruptorOrderPipeline(
+                    realHandler, null, new SimpleMeterRegistry(), new MemoryMappedWalLogger(null, 1),
+                    null, null, "yielding", 0, 0, 0, 0, "", "");
         realPipeline.start();
         try {
             OrderInputEventRecorder realRecorder = new OrderInputEventRecorder(asyncDbWriter, objectMapper);
+            realPipeline.setInputEventRecorderForTest(realRecorder);
             OrderCommandController realController = new OrderCommandController(
                     staticData, realHandler, realPipeline, realRecorder, objectMapper, observations);
             OrderCommandController.CreateOrderRequest request = new OrderCommandController.CreateOrderRequest(
@@ -160,7 +167,11 @@ class OrderCommandControllerTest {
 
             realController.create(jwt, "Bearer token", "rest-idem-key", request);
 
-            verify(asyncDbWriter).enqueue(any(OrderInputEvent.class));
+            ArgumentCaptor<OrderInputEvent> inputEvents = ArgumentCaptor.forClass(OrderInputEvent.class);
+            verify(asyncDbWriter, org.mockito.Mockito.times(3)).enqueue(inputEvents.capture());
+            assertThat(inputEvents.getAllValues()).extracting(OrderInputEvent::getStage)
+                    .containsExactly(OrderInputEventStage.RECEIVED,
+                            OrderInputEventStage.ACCEPTED, OrderInputEventStage.APPLIED);
         } finally {
             realPipeline.stop();
         }

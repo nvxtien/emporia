@@ -1,5 +1,5 @@
-// REWORK_NOTE Phase 1_2 baseline: submits orders at a controlled rate so Kafka
-// consumer lag can be measured under known load.
+// REWORK_NOTE Phase 1_2 baseline: submits orders at a controlled rate so
+// request latency can be measured under known load.
 //
 // Run through scripts/perf/run-baseline.sh rather than directly — the wrapper
 // mints the token, enforces the disk budget, and captures Prometheus snapshots.
@@ -374,7 +374,7 @@ export function setup() {
         );
     }
     // Absorbs the known first-request 504: the ephemeral
-    // order-command-service-{uuid} results consumer races its own group join,
+    // the retired request listener raced its own group join,
     // so the very first submit after a restart can time out. That is a
     // readiness race tracked separately, not a load characteristic, and
     // letting it land inside the measurement window would corrupt stage A.

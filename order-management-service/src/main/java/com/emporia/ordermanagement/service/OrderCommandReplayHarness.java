@@ -13,6 +13,7 @@ import tools.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Comparator;
+import com.emporia.ordermanagement.model.OrderInputEventStage;
 
 @Service
 public class OrderCommandReplayHarness {
@@ -81,7 +82,8 @@ public class OrderCommandReplayHarness {
     }
 
     List<ProcessingOutcome> replayAll() {
-        return inputEvents.findAllByOrderBySequenceIdAsc().stream()
+        return inputEvents.findAllByStageInOrderBySequenceIdAsc(
+                        List.of(OrderInputEventStage.ACCEPTED, OrderInputEventStage.APPLIED)).stream()
                 .sorted(BY_SEQUENCE_ID)
                 .map(this::replay)
                 .toList();

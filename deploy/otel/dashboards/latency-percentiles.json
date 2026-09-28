@@ -517,7 +517,7 @@
           "sort": "desc"
         }
       },
-      "description": "Phase 1_2 traced ~1.2s of a 1.24s submit to waiting on the Kafka request/reply round trip, not to downstream processing."
+      "description": "Phase 1_2 traced ~1.2s of a 1.24s submit to waiting on the legacy request/reply round trip, not to downstream processing."
     },
     {
       "id": 7,

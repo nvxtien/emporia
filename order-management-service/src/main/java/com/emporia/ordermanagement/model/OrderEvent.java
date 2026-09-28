@@ -1,6 +1,7 @@
 package com.emporia.ordermanagement.model;
 
 import com.emporia.events.TradingEvents.OrderDomainEvent;
+import com.emporia.events.TradingEvents.OrderView;
 import com.emporia.events.TradingEvents.OrderStatus;
 import com.emporia.events.time.DomainClock;
 import jakarta.persistence.Column;
@@ -46,6 +47,8 @@ public class OrderEvent {
     String message;
     @Column(columnDefinition = "text")
     private String payload;
+    @jakarta.persistence.Transient
+    private OrderView view;
     @Column(name = "occurred_at", nullable = false)
     private Instant occurredAt;
 
@@ -57,9 +60,16 @@ public class OrderEvent {
         this.message = message; this.payload = payload; this.occurredAt = DomainClock.now();
     }
 
+    public OrderEvent(UUID commandId, TradingOrder order, String eventType, String message, OrderView view) {
+        this(commandId, order, eventType, message, (String) null);
+        this.view = view;
+    }
+
     public OrderDomainEvent domainEvent() {
-        return new OrderDomainEvent(SCHEMA_VERSION, id, commandId, order.getId(), order.getUserSubject(),
-                order.getDeskId(), eventType,
-                orderVersion, status, occurredAt, payload);
+        return view == null
+                ? new OrderDomainEvent(SCHEMA_VERSION, id, commandId, order.getId(), order.getUserSubject(),
+                        order.getDeskId(), eventType, orderVersion, status, occurredAt, payload)
+                : new OrderDomainEvent(SCHEMA_VERSION, id, commandId, order.getId(), order.getUserSubject(),
+                        order.getDeskId(), eventType, orderVersion, status, occurredAt, view);
     }
 }

@@ -39,11 +39,18 @@ public class OrderInputEvent {
     private String payload;
     @Column(name = "received_at", nullable = false)
     private Instant receivedAt;
+    @Enumerated(EnumType.STRING)
+    @Column(name = "stage", nullable = false, length = 16)
+    private OrderInputEventStage stage;
 
     protected OrderInputEvent() {
     }
 
     public OrderInputEvent(OrderCommand command, String payload) {
+        this(command, payload, OrderInputEventStage.APPLIED);
+    }
+
+    public OrderInputEvent(OrderCommand command, String payload, OrderInputEventStage stage) {
         this.commandId = command.commandId();
         this.commandType = command.commandType();
         this.userSubject = command.userSubject();
@@ -51,5 +58,6 @@ public class OrderInputEvent {
         this.schemaVersion = command.schemaVersion();
         this.payload = payload;
         this.receivedAt = DomainClock.now();
+        this.stage = stage;
     }
 }

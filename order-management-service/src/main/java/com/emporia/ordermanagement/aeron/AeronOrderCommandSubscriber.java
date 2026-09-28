@@ -7,13 +7,13 @@ import io.aeron.Aeron;
 import io.aeron.Subscription;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
-import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.agrona.DirectBuffer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.ExecutorService;
@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 @Component
 @ConditionalOnProperty(name = "emporia.aeron.intake.enabled", havingValue = "true")
-public class AeronOrderCommandSubscriber implements AutoCloseable {
+public class AeronOrderCommandSubscriber implements AutoCloseable, SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(AeronOrderCommandSubscriber.class);
 
     private final String channel;
@@ -121,7 +121,7 @@ public class AeronOrderCommandSubscriber implements AutoCloseable {
         }
     }
 
-    @PostConstruct
+    @Override
     public void start() {
         if (running.compareAndSet(false, true)) {
             if (subscription != null) {
@@ -132,6 +132,22 @@ public class AeronOrderCommandSubscriber implements AutoCloseable {
                 log.info("Aeron OrderCommand subscriber busy-spin loop started (MAX_PRIORITY)");
             }
         }
+    }
+
+    @Override
+    public boolean isRunning() {
+        return running.get();
+    }
+
+    @Override
+    public boolean isAutoStartup() {
+        return true;
+    }
+
+    /** Starts after the OMS ring so intake never publishes into an unstarted pipeline. */
+    @Override
+    public int getPhase() {
+        return Integer.MAX_VALUE - 2048;
     }
 
     private void busySpinLoop() {
@@ -161,6 +177,11 @@ public class AeronOrderCommandSubscriber implements AutoCloseable {
             if (aeron != null) aeron.close();
             log.info("Aeron OrderCommand subscriber closed");
         }
+    }
+
+    @Override
+    public void stop() {
+        close();
     }
 
     private void awaitIntakeStopped() {

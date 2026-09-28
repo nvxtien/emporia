@@ -47,11 +47,13 @@ public class OrderStreamService {
         List<Subscription> deskSubscriptions = subscriptions.getOrDefault(
                 deskId, new CopyOnWriteArrayList<>());
         if (deskSubscriptions.isEmpty()) return;
-        Object order;
-        try {
-            order = objectMapper.readTree(event.payload());
-        } catch (Exception exception) {
-            return;
+        Object order = event.view();
+        if (order == null) {
+            try {
+                order = objectMapper.readTree(event.payload());
+            } catch (Exception exception) {
+                return;
+            }
         }
         for (Subscription subscription : deskSubscriptions) {
             try {
