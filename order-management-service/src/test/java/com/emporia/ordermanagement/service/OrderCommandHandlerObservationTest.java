@@ -49,13 +49,16 @@ class OrderCommandHandlerObservationTest {
     private final ProcessedCommandRepository processed = mock(ProcessedCommandRepository.class);
     private final MeterRegistry meters = new SimpleMeterRegistry();
     private final ObservationRegistry observations = ObservationRegistry.create();
+    private OrderStateCache cache;
     private OrderCommandHandler handler;
 
     @BeforeEach
     void setUp() {
         observations.observationConfig().observationHandler(new DefaultMeterObservationHandler(meters));
         OrderMetrics metrics = new OrderMetrics(meters);
-        OrderStateCache cache = new OrderStateCache(orders, processed, metrics, null, 1000, 1000);
+        RotatingDedupIndex dedup = new RotatingDedupIndex(java.time.Duration.ofHours(24), 2, 1000, 0.001);
+        dedup.publishHistory(new CommandDedupIndex(1000, 0.001));
+        cache = new OrderStateCache(orders, processed, metrics, dedup, 1000, 1000);
         AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
         handler = new OrderCommandHandler(orders, new ObjectMapper(), observations, metrics, cache, asyncDbWriter);
         when(processed.findById(any())).thenReturn(Optional.empty());
@@ -106,6 +109,7 @@ class OrderCommandHandlerObservationTest {
                 true, 201, "already processed", null);
         when(processed.findById(command.commandId())).thenReturn(Optional.of(new ProcessedCommand(cached)));
         when(events.findByCommandIdOrderByOccurredAtAsc(command.commandId())).thenReturn(List.of());
+        cache.putProcessed(new ProcessedCommand(cached));
 
         handler.handle(command);
 
