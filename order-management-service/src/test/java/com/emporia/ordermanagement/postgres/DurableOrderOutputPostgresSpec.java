@@ -102,6 +102,29 @@ public class DurableOrderOutputPostgresSpec {
                 Long.class, old.eventId())).isZero();
     }
 
+    @Test
+    void aFreshDispatcherReclaimsAnExpiredLeaseAfterProcessLoss() {
+        OrderDomainEvent event = event(UUID.randomUUID(), "CREATED");
+        insert(event);
+        jdbc.update("""
+                UPDATE emporia_order_data.order_delivery_outbox
+                SET status = 'IN_FLIGHT',
+                    attempt_count = 1,
+                    lease_until = CURRENT_TIMESTAMP - INTERVAL '1 second'
+                WHERE event_id = ?
+                """, event.eventId());
+        when(dispatcher.dispatch(any())).thenReturn(CompletableFuture.completedFuture(null));
+
+        output().poll();
+
+        assertThat(jdbc.queryForObject(
+                "SELECT status FROM emporia_order_data.order_delivery_outbox WHERE event_id = ?",
+                String.class, event.eventId())).isEqualTo("DELIVERED");
+        assertThat(jdbc.queryForObject(
+                "SELECT attempt_count FROM emporia_order_data.order_delivery_outbox WHERE event_id = ?",
+                Integer.class, event.eventId())).isEqualTo(2);
+    }
+
     private DurableOrderOutputDispatcher output() {
         return new DurableOrderOutputDispatcher(jdbc, dispatcher, new SimpleMeterRegistry(), 7);
     }

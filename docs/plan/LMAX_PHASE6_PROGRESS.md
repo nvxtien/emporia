@@ -14,11 +14,12 @@
 ## Verification
 
 - Recovery warm-up, Aeron intake, and cross-command interleaving tests pass.
+- PostgreSQL outbox integration passes, including reclaiming an expired lease
+  after simulated process loss.
 - `git diff --check` passes.
 
 ## Next
 
-- Run the full module suite in an environment with Maven dependencies cached and
-  Byte Buddy self-attach enabled.
-- Keep the documented reactor-wide Mockito/JDK 21 limitation separate from OMS
-  recovery changes.
+- Run the full module suite in CI or an environment with all Maven plugins
+  cached; the local reactor-wide run is still affected by Mockito/JDK 21
+  self-attach when the agent setup is bypassed.
