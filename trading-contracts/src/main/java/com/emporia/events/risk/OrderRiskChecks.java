@@ -16,7 +16,7 @@ import java.util.Set;
  * <p>Two overloads are provided:
  * <ul>
  *   <li>{@link #evaluate(OrderType, BigDecimal, BigDecimal, BigDecimal, BigDecimal, BigDecimal)} —
- *       boundary-facing path (HTTP controllers, Kafka consumers receiving external input).
+ *       boundary-facing path (HTTP controllers and binary intake receiving external input).
  *       Accepts {@link BigDecimal} and delegates to the long path after scaling.</li>
  *   <li>{@link #evaluate(OrderType, long, long, long, long, long)} —
  *       hot-path, GC-free version operating entirely on fixed-point {@code long} (scale 6).
@@ -119,7 +119,7 @@ public final class OrderRiskChecks {
      * Result of a risk evaluation.
      *
      * <p>{@code validatedPrice} is the {@link BigDecimal} form, populated lazily for
-     * callers that need it (controllers, Kafka publishers). {@code validatedPriceScaled}
+     * callers that need it (controllers and publishers). {@code validatedPriceScaled}
      * is the raw fixed-point long, available at zero cost on all outcomes.
      */
     public record RiskOutcome(boolean allowed, int status, String reason, String message,

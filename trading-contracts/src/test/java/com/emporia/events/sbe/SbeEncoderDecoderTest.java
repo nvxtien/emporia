@@ -156,23 +156,6 @@ class SbeEncoderDecoderTest {
     }
 
     @Test
-    void serializerAndDeserializerIntegration() {
-        SbeKafkaSerializer serializer = new SbeKafkaSerializer();
-        SbeKafkaDeserializer deserializer = new SbeKafkaDeserializer();
-
-        OrderDomainEvent event = new OrderDomainEvent(
-                1, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
-                "trader", "desk", "LIVE", 1L, OrderStatus.LIVE, Instant.now(), "{}"
-        );
-
-        byte[] serialized = serializer.serialize("emporia.orders.v1", event);
-        Object deserialized = deserializer.deserialize("emporia.orders.v1", serialized);
-
-        assertThat(deserialized).isInstanceOf(OrderDomainEvent.class);
-        assertThat(((OrderDomainEvent) deserialized).orderVersion()).isEqualTo(1L);
-    }
-
-    @Test
     void decodeThrowsOnWrongMsgTypeForExecutionCommand() {
         UUID commandId = UUID.randomUUID();
         UUID orderId = UUID.randomUUID();

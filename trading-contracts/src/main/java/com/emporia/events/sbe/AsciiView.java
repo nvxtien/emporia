@@ -6,9 +6,9 @@ import java.nio.charset.StandardCharsets;
  * Zero-allocation, zero-copy flyweight view over a UTF-8 / ASCII byte region.
  *
  * <h2>Purpose</h2>
- * <p>Every SBE message decoded from Kafka today allocates a fresh {@code byte[]} and
+ * <p>Every SBE message decoded from the Aeron intake path allocates a fresh {@code byte[]} and
  * a {@code String} per variable-length field — two heap objects and a full UTF-8 decode
- * that neither the Kafka consumer nor the domain handler may ever need as a {@code String}.
+ * that neither the binary intake nor the domain handler may ever need as a {@code String}.
  * {@code AsciiView} wraps the <em>original</em> message buffer in-place: no copy, no
  * decode, no allocation beyond the flyweight object itself (~16 bytes on-heap for the
  * three fields below on a modern JVM).

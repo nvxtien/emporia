@@ -20,7 +20,6 @@ backend service, and assigns an `X-Request-Id`.
 `/api` is removed before forwarding.
 
 Mutating order routes land on `order-management-service` (Disruptor hot path).
-`order-command-service` is an optional Kafka ingress and is not used by gateway.
 
 ## Run
 

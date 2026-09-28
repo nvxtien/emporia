@@ -44,7 +44,7 @@ import java.util.UUID;
  * </ul>
  *
  * <h2>Thread safety</h2>
- * <p>Not thread-safe. Each Kafka listener thread holds its own view.
+ * <p>Not thread-safe. Each Aeron intake thread holds its own view.
  * The backing buffer must not be mutated while the view is live.
  *
  * <h2>Hot-path consumer pattern</h2>
@@ -407,7 +407,7 @@ public final class SbeView {
      * Materialises a full {@link OrderDomainEvent} domain record.
      *
      * <p>Call only when the event must reach a component that requires a domain record
-     * (Kafka publisher, JPA handler). Check {@link #eventType()} first to avoid
+     * (Aeron publisher, JPA handler). Check {@link #eventType()} first to avoid
      * materialising events the consumer discards.
      */
     public OrderDomainEvent toOrderDomainEvent() {
