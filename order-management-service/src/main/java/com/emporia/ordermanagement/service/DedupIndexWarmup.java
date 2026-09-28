@@ -3,33 +3,25 @@ package com.emporia.ordermanagement.service;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
-import org.springframework.context.event.EventListener;
+import org.springframework.context.SmartLifecycle;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
-import jakarta.annotation.PreDestroy;
-
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 /**
- * Loads the horizon's identifiers in the background and hands the result to
+ * Loads the horizon's identifiers during phased startup and hands the result to
  * {@link RotatingDedupIndex}, after which the hot path answers deduplication
  * and execution-reference questions from memory.
  *
- * <h2>Why the load runs after startup rather than during it</h2>
- * <p>Blocking startup would be simpler, but the service would refuse orders for
- * the duration. Running afterwards keeps startup responsive; until the load
- * finishes, BLP commands return a retryable not-ready response.
+ * <h2>Why the load runs before the OMS ring</h2>
+ * <p>The BLP must not accept commands while its dedup index is incomplete.
+ * Startup is deliberately blocked for this bounded durable read; a failure
+ * leaves the index unpublished and commands fail closed.
  *
  * <h2>Ordering</h2>
- * <p>{@link ApplicationReadyEvent} fires after {@code DisruptorOrderPipeline}'s
- * {@code @PostConstruct}, which has by then replayed the write-ahead log through
- * the handler - so commands accepted but unwritten before the last stop are
- * already in the live filter. The load adds the durable history. Publishing
- * happens only once both are in, because a filter missing entries reads as
- * "never seen", and that is how a duplicate order gets accepted.
+ * <p>The lifecycle phase runs after live-order warmup and before
+ * {@code DisruptorOrderPipeline}, so the durable history is published before
+ * WAL replay and live intake.
  *
  * <h2>Concurrency</h2>
  * <p>The load fills its own filter rather than the live one. Two threads writing
@@ -44,20 +36,14 @@ import java.util.concurrent.Executors;
  * This load exists only to recover what happened before the process started.
  */
 @Component
-public class DedupIndexWarmup {
+public class DedupIndexWarmup implements SmartLifecycle {
 
     private static final Logger log = LoggerFactory.getLogger(DedupIndexWarmup.class);
 
     private final @Nullable RotatingDedupIndex dedup;
     private final OrderStateCache cache;
     private final JdbcTemplate jdbcTemplate;
-    // Owned for the bean's life and shut down in @PreDestroy, rather than
-    // created inside the listener where it would outlive its only reference.
-    private final ExecutorService loader = Executors.newSingleThreadExecutor(runnable -> {
-        Thread thread = new Thread(runnable, "dedup-index-warmup");
-        thread.setDaemon(true);
-        return thread;
-    });
+    private volatile boolean running;
 
     public DedupIndexWarmup(@Nullable RotatingDedupIndex dedup, JdbcTemplate jdbcTemplate, OrderStateCache cache) {
         this.dedup = dedup;
@@ -65,26 +51,44 @@ public class DedupIndexWarmup {
         this.cache = cache;
     }
 
-    @EventListener(ApplicationReadyEvent.class)
+    @Override
+    public synchronized void start() {
+        if (running) return;
+        warmUp();
+        running = true;
+    }
+
     public void warmUp() {
         if (dedup == null || jdbcTemplate == null) {
             log.info("Deduplication index disabled; hot-path commands remain unavailable");
             return;
         }
-        loader.execute(this::loadAndPublish);
+        loadAndPublish();
     }
 
     /**
-     * Stops a load still running when the service shuts down.
-     *
-     * <p>{@code shutdownNow} rather than {@code shutdown}: the load is a long
-     * streaming read and waiting for it would hold up shutdown for no gain. An
-     * abandoned load is never published, so stopping midway loses nothing but
-     * the work already done - the hot path remains fail-closed and retryable.
+     * Stops the lifecycle. A failed startup load is never published, so the
+     * hot path remains fail-closed and retryable.
      */
-    @PreDestroy
+    @Override
     public void stop() {
-        loader.shutdownNow();
+        running = false;
+    }
+
+    @Override
+    public boolean isRunning() {
+        return running;
+    }
+
+    @Override
+    public boolean isAutoStartup() {
+        return true;
+    }
+
+    /** Starts after live-order warmup and before the OMS ring. */
+    @Override
+    public int getPhase() {
+        return Integer.MAX_VALUE - 6144;
     }
 
     private void loadAndPublish() {

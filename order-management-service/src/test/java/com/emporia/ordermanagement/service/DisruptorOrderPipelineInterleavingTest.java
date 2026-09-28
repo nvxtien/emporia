@@ -23,6 +23,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
@@ -53,9 +54,16 @@ class DisruptorOrderPipelineInterleavingTest {
     private final ExecutionRepository executions = mock(ExecutionRepository.class);
     private final ProcessedCommandRepository processed = mock(ProcessedCommandRepository.class);
     private final OrderMetrics metrics = new OrderMetrics(new SimpleMeterRegistry());
-    private final OrderStateCache cache = new OrderStateCache(orders, processed, metrics, null, 1000, 1000);
+    private final RotatingDedupIndex dedup = readyDedup();
+    private final OrderStateCache cache = new OrderStateCache(orders, processed, metrics, dedup, 1000, 1000);
     private final AsyncDbWriter asyncDbWriter = mock(AsyncDbWriter.class);
     private DisruptorOrderPipeline pipeline;
+
+    private static RotatingDedupIndex readyDedup() {
+        RotatingDedupIndex index = new RotatingDedupIndex(Duration.ofHours(24), 2, 1_000, 0.001);
+        index.publishHistory(new CommandDedupIndex(1_000, 0.001));
+        return index;
+    }
 
     @BeforeEach
     void setUp() {
@@ -67,6 +75,9 @@ class DisruptorOrderPipelineInterleavingTest {
         // none of them ever index a child, so the real index answers exactly
         // as empty as the mocked fallback did.
         cache.markLiveSetComplete();
+        // The production lifecycle now publishes this state before the OMS ring
+        // starts; keep this direct pipeline fixture at the same recovered state.
+        cache.markExecutionReferencesReady();
         OrderCommandHandler orderHandler = new OrderCommandHandler(
                 orders, new ObjectMapper(), ObservationRegistry.NOOP, metrics, cache, asyncDbWriter);
         ExecutionCommandHandler executionHandler = new ExecutionCommandHandler(
